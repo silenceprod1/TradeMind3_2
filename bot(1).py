@@ -1,6 +1,9 @@
 import asyncio
 import json
 import os
+import io
+import struct
+import zlib
 from datetime import datetime
 
 from telegram import (
@@ -8,6 +11,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     BotCommand,
+    InputFile,
 )
 from telegram.ext import (
     Application,
@@ -412,6 +416,7 @@ def build_analysis(symbol):
     result["price"] = price
     result["major_levels"] = major_levels
     result["sweep"] = sweep
+    result["candles_5m"] = candles_5m
 
     return result
 
@@ -479,7 +484,759 @@ def find_first_ready(results):
 
 
 # =========================================================
-# SCENARIO / CHART INFO
+# SIMPLE PNG ENGINE
+# Без matplotlib / Pillow / других библиотек
+# =========================================================
+
+def png_chunk(chunk_type, data):
+    return (
+        struct.pack(
+            ">I",
+            len(data)
+        )
+        + chunk_type
+        + data
+        + struct.pack(
+            ">I",
+            zlib.crc32(
+                chunk_type + data
+            ) & 0xffffffff
+        )
+    )
+
+
+def make_png(width, height, pixels):
+
+    raw = bytearray()
+
+    for row in pixels:
+        raw.append(0)
+        raw.extend(row)
+
+    compressed = zlib.compress(
+        bytes(raw),
+        6
+    )
+
+    png = bytearray()
+
+    png.extend(
+        b"\x89PNG\r\n\x1a\n"
+    )
+
+    png.extend(
+        png_chunk(
+            b"IHDR",
+            struct.pack(
+                ">IIBBBBB",
+                width,
+                height,
+                8,
+                2,
+                0,
+                0,
+                0
+            )
+        )
+    )
+
+    png.extend(
+        png_chunk(
+            b"IDAT",
+            compressed
+        )
+    )
+
+    png.extend(
+        png_chunk(
+            b"IEND",
+            b""
+        )
+    )
+
+    return bytes(png)
+
+
+def new_canvas(width, height, color):
+    row = bytearray(
+        color * width
+    )
+
+    return [
+        bytearray(row)
+        for _ in range(height)
+    ]
+
+
+def set_pixel(pixels, x, y, color):
+
+    height = len(pixels)
+    width = len(pixels[0]) // 3
+
+    if (
+        x < 0
+        or y < 0
+        or x >= width
+        or y >= height
+    ):
+        return
+
+    index = x * 3
+
+    pixels[y][index:index + 3] = bytes(
+        color
+    )
+
+
+def draw_line(
+    pixels,
+    x1,
+    y1,
+    x2,
+    y2,
+    color,
+    thickness=1
+):
+
+    dx = x2 - x1
+    dy = y2 - y1
+
+    steps = max(
+        abs(dx),
+        abs(dy),
+        1
+    )
+
+    for i in range(steps + 1):
+
+        x = int(
+            x1 + dx * i / steps
+        )
+
+        y = int(
+            y1 + dy * i / steps
+        )
+
+        radius = max(
+            0,
+            thickness // 2
+        )
+
+        for xx in range(
+            x - radius,
+            x + radius + 1
+        ):
+
+            for yy in range(
+                y - radius,
+                y + radius + 1
+            ):
+
+                set_pixel(
+                    pixels,
+                    xx,
+                    yy,
+                    color
+                )
+
+
+def draw_rect(
+    pixels,
+    x1,
+    y1,
+    x2,
+    y2,
+    color
+):
+
+    if x1 > x2:
+        x1, x2 = x2, x1
+
+    if y1 > y2:
+        y1, y2 = y2, y1
+
+    for y in range(
+        max(0, y1),
+        min(len(pixels), y2 + 1)
+    ):
+
+        for x in range(
+            max(0, x1),
+            min(len(pixels[0]) // 3, x2 + 1)
+        ):
+
+            set_pixel(
+                pixels,
+                x,
+                y,
+                color
+            )
+
+
+def candle_value(candle, key):
+
+    value = candle.get(key)
+
+    if value is None:
+
+        aliases = {
+            "open": ["o"],
+            "high": ["h"],
+            "low": ["l"],
+            "close": ["c"],
+            "open_time": [
+                "time",
+                "timestamp"
+            ]
+        }
+
+        for alias in aliases.get(
+            key,
+            []
+        ):
+
+            if alias in candle:
+                value = candle[alias]
+                break
+
+    try:
+        return float(value)
+
+    except Exception:
+        return None
+
+
+def render_chart_png(
+    coin,
+    result
+):
+
+    candles = result.get(
+        "candles_5m",
+        []
+    )
+
+    price = result.get(
+        "price"
+    )
+
+    levels = result.get(
+        "major_levels",
+        []
+    )
+
+    sweep = result.get(
+        "sweep"
+    )
+
+    entry = result.get(
+        "entry"
+    )
+
+    sl = result.get(
+        "sl"
+    )
+
+    tp = result.get(
+        "tp"
+    )
+
+    # -----------------------------------------------------
+    # Берём последние 80 свечей
+    # -----------------------------------------------------
+
+    valid_candles = []
+
+    for candle in candles:
+
+        o = candle_value(
+            candle,
+            "open"
+        )
+
+        h = candle_value(
+            candle,
+            "high"
+        )
+
+        l = candle_value(
+            candle,
+            "low"
+        )
+
+        c = candle_value(
+            candle,
+            "close"
+        )
+
+        if None in (
+            o,
+            h,
+            l,
+            c
+        ):
+            continue
+
+        valid_candles.append({
+            "open": o,
+            "high": h,
+            "low": l,
+            "close": c
+        })
+
+    valid_candles = valid_candles[-80:]
+
+    if not valid_candles:
+
+        raise Exception(
+            "Нет 5M свечей для графика"
+        )
+
+    # -----------------------------------------------------
+    # Размер
+    # -----------------------------------------------------
+
+    width = 1200
+    height = 700
+
+    left = 60
+    right = 60
+    top = 40
+    bottom = 40
+
+    chart_width = (
+        width
+        - left
+        - right
+    )
+
+    chart_height = (
+        height
+        - top
+        - bottom
+    )
+
+    # -----------------------------------------------------
+    # Цвета
+    # -----------------------------------------------------
+
+    background = (
+        14,
+        18,
+        24
+    )
+
+    grid = (
+        45,
+        52,
+        62
+    )
+
+    bullish = (
+        50,
+        210,
+        130
+    )
+
+    bearish = (
+        235,
+        80,
+        90
+    )
+
+    current_color = (
+        80,
+        170,
+        255
+    )
+
+    high_color = (
+        240,
+        80,
+        90
+    )
+
+    low_color = (
+        50,
+        210,
+        130
+    )
+
+    sweep_color = (
+        255,
+        170,
+        50
+    )
+
+    entry_color = (
+        255,
+        215,
+        70
+    )
+
+    sl_color = (
+        240,
+        80,
+        90
+    )
+
+    tp_color = (
+        80,
+        220,
+        150
+    )
+
+    pixels = new_canvas(
+        width,
+        height,
+        background
+    )
+
+    # -----------------------------------------------------
+    # Диапазон
+    # -----------------------------------------------------
+
+    all_values = []
+
+    for candle in valid_candles:
+
+        all_values.extend([
+            candle["high"],
+            candle["low"]
+        ])
+
+    for level in levels:
+
+        try:
+            all_values.append(
+                float(
+                    level.get("price")
+                )
+            )
+        except Exception:
+            pass
+
+    for value in (
+        price,
+        entry,
+        sl,
+        tp
+    ):
+
+        if value is not None:
+
+            try:
+                all_values.append(
+                    float(value)
+                )
+            except Exception:
+                pass
+
+    min_price = min(all_values)
+    max_price = max(all_values)
+
+    if max_price == min_price:
+
+        max_price += 1
+        min_price -= 1
+
+    padding = (
+        max_price - min_price
+    ) * 0.08
+
+    max_price += padding
+    min_price -= padding
+
+    def price_to_y(value):
+
+        ratio = (
+            max_price - value
+        ) / (
+            max_price - min_price
+        )
+
+        return int(
+            top
+            + ratio * chart_height
+        )
+
+    # -----------------------------------------------------
+    # Сетка
+    # -----------------------------------------------------
+
+    for i in range(1, 8):
+
+        y = (
+            top
+            + int(
+                chart_height
+                * i
+                / 8
+            )
+        )
+
+        draw_line(
+            pixels,
+            left,
+            y,
+            width - right,
+            y,
+            grid,
+            1
+        )
+
+    # -----------------------------------------------------
+    # Major liquidity
+    # -----------------------------------------------------
+
+    for level in levels:
+
+        try:
+
+            level_price = float(
+                level.get("price")
+            )
+
+        except Exception:
+            continue
+
+        y = price_to_y(
+            level_price
+        )
+
+        if "HIGH" in level.get(
+            "type",
+            ""
+        ):
+
+            color = high_color
+
+        else:
+
+            color = low_color
+
+        draw_line(
+            pixels,
+            left,
+            y,
+            width - right,
+            y,
+            color,
+            2
+        )
+
+    # -----------------------------------------------------
+    # Свечи
+    # -----------------------------------------------------
+
+    count = len(
+        valid_candles
+    )
+
+    candle_space = (
+        chart_width
+        / count
+    )
+
+    candle_width = max(
+        3,
+        int(
+            candle_space * 0.55
+        )
+    )
+
+    for i, candle in enumerate(
+        valid_candles
+    ):
+
+        center_x = int(
+            left
+            + (
+                i + 0.5
+            ) * candle_space
+        )
+
+        open_y = price_to_y(
+            candle["open"]
+        )
+
+        high_y = price_to_y(
+            candle["high"]
+        )
+
+        low_y = price_to_y(
+            candle["low"]
+        )
+
+        close_y = price_to_y(
+            candle["close"]
+        )
+
+        color = (
+            bullish
+            if candle["close"]
+            >= candle["open"]
+            else bearish
+        )
+
+        # Wick
+        draw_line(
+            pixels,
+            center_x,
+            high_y,
+            center_x,
+            low_y,
+            color,
+            1
+        )
+
+        # Body
+        body_top = min(
+            open_y,
+            close_y
+        )
+
+        body_bottom = max(
+            open_y,
+            close_y
+        )
+
+        if body_bottom == body_top:
+            body_bottom += 2
+
+        draw_rect(
+            pixels,
+            center_x
+            - candle_width // 2,
+            body_top,
+            center_x
+            + candle_width // 2,
+            body_bottom,
+            color
+        )
+
+    # -----------------------------------------------------
+    # Current price
+    # -----------------------------------------------------
+
+    if price is not None:
+
+        try:
+
+            y = price_to_y(
+                float(price)
+            )
+
+            draw_line(
+                pixels,
+                left,
+                y,
+                width - right,
+                y,
+                current_color,
+                2
+            )
+
+        except Exception:
+            pass
+
+    # -----------------------------------------------------
+    # Sweep
+    # -----------------------------------------------------
+
+    if sweep:
+
+        sweep_price = (
+            sweep.get("price")
+            or sweep.get("level")
+        )
+
+        try:
+
+            sweep_price = float(
+                sweep_price
+            )
+
+            y = price_to_y(
+                sweep_price
+            )
+
+            draw_line(
+                pixels,
+                left,
+                y,
+                width - right,
+                y,
+                sweep_color,
+                3
+            )
+
+        except Exception:
+            pass
+
+    # -----------------------------------------------------
+    # Entry / SL / TP
+    # -----------------------------------------------------
+
+    setup_lines = [
+        (
+            entry,
+            entry_color,
+            3
+        ),
+        (
+            sl,
+            sl_color,
+            3
+        ),
+        (
+            tp,
+            tp_color,
+            3
+        ),
+    ]
+
+    for value, color, thickness in setup_lines:
+
+        if value is None:
+            continue
+
+        try:
+
+            y = price_to_y(
+                float(value)
+            )
+
+            draw_line(
+                pixels,
+                left,
+                y,
+                width - right,
+                y,
+                color,
+                thickness
+            )
+
+        except Exception:
+            pass
+
+    # -----------------------------------------------------
+    # Создание PNG
+    # -----------------------------------------------------
+
+    png = make_png(
+        width,
+        height,
+        pixels
+    )
+
+    return io.BytesIO(
+        png
+    )
+
+
+# =========================================================
+# CHART STATUS
 # =========================================================
 
 def get_chart_status(result):
@@ -494,6 +1251,7 @@ def get_chart_status(result):
     )
 
     if stage == "READY":
+
         return (
             "🟢 МОЖНО ВХОДИТЬ",
             direction
@@ -503,12 +1261,14 @@ def get_chart_status(result):
         "CONFIRMED",
         "15M_CONFIRMED"
     ):
+
         return (
             "🟡 ЖДЁМ 5M TRIGGER",
             direction
         )
 
     if stage == "SWEPT":
+
         return (
             "🟠 ЖДЁМ 15M CONFIRMATION",
             direction
@@ -520,7 +1280,7 @@ def get_chart_status(result):
     )
 
 
-def build_chart_info(
+def build_chart_caption(
     coin,
     result
 ):
@@ -552,13 +1312,22 @@ def build_chart_info(
         "direction"
     )
 
+    status, _ = get_chart_status(
+        result
+    )
+
     lines = [
         f"📈 <b>TRADEMIND — {coin}</b>",
         "",
         f"💰 Цена: <b>{format_price(price)}</b>",
-        f"{stage_icon(stage)} "
-        f"<b>{stage_text(stage)}</b>",
+        f"{status}",
         f"⭐ Score: <b>{score}/100</b>",
+        "",
+        "💧 <b>MAJOR LIQUIDITY</b>",
+        format_levels(
+            levels,
+            price
+        ),
     ]
 
     if direction:
@@ -569,45 +1338,24 @@ def build_chart_info(
             f"<b>{direction}</b>"
         ])
 
-    lines.extend([
-        "",
-        "💧 <b>MAJOR LIQUIDITY</b>",
-        format_levels(
-            levels,
-            price
-        ),
-        ""
-    ])
-
-    # -----------------------------------------------------
-    # WAIT
-    # -----------------------------------------------------
-
     if stage == "WAIT":
 
         lines.extend([
-            "⏳ <b>СЕЙЧАС ЖДЁМ:</b>",
             "",
-            "1️⃣ Major liquidity",
-            "2️⃣ Sweep",
-            "3️⃣ 15M confirmation",
-            "4️⃣ 5M trigger",
+            "⏳ <b>ЖДЁМ:</b>",
+            "Major Liquidity → Sweep",
             "",
             "❌ В середине движения не входим."
         ])
 
-    # -----------------------------------------------------
-    # SWEEP
-    # -----------------------------------------------------
-
     elif stage == "SWEPT":
 
         lines.extend([
-            "💧 <b>SWEEP ОБНАРУЖЕН</b>",
             "",
+            "💧 <b>SWEEP ОБНАРУЖЕН</b>",
             "✅ Крупная ликвидность снята",
             "⏳ Ждём 15M confirmation",
-            "❌ Вход пока запрещён"
+            "❌ Вход запрещён"
         ])
 
         if sweep:
@@ -621,13 +1369,9 @@ def build_chart_info(
 
                 lines.extend([
                     "",
-                    f"Уровень sweep: "
+                    f"Sweep: "
                     f"<b>{format_price(sweep_price)}</b>"
                 ])
-
-    # -----------------------------------------------------
-    # 15M
-    # -----------------------------------------------------
 
     elif stage in (
         "CONFIRMED",
@@ -635,38 +1379,40 @@ def build_chart_info(
     ):
 
         lines.extend([
+            "",
             "✅ Sweep",
             "✅ 15M confirmation",
-            "⏳ Ждём 5M trigger",
-            "❌ Вход пока запрещён"
+            "⏳ <b>ЖДЁМ 5M TRIGGER</b>",
+            "❌ Вход запрещён"
         ])
-
-    # -----------------------------------------------------
-    # READY
-    # -----------------------------------------------------
 
     elif stage == "READY":
 
         lines.extend([
+            "",
             "🔥 <b>ПОЛНОЕ ПОДТВЕРЖДЕНИЕ</b>",
             "",
-            f"Entry: "
-            f"<b>{format_price(result.get('entry'))}</b>",
-            f"SL: "
-            f"<b>{format_price(result.get('sl'))}</b>",
-            f"TP: "
-            f"<b>{format_price(result.get('tp'))}</b>",
+            f"Entry: <b>{format_price(result.get('entry'))}</b>",
+            f"SL: <b>{format_price(result.get('sl'))}</b>",
+            f"TP: <b>{format_price(result.get('tp'))}</b>",
             "",
-            "RR: <b>1:2</b>"
+            "RR: <b>1:2</b>",
+            "",
+            "🟢 <b>МОЖНО ВХОДИТЬ</b>"
         ])
 
     lines.extend([
         "",
-        "1H → MAJOR LIQUIDITY → SWEEP → 15M → 5M"
+        "5M • последние свечи",
+        "1H MAJOR → SWEEP → 15M → 5M"
     ])
 
     return "\n".join(lines)
 
+
+# =========================================================
+# SEND CHART
+# =========================================================
 
 async def send_chart(
     message,
@@ -679,13 +1425,24 @@ async def send_chart(
             COINS[coin]
         )
 
-        text = build_chart_info(
+        image = render_chart_png(
             coin,
             result
         )
 
-        await message.reply_text(
-            text,
+        image.seek(0)
+
+        caption = build_chart_caption(
+            coin,
+            result
+        )
+
+        await message.reply_photo(
+            photo=InputFile(
+                image,
+                filename=f"{coin.lower()}_5m.png"
+            ),
+            caption=caption,
             parse_mode="HTML",
             reply_markup=chart_coin_keyboard(
                 coin
@@ -695,7 +1452,7 @@ async def send_chart(
     except Exception as e:
 
         print(
-            f"CHART INFO ERROR {coin}: {e}"
+            f"CHART ERROR {coin}: {e}"
         )
 
         await message.reply_text(
@@ -1018,7 +1775,7 @@ async def start(
 ):
 
     text = (
-        "🤖 <b>TRADEMIND 3.6</b>\n\n"
+        "🤖 <b>TRADEMIND 3.7</b>\n\n"
         "Мониторинг:\n"
         "• BTC\n"
         "• ETH\n"
@@ -1615,7 +2372,7 @@ async def callbacks(
     if data == "start":
 
         await query.edit_message_text(
-            "🤖 <b>TRADEMIND 3.6</b>\n\n"
+            "🤖 <b>TRADEMIND 3.7</b>\n\n"
             "Выбери действие:",
             parse_mode="HTML",
             reply_markup=main_keyboard()
@@ -1693,7 +2450,7 @@ async def callbacks(
         return
 
     # -------------------------------------------------------
-    # CHART / SCENARIO
+    # CHART
     # -------------------------------------------------------
 
     if data.startswith("chart_"):
@@ -2068,7 +2825,7 @@ def main():
     )
 
     print(
-        "TradeMind 3.6 started."
+        "TradeMind 3.7 started."
     )
 
     application.run_polling()
