@@ -99,6 +99,9 @@ def default_state():
         "active_entry": None,
         "active_sl": None,
         "active_tp": None,
+        "active_rr": None,
+        "active_tp_reason": None,
+        "active_sweep_extreme": None,
         "active_score": None,
         "active_stage": None,
         "last_alert": None,
@@ -273,6 +276,16 @@ def format_price(price):
     return f"${price:,.6f}"
 
 
+def format_rr(rr):
+    if rr is None:
+        return "N/A"
+
+    try:
+        return f"1:{float(rr):.2f}"
+    except Exception:
+        return "N/A"
+
+
 def format_levels(levels, price):
     if not levels:
         return "💧 Крупные уровни не найдены."
@@ -392,16 +405,29 @@ def build_analysis(symbol):
         "candles_5m"
     ]
 
+    # -----------------------------------------------------
+    # Только крупная 1H ликвидность
+    # -----------------------------------------------------
+
     major_levels = find_major_liquidity(
         candles_1h,
         price,
         max_levels=6
     )
 
+    # -----------------------------------------------------
+    # Sweep только относительно major liquidity
+    # -----------------------------------------------------
+
     sweep = detect_sweep(
         candles_5m,
         major_levels
     )
+
+    # -----------------------------------------------------
+    # ВАЖНО:
+    # major_levels передаются прямо в strategy.analyze()
+    # -----------------------------------------------------
 
     result = analyze(
         candles_1h=candles_1h,
@@ -485,7 +511,7 @@ def find_first_ready(results):
 
 # =========================================================
 # SIMPLE PNG ENGINE
-# Без matplotlib / Pillow / других библиотек
+# Без matplotlib / Pillow
 # =========================================================
 
 def png_chunk(chunk_type, data):
@@ -662,7 +688,10 @@ def draw_rect(
 
         for x in range(
             max(0, x1),
-            min(len(pixels[0]) // 3, x2 + 1)
+            min(
+                len(pixels[0]) // 3,
+                x2 + 1
+            )
         ):
 
             set_pixel(
@@ -741,10 +770,6 @@ def render_chart_png(
         "tp"
     )
 
-    # -----------------------------------------------------
-    # Берём последние 80 свечей
-    # -----------------------------------------------------
-
     valid_candles = []
 
     for candle in candles:
@@ -792,10 +817,6 @@ def render_chart_png(
             "Нет 5M свечей для графика"
         )
 
-    # -----------------------------------------------------
-    # Размер
-    # -----------------------------------------------------
-
     width = 1200
     height = 700
 
@@ -815,10 +836,6 @@ def render_chart_png(
         - top
         - bottom
     )
-
-    # -----------------------------------------------------
-    # Цвета
-    # -----------------------------------------------------
 
     background = (
         14,
@@ -892,10 +909,6 @@ def render_chart_png(
         background
     )
 
-    # -----------------------------------------------------
-    # Диапазон
-    # -----------------------------------------------------
-
     all_values = []
 
     for candle in valid_candles:
@@ -960,10 +973,6 @@ def render_chart_png(
             + ratio * chart_height
         )
 
-    # -----------------------------------------------------
-    # Сетка
-    # -----------------------------------------------------
-
     for i in range(1, 8):
 
         y = (
@@ -986,7 +995,7 @@ def render_chart_png(
         )
 
     # -----------------------------------------------------
-    # Major liquidity
+    # MAJOR LIQUIDITY
     # -----------------------------------------------------
 
     for level in levels:
@@ -1026,7 +1035,7 @@ def render_chart_png(
         )
 
     # -----------------------------------------------------
-    # Свечи
+    # CANDLES
     # -----------------------------------------------------
 
     count = len(
@@ -1079,7 +1088,6 @@ def render_chart_png(
             else bearish
         )
 
-        # Wick
         draw_line(
             pixels,
             center_x,
@@ -1090,7 +1098,6 @@ def render_chart_png(
             1
         )
 
-        # Body
         body_top = min(
             open_y,
             close_y
@@ -1116,7 +1123,7 @@ def render_chart_png(
         )
 
     # -----------------------------------------------------
-    # Current price
+    # CURRENT PRICE
     # -----------------------------------------------------
 
     if price is not None:
@@ -1141,7 +1148,7 @@ def render_chart_png(
             pass
 
     # -----------------------------------------------------
-    # Sweep
+    # SWEEP
     # -----------------------------------------------------
 
     if sweep:
@@ -1175,7 +1182,7 @@ def render_chart_png(
             pass
 
     # -----------------------------------------------------
-    # Entry / SL / TP
+    # ENTRY / SL / TP
     # -----------------------------------------------------
 
     setup_lines = [
@@ -1219,10 +1226,6 @@ def render_chart_png(
 
         except Exception:
             pass
-
-    # -----------------------------------------------------
-    # Создание PNG
-    # -----------------------------------------------------
 
     png = make_png(
         width,
@@ -1388,6 +1391,14 @@ def build_chart_caption(
 
     elif stage == "READY":
 
+        rr = result.get(
+            "rr"
+        )
+
+        tp_reason = result.get(
+            "tp_reason"
+        )
+
         lines.extend([
             "",
             "🔥 <b>ПОЛНОЕ ПОДТВЕРЖДЕНИЕ</b>",
@@ -1395,8 +1406,15 @@ def build_chart_caption(
             f"Entry: <b>{format_price(result.get('entry'))}</b>",
             f"SL: <b>{format_price(result.get('sl'))}</b>",
             f"TP: <b>{format_price(result.get('tp'))}</b>",
-            "",
-            "RR: <b>1:2</b>",
+            f"RR: <b>{format_rr(rr)}</b>",
+        ])
+
+        if tp_reason:
+            lines.append(
+                f"🎯 TP: {tp_reason}"
+            )
+
+        lines.extend([
             "",
             "🟢 <b>МОЖНО ВХОДИТЬ</b>"
         ])
@@ -1647,6 +1665,14 @@ def build_sol_message(result):
 
     if result.get("entry") is not None:
 
+        rr = result.get(
+            "rr"
+        )
+
+        tp_reason = result.get(
+            "tp_reason"
+        )
+
         lines.extend([
             "",
             "🎯 <b>СЕТАП</b>",
@@ -1658,8 +1684,21 @@ def build_sol_message(result):
             f"TP: "
             f"<b>{format_price(result.get('tp'))}</b>",
             "",
-            "RR: <b>1:2</b>"
+            f"RR: <b>{format_rr(rr)}</b>"
         ])
+
+        if result.get("sweep_extreme") is not None:
+
+            lines.extend([
+                f"💧 Sweep extreme: "
+                f"<b>{format_price(result.get('sweep_extreme'))}</b>"
+            ])
+
+        if tp_reason:
+
+            lines.append(
+                f"🎯 {tp_reason}"
+            )
 
     reason = result.get(
         "reason"
@@ -1691,6 +1730,14 @@ def build_search_message(results):
 
         score, coin, result = ready
 
+        rr = result.get(
+            "rr"
+        )
+
+        tp_reason = result.get(
+            "tp_reason"
+        )
+
         lines.extend([
             "🟢 <b>НАЙДЕН СЕТАП</b>",
             "",
@@ -1706,7 +1753,16 @@ def build_search_message(results):
             f"TP: "
             f"<b>{format_price(result.get('tp'))}</b>",
             "",
-            "RR: <b>1:2</b>",
+            f"RR: <b>{format_rr(rr)}</b>",
+        ])
+
+        if tp_reason:
+
+            lines.append(
+                f"🎯 {tp_reason}"
+            )
+
+        lines.extend([
             "",
             "🔥 Полное подтверждение получено."
         ])
@@ -1775,14 +1831,16 @@ async def start(
 ):
 
     text = (
-        "🤖 <b>TRADEMIND 3.7</b>\n\n"
+        "🤖 <b>TRADEMIND 3.8</b>\n\n"
         "Мониторинг:\n"
         "• BTC\n"
         "• ETH\n"
         "• SOL\n\n"
         "Стратегия:\n"
         "1H → Major Liquidity → Sweep → 15M → 5M\n\n"
-        "RR: <b>1:2</b>\n"
+        "TP:\n"
+        "• до 2R — перед ближайшей встречной ликвидностью\n"
+        "• дальше 2R — 2R\n\n"
         "Вход только после полного подтверждения."
     )
 
@@ -1996,7 +2054,9 @@ async def status_command(
             f"SL: "
             f"<b>{format_price(state.get('active_sl'))}</b>\n"
             f"TP: "
-            f"<b>{format_price(state.get('active_tp'))}</b>"
+            f"<b>{format_price(state.get('active_tp'))}</b>\n"
+            f"RR: "
+            f"<b>{format_rr(state.get('active_rr'))}</b>"
         )
 
     else:
@@ -2032,6 +2092,7 @@ async def journal_command(
         "• Entry\n"
         "• SL\n"
         "• TP\n"
+        "• фактический RR\n"
         "• Win / Loss\n"
         "• R\n"
         "• Winrate\n"
@@ -2136,6 +2197,18 @@ async def monitor(
                     "tp"
                 )
 
+                rr = result.get(
+                    "rr"
+                )
+
+                tp_reason = result.get(
+                    "tp_reason"
+                )
+
+                sweep_extreme = result.get(
+                    "sweep_extreme"
+                )
+
                 setup_key = (
                     f"{coin}_"
                     f"{direction}_"
@@ -2176,6 +2249,15 @@ async def monitor(
                         "active_tp":
                             tp,
 
+                        "active_rr":
+                            rr,
+
+                        "active_tp_reason":
+                            tp_reason,
+
+                        "active_sweep_extreme":
+                            sweep_extreme,
+
                         "active_score":
                             score,
 
@@ -2197,9 +2279,18 @@ async def monitor(
                         f"⭐ Score: <b>{score}/100</b>\n\n"
                         f"Entry: <b>{format_price(entry)}</b>\n"
                         f"SL: <b>{format_price(sl)}</b>\n"
-                        f"TP: <b>{format_price(tp)}</b>\n\n"
-                        "RR: <b>1:2</b>\n\n"
-                        "🔥 Полное подтверждение:\n"
+                        f"TP: <b>{format_price(tp)}</b>\n"
+                        f"RR: <b>{format_rr(rr)}</b>\n"
+                    )
+
+                    if tp_reason:
+
+                        text += (
+                            f"\n🎯 {tp_reason}\n"
+                        )
+
+                    text += (
+                        "\n🔥 Полное подтверждение:\n"
                         "1H → Sweep → 15M → 5M"
                     )
 
@@ -2323,7 +2414,7 @@ async def monitor(
                         text = (
                             "🟡 <b>TRADEMIND — 15M CONFIRMATION</b>\n\n"
                             f"💠 Монета: <b>{coin}</b>\n"
-                            f"Направление: <b>{direction}</b>\n\n"
+                            f"📐 Направление: <b>{direction}</b>\n\n"
                             "✅ Sweep\n"
                             "✅ 15M confirmation\n\n"
                             "⏳ Ждём 5M trigger.\n\n"
@@ -2372,7 +2463,7 @@ async def callbacks(
     if data == "start":
 
         await query.edit_message_text(
-            "🤖 <b>TRADEMIND 3.7</b>\n\n"
+            "🤖 <b>TRADEMIND 3.8</b>\n\n"
             "Выбери действие:",
             parse_mode="HTML",
             reply_markup=main_keyboard()
@@ -2532,7 +2623,9 @@ async def callbacks(
                 f"SL: "
                 f"<b>{format_price(state.get('active_sl'))}</b>\n"
                 f"TP: "
-                f"<b>{format_price(state.get('active_tp'))}</b>"
+                f"<b>{format_price(state.get('active_tp'))}</b>\n"
+                f"RR: "
+                f"<b>{format_rr(state.get('active_rr'))}</b>"
             )
 
         else:
@@ -2825,7 +2918,7 @@ def main():
     )
 
     print(
-        "TradeMind 3.7 started."
+        "TradeMind 3.8 started."
     )
 
     application.run_polling()
