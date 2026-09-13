@@ -1,6 +1,5 @@
-"""Market data layer for TradeMind 3.2.
-Binance Spot is the structure/reference source.
-"""
+# -*- coding: utf-8 -*-
+"""TradeMind 3.2 market data: Binance Spot reference for SOLUSDT."""
 import requests
 
 BASE_URL = "https://api.binance.com/api/v3"
@@ -12,90 +11,59 @@ def _get(path, params):
     return r.json()
 
 def get_price(symbol=SYMBOL):
-    data = _get("/ticker/price", {"symbol": symbol})
-    return float(data["price"])
+    return float(_get("/ticker/price", {"symbol": symbol})["price"])
 
 def get_klines(symbol=SYMBOL, interval="1h", limit=200):
     raw = _get("/klines", {"symbol": symbol, "interval": interval, "limit": limit})
-    return [
-        {"open_time": x[0], "open": float(x[1]), "high": float(x[2]),
-         "low": float(x[3]), "close": float(x[4]), "volume": float(x[5]),
-         "close_time": x[6]}
-        for x in raw
-    ]
+    return [{"open_time": x[0], "open": float(x[1]), "high": float(x[2]),
+             "low": float(x[3]), "close": float(x[4]), "volume": float(x[5]),
+             "close_time": x[6]} for x in raw]
 
 def get_market_data(symbol=SYMBOL):
-    return {
-        "symbol": symbol,
-        "price": get_price(symbol),
-        "1h": get_klines(symbol, "1h", 200),
-        "15m": get_klines(symbol, "15m", 200),
-        "5m": get_klines(symbol, "5m", 200),
-    }
+    return {"symbol": symbol, "price": get_price(symbol),
+            "1h": get_klines(symbol, "1h", 200),
+            "15m": get_klines(symbol, "15m", 200),
+            "5m": get_klines(symbol, "5m", 200)}
 
-def _local_swing_high(candles, i, left=2, right=2):
-    h=candles[i]["high"]
-    return h > max(x["high"] for x in candles[i-left:i]) and h >= max(x["high"] for x in candles[i+1:i+right+1])
+def find_swing_levels(candles, left=2, right=2):
+    highs, lows = [], []
+    for i in range(left, len(candles)-right):
+        h, l = candles[i]["high"], candles[i]["low"]
+        if h >= max(x["high"] for x in candles[i-left:i]) and h > max(x["high"] for x in candles[i+1:i+right+1]):
+            highs.append((h, i))
+        if l <= min(x["low"] for x in candles[i-left:i]) and l < min(x["low"] for x in candles[i+1:i+right+1]):
+            lows.append((l, i))
+    return highs, lows
 
-def _local_swing_low(candles, i, left=2, right=2):
-    l=candles[i]["low"]
-    return l < min(x["low"] for x in candles[i-left:i]) and l <= min(x["low"] for x in candles[i+1:i+right+1])
+def find_major_liquidity(candles_1h, current_price, max_levels=4):
+    """Keep meaningful 1H swing liquidity and suppress tiny nearby noise."""
+    sh, sl = find_swing_levels(candles_1h[-120:])
+    candidates = []
+    for price, idx in sh:
+        if price > current_price * 1.002:
+            candidates.append({"price": price, "direction": "SHORT", "type": "1H swing high", "index": idx})
+    for price, idx in sl:
+        if price < current_price * 0.998:
+            candidates.append({"price": price, "direction": "LONG", "type": "1H swing low", "index": idx})
+    candidates.sort(key=lambda x: abs(x["price"]-current_price))
+    selected, min_gap = [], max(current_price * 0.003, 0.25)
+    for c in candidates:
+        if all(abs(c["price"]-s["price"]) >= min_gap for s in selected):
+            selected.append(c)
+        if len(selected) >= max_levels:
+            break
+    return selected
 
-def find_major_liquidity(candles_1h, current_price, max_levels=6):
-    """Find meaningful 1H swing liquidity, filtering out tiny noise."""
-    c=candles_1h
-    if len(c)<15:
-        return []
-    highs=[]; lows=[]
-    for i in range(2,len(c)-2):
-        if _local_swing_high(c,i):
-            highs.append((c[i]["high"], i))
-        if _local_swing_low(c,i):
-            lows.append((c[i]["low"], i))
-
-    # Cluster nearby swing points; repeated tests make a level more meaningful.
-    def cluster(items):
-        items=sorted(items)
-        out=[]
-        for level,i in items:
-            if not out or abs(level-out[-1]["level"])>0.35:
-                out.append({"level":level,"touches":1,"index":i})
-            else:
-                old=out[-1]
-                old["level"]=(old["level"]*old["touches"]+level)/(old["touches"]+1)
-                old["touches"]+=1
-                old["index"]=max(old["index"],i)
-        return out
-
-    candidates=[]
-    for x in cluster(highs):
-        if x["level"] > current_price:
-            candidates.append({**x,"side":"SHORT","type":"1H major swing high"})
-    for x in cluster(lows):
-        if x["level"] < current_price:
-            candidates.append({**x,"side":"LONG","type":"1H major swing low"})
-
-    # Prefer repeated levels, then nearest meaningful level.
-    candidates.sort(key=lambda x:(-x["touches"], abs(x["level"]-current_price)))
-    return candidates[:max_levels]
-
-def detect_sweep(candles_1h, current_price, direction):
-    """Confirm that recent price pierced a major 1H level and rejected it."""
-    levels=find_major_liquidity(candles_1h,current_price,10)
-    wanted="LONG" if direction=="LONG" else "SHORT"
-    for z in levels:
-        if z["side"]!=wanted:
-            continue
-        level=z["level"]
-        recent=candles_1h[-3:]
-        if direction=="LONG":
-            swept=any(x["low"] < level for x in recent)
-            rejection=recent[-1]["close"] > level or recent[-1]["close"] > recent[-1]["open"]
-        else:
-            swept=any(x["high"] > level for x in recent)
-            rejection=recent[-1]["close"] < level or recent[-1]["close"] < recent[-1]["open"]
-        if swept and rejection:
-            return {"swept":True,"direction":direction,"level":level,
-                    "strength":min(1.0,0.6+0.1*z["touches"]),
-                    "liquidity_type":z["type"]}
+def detect_sweep(candles_5m, major_levels, lookback=6):
+    if len(candles_5m) < 3:
+        return None
+    last, prev = candles_5m[-1], candles_5m[-lookback:-1]
+    if not prev:
+        return None
+    for level in major_levels:
+        lv = level["price"]
+        if level["direction"] == "LONG" and last["low"] < lv and last["close"] > lv and last["close"] > last["open"]:
+            return {"direction":"LONG","level":lv,"swept":True,"strength":0.8,"liquidity_type":level["type"]}
+        if level["direction"] == "SHORT" and last["high"] > lv and last["close"] < lv and last["close"] < last["open"]:
+            return {"direction":"SHORT","level":lv,"swept":True,"strength":0.8,"liquidity_type":level["type"]}
     return None
