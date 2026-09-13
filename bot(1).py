@@ -39,5 +39,3 @@ async def main():
     init_db()
     dp=Dispatcher(); dp.include_router(router)
     await dp.start_polling(Bot(TOKEN))
-
-if __name__=="__main__": asyncio.run(main())
