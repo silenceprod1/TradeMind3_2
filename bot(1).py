@@ -2,12 +2,6 @@ import asyncio
 import json
 import os
 from datetime import datetime
-from io import BytesIO
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 
 from telegram import (
     Update,
@@ -68,17 +62,28 @@ def load_json(filename, default):
 def save_json(filename, data):
     try:
         with open(filename, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
     except Exception as e:
         print(f"JSON SAVE ERROR: {e}")
 
 
 def load_subscribers():
-    return load_json(SUBSCRIBERS_FILE, [])
+    return load_json(
+        SUBSCRIBERS_FILE,
+        []
+    )
 
 
 def save_subscribers(data):
-    save_json(SUBSCRIBERS_FILE, data)
+    save_json(
+        SUBSCRIBERS_FILE,
+        data
+    )
 
 
 def default_state():
@@ -98,11 +103,24 @@ def default_state():
 
 
 def load_state():
-    return load_json(STATE_FILE, default_state())
+    state = load_json(
+        STATE_FILE,
+        default_state()
+    )
+
+    if not isinstance(state, dict):
+        state = default_state()
+
+    state.setdefault("coins", {})
+
+    return state
 
 
 def save_state(state):
-    save_json(STATE_FILE, state)
+    save_json(
+        STATE_FILE,
+        state
+    )
 
 
 # =========================================================
@@ -112,25 +130,52 @@ def save_state(state):
 def main_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 Рынок", callback_data="market"),
-            InlineKeyboardButton("💧 Уровни", callback_data="levels"),
+            InlineKeyboardButton(
+                "📊 Рынок",
+                callback_data="market"
+            ),
+            InlineKeyboardButton(
+                "💧 Уровни",
+                callback_data="levels"
+            ),
         ],
         [
-            InlineKeyboardButton("🔎 Поиск сетапа", callback_data="search"),
+            InlineKeyboardButton(
+                "🔎 Поиск сетапа",
+                callback_data="search"
+            ),
         ],
         [
-            InlineKeyboardButton("📈 График", callback_data="chart"),
+            InlineKeyboardButton(
+                "📈 График",
+                callback_data="chart"
+            ),
         ],
         [
-            InlineKeyboardButton("🔔 Уведомления", callback_data="subscribe"),
-            InlineKeyboardButton("🔕 Выключить", callback_data="unsubscribe"),
+            InlineKeyboardButton(
+                "🔔 Уведомления",
+                callback_data="subscribe"
+            ),
+            InlineKeyboardButton(
+                "🔕 Выключить",
+                callback_data="unsubscribe"
+            ),
         ],
         [
-            InlineKeyboardButton("📈 SOL", callback_data="sol"),
-            InlineKeyboardButton("📊 Статус", callback_data="status"),
+            InlineKeyboardButton(
+                "📈 SOL",
+                callback_data="sol"
+            ),
+            InlineKeyboardButton(
+                "📊 Статус",
+                callback_data="status"
+            ),
         ],
         [
-            InlineKeyboardButton("📒 Журнал", callback_data="journal"),
+            InlineKeyboardButton(
+                "📒 Журнал",
+                callback_data="journal"
+            ),
         ],
     ])
 
@@ -138,12 +183,24 @@ def main_keyboard():
 def chart_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("₿ BTC", callback_data="chart_BTC"),
-            InlineKeyboardButton("Ξ ETH", callback_data="chart_ETH"),
-            InlineKeyboardButton("◎ SOL", callback_data="chart_SOL"),
+            InlineKeyboardButton(
+                "₿ BTC",
+                callback_data="chart_BTC"
+            ),
+            InlineKeyboardButton(
+                "Ξ ETH",
+                callback_data="chart_ETH"
+            ),
+            InlineKeyboardButton(
+                "◎ SOL",
+                callback_data="chart_SOL"
+            ),
         ],
         [
-            InlineKeyboardButton("⬅️ Главное меню", callback_data="start"),
+            InlineKeyboardButton(
+                "⬅️ Главное меню",
+                callback_data="start"
+            ),
         ],
     ])
 
@@ -151,9 +208,18 @@ def chart_keyboard():
 def chart_coin_keyboard(coin):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("₿ BTC", callback_data="chart_BTC"),
-            InlineKeyboardButton("Ξ ETH", callback_data="chart_ETH"),
-            InlineKeyboardButton("◎ SOL", callback_data="chart_SOL"),
+            InlineKeyboardButton(
+                "₿ BTC",
+                callback_data="chart_BTC"
+            ),
+            InlineKeyboardButton(
+                "Ξ ETH",
+                callback_data="chart_ETH"
+            ),
+            InlineKeyboardButton(
+                "◎ SOL",
+                callback_data="chart_SOL"
+            ),
         ],
         [
             InlineKeyboardButton(
@@ -162,7 +228,10 @@ def chart_coin_keyboard(coin):
             ),
         ],
         [
-            InlineKeyboardButton("⬅️ Главное меню", callback_data="start"),
+            InlineKeyboardButton(
+                "⬅️ Главное меню",
+                callback_data="start"
+            ),
         ],
     ])
 
@@ -186,7 +255,10 @@ def format_price(price):
     if price is None:
         return "N/A"
 
-    price = float(price)
+    try:
+        price = float(price)
+    except Exception:
+        return "N/A"
 
     if price >= 1000:
         return f"${price:,.2f}"
@@ -203,16 +275,39 @@ def format_levels(levels, price):
 
     lines = []
 
-    for level in levels:
-        level_price = level.get("price")
+    try:
+        price = float(price)
+    except Exception:
+        price = 0
 
-        if level_price is None:
+    for level in levels:
+
+        try:
+            level_price = float(
+                level.get("price")
+            )
+        except Exception:
             continue
 
-        level_type = level.get("type", "")
-        distance = abs(level_price - price) / price * 100
+        level_type = level.get(
+            "type",
+            ""
+        )
 
-        icon = "🔴" if "HIGH" in level_type else "🟢"
+        if price:
+            distance = (
+                abs(level_price - price)
+                / price
+                * 100
+            )
+        else:
+            distance = 0
+
+        icon = (
+            "🔴"
+            if "HIGH" in level_type
+            else "🟢"
+        )
 
         lines.append(
             f"{icon} {level_type}: "
@@ -220,14 +315,20 @@ def format_levels(levels, price):
             f"({distance:.2f}%)"
         )
 
-    return "\n".join(lines) if lines else "💧 Крупные уровни не найдены."
+    if not lines:
+        return "💧 Крупные уровни не найдены."
+
+    return "\n".join(lines)
 
 
 def stage_icon(stage):
     if stage == "READY":
         return "🟢"
 
-    if stage in ("CONFIRMED", "15M_CONFIRMED"):
+    if stage in (
+        "CONFIRMED",
+        "15M_CONFIRMED"
+    ):
         return "🟡"
 
     if stage == "SWEPT":
@@ -243,7 +344,10 @@ def stage_text(stage):
     if stage == "READY":
         return "МОЖНО ВХОДИТЬ"
 
-    if stage in ("CONFIRMED", "15M_CONFIRMED"):
+    if stage in (
+        "CONFIRMED",
+        "15M_CONFIRMED"
+    ):
         return "15M подтверждение"
 
     if stage == "SWEPT":
@@ -260,16 +364,29 @@ def stage_text(stage):
 # =========================================================
 
 def build_analysis(symbol):
-    data = get_market_data(symbol)
+
+    data = get_market_data(
+        symbol
+    )
 
     if not data:
-        raise Exception(f"Нет данных для {symbol}")
+        raise Exception(
+            f"Нет данных для {symbol}"
+        )
 
     price = data["price"]
 
-    candles_1h = data["candles_1h"]
-    candles_15m = data["candles_15m"]
-    candles_5m = data["candles_5m"]
+    candles_1h = data[
+        "candles_1h"
+    ]
+
+    candles_15m = data[
+        "candles_15m"
+    ]
+
+    candles_5m = data[
+        "candles_5m"
+    ]
 
     major_levels = find_major_liquidity(
         candles_1h,
@@ -300,14 +417,22 @@ def build_analysis(symbol):
 
 
 def scan_all_coins():
+
     results = {}
 
     for coin, symbol in COINS.items():
+
         try:
-            results[coin] = build_analysis(symbol)
+
+            results[coin] = build_analysis(
+                symbol
+            )
 
         except Exception as e:
-            print(f"{coin} ERROR: {e}")
+
+            print(
+                f"{coin} ERROR: {e}"
+            )
 
             results[coin] = {
                 "error": str(e),
@@ -318,9 +443,11 @@ def scan_all_coins():
 
 
 def find_first_ready(results):
+
     ready = []
 
     for coin, result in results.items():
+
         if result.get("error"):
             continue
 
@@ -328,9 +455,13 @@ def find_first_ready(results):
             result.get("stage") == "READY"
             and result.get("score", 0) >= 80
         ):
+
             ready.append(
                 (
-                    result.get("score", 0),
+                    result.get(
+                        "score",
+                        0
+                    ),
                     coin,
                     result
                 )
@@ -348,529 +479,63 @@ def find_first_ready(results):
 
 
 # =========================================================
-# CHART
+# SCENARIO / CHART INFO
 # =========================================================
 
-def candle_datetime(candle):
-    try:
-        timestamp = float(candle.get("open_time"))
-
-        if timestamp > 10_000_000_000:
-            timestamp /= 1000
-
-        return datetime.fromtimestamp(timestamp)
-
-    except Exception:
-        return None
-
-
 def get_chart_status(result):
-    stage = result.get("stage", "WAIT")
-    direction = result.get("direction")
-
-    if stage == "READY":
-        return "🟢 МОЖНО ВХОДИТЬ", direction
-
-    if stage in ("CONFIRMED", "15M_CONFIRMED"):
-        return "🟡 ЖДЁМ 5M TRIGGER", direction
-
-    if stage == "SWEPT":
-        return "🟠 ЖДЁМ 15M CONFIRMATION", direction
-
-    return "⏳ ЖДЁМ MAJOR LIQUIDITY SWEEP", None
-
-
-def build_chart(coin, result):
-    symbol = result["symbol"]
-
-    # Получаем максимально свежие данные
-    data = get_market_data(symbol)
-
-    candles = data["candles_5m"]
-    price = float(data["price"])
-
-    levels = result.get("major_levels", [])
-    sweep = result.get("sweep") or {}
-
-    candles = candles[-80:]
-
-    if len(candles) < 5:
-        raise Exception("Недостаточно 5M свечей.")
-
-    fig, ax = plt.subplots(
-        figsize=(13, 7)
-    )
-
-    width = 0.62
-
-    opens = []
-    highs = []
-    lows = []
-    closes = []
-
-    # -----------------------------------------------------
-    # CANDLES
-    # -----------------------------------------------------
-
-    for i, candle in enumerate(candles):
-
-        o = float(candle["open"])
-        h = float(candle["high"])
-        l = float(candle["low"])
-        c = float(candle["close"])
-
-        opens.append(o)
-        highs.append(h)
-        lows.append(l)
-        closes.append(c)
-
-        bullish = c >= o
-
-        candle_color = "#16a34a" if bullish else "#dc2626"
-
-        # wick
-        ax.vlines(
-            i,
-            l,
-            h,
-            color=candle_color,
-            linewidth=1.0,
-            zorder=2
-        )
-
-        body_low = min(o, c)
-        body_height = abs(c - o)
-
-        if body_height == 0:
-            body_height = price * 0.00003
-
-        rect = Rectangle(
-            (
-                i - width / 2,
-                body_low
-            ),
-            width,
-            body_height,
-            facecolor=candle_color,
-            edgecolor=candle_color,
-            linewidth=0.7,
-            zorder=3
-        )
-
-        ax.add_patch(rect)
-
-    # -----------------------------------------------------
-    # MAJOR LIQUIDITY
-    # -----------------------------------------------------
-
-    for level in levels:
-
-        level_price = float(
-            level["price"]
-        )
-
-        level_type = level.get(
-            "type",
-            ""
-        )
-
-        if "HIGH" in level_type:
-            color = "#dc2626"
-        else:
-            color = "#16a34a"
-
-        ax.axhline(
-            level_price,
-            color=color,
-            linestyle="--",
-            linewidth=1.2,
-            alpha=0.75,
-            zorder=1
-        )
-
-        ax.text(
-            len(candles) - 1,
-            level_price,
-            f"  {level_type} "
-            f"{format_price(level_price)}",
-            color=color,
-            fontsize=8,
-            va="center",
-            fontweight="bold"
-        )
-
-    # -----------------------------------------------------
-    # CURRENT PRICE
-    # -----------------------------------------------------
-
-    ax.axhline(
-        price,
-        color="#2563eb",
-        linestyle="-",
-        linewidth=1.5,
-        alpha=0.9
-    )
-
-    ax.text(
-        len(candles) - 1,
-        price,
-        f"  PRICE {format_price(price)}",
-        color="#2563eb",
-        fontsize=9,
-        va="bottom",
-        fontweight="bold"
-    )
-
-    # -----------------------------------------------------
-    # SWEEP
-    # -----------------------------------------------------
-
-    if sweep:
-
-        sweep_level = (
-            sweep.get("level")
-            or sweep.get("price")
-        )
-
-        if sweep_level is not None:
-
-            sweep_level = float(
-                sweep_level
-            )
-
-            sweep_direction = sweep.get(
-                "direction",
-                result.get("direction", "")
-            )
-
-            idx = len(candles) - 1
-
-            ax.scatter(
-                [idx],
-                [sweep_level],
-                s=100,
-                color="#f59e0b",
-                zorder=5
-            )
-
-            ax.annotate(
-                f"SWEEP {sweep_direction}\n"
-                f"{format_price(sweep_level)}",
-                xy=(idx, sweep_level),
-                xytext=(
-                    max(0, idx - 18),
-                    sweep_level
-                ),
-                arrowprops={
-                    "arrowstyle": "->",
-                    "color": "#f59e0b",
-                    "lw": 1.5
-                },
-                fontsize=9,
-                fontweight="bold",
-                color="#b45309"
-            )
-
-    # -----------------------------------------------------
-    # ENTRY / SL / TP
-    # -----------------------------------------------------
-
-    if result.get("stage") == "READY":
-
-        entry = result.get("entry")
-        sl = result.get("sl")
-        tp = result.get("tp")
-
-        if entry is not None:
-
-            entry = float(entry)
-
-            ax.axhline(
-                entry,
-                color="#2563eb",
-                linestyle="-.",
-                linewidth=1.4
-            )
-
-            ax.text(
-                len(candles) - 1,
-                entry,
-                f"  ENTRY {format_price(entry)}",
-                fontsize=9,
-                color="#2563eb",
-                va="bottom",
-                fontweight="bold"
-            )
-
-        if sl is not None:
-
-            sl = float(sl)
-
-            ax.axhline(
-                sl,
-                color="#dc2626",
-                linestyle=":",
-                linewidth=1.5
-            )
-
-            ax.text(
-                len(candles) - 1,
-                sl,
-                f"  SL {format_price(sl)}",
-                fontsize=9,
-                color="#dc2626",
-                va="bottom",
-                fontweight="bold"
-            )
-
-        if tp is not None:
-
-            tp = float(tp)
-
-            ax.axhline(
-                tp,
-                color="#16a34a",
-                linestyle=":",
-                linewidth=1.5
-            )
-
-            ax.text(
-                len(candles) - 1,
-                tp,
-                f"  TP {format_price(tp)}",
-                fontsize=9,
-                color="#16a34a",
-                va="bottom",
-                fontweight="bold"
-            )
-
-    # -----------------------------------------------------
-    # WAITING SCENARIO
-    # -----------------------------------------------------
 
     stage = result.get(
         "stage",
         "WAIT"
     )
 
-    if stage == "WAIT":
+    direction = result.get(
+        "direction"
+    )
 
-        # Показываем ближайшие уровни,
-        # от которых ждём sweep.
-        above = []
-        below = []
-
-        for level in levels:
-
-            level_price = float(
-                level["price"]
-            )
-
-            if level_price > price:
-                above.append(level)
-            elif level_price < price:
-                below.append(level)
-
-        above.sort(
-            key=lambda x: float(x["price"])
+    if stage == "READY":
+        return (
+            "🟢 МОЖНО ВХОДИТЬ",
+            direction
         )
 
-        below.sort(
-            key=lambda x: float(x["price"]),
-            reverse=True
+    if stage in (
+        "CONFIRMED",
+        "15M_CONFIRMED"
+    ):
+        return (
+            "🟡 ЖДЁМ 5M TRIGGER",
+            direction
         )
 
-        if below:
-
-            target = below[0]
-
-            ax.annotate(
-                "ЖДЁМ LONG SWEEP",
-                xy=(
-                    len(candles) - 1,
-                    float(target["price"])
-                ),
-                xytext=(
-                    max(0, len(candles) - 25),
-                    float(target["price"])
-                    - (max(highs) - min(lows)) * 0.12
-                ),
-                arrowprops={
-                    "arrowstyle": "->",
-                    "color": "#16a34a",
-                    "lw": 1.5
-                },
-                fontsize=9,
-                color="#16a34a",
-                fontweight="bold"
-            )
-
-        if above:
-
-            target = above[0]
-
-            ax.annotate(
-                "ЖДЁМ SHORT SWEEP",
-                xy=(
-                    len(candles) - 1,
-                    float(target["price"])
-                ),
-                xytext=(
-                    max(0, len(candles) - 25),
-                    float(target["price"])
-                    + (max(highs) - min(lows)) * 0.12
-                ),
-                arrowprops={
-                    "arrowstyle": "->",
-                    "color": "#dc2626",
-                    "lw": 1.5
-                },
-                fontsize=9,
-                color="#dc2626",
-                fontweight="bold"
-            )
-
-    # -----------------------------------------------------
-    # TITLE
-    # -----------------------------------------------------
-
-    status, direction = get_chart_status(
-        result
-    )
-
-    title = (
-        f"TRADEMIND 3.6 — {coin} / 5M\n"
-        f"{status}"
-    )
-
-    if direction:
-        title += f"  |  {direction}"
-
-    ax.set_title(
-        title,
-        fontsize=15,
-        fontweight="bold"
-    )
-
-    ax.set_ylabel("Price")
-    ax.set_xlabel(
-        "Последние закрытые 5M свечи"
-    )
-
-    ax.grid(
-        alpha=0.18
-    )
-
-    # -----------------------------------------------------
-    # Y RANGE
-    # -----------------------------------------------------
-
-    values = (
-        highs
-        + lows
-        + [price]
-    )
-
-    for level in levels:
-        values.append(
-            float(level["price"])
+    if stage == "SWEPT":
+        return (
+            "🟠 ЖДЁМ 15M CONFIRMATION",
+            direction
         )
 
-    for key in [
-        "entry",
-        "sl",
-        "tp"
-    ]:
-        if result.get(key) is not None:
-            values.append(
-                float(result[key])
-            )
-
-    low = min(values)
-    high = max(values)
-
-    padding = max(
-        (high - low) * 0.08,
-        price * 0.001
+    return (
+        "⏳ ЖДЁМ MAJOR LIQUIDITY SWEEP",
+        None
     )
 
-    ax.set_ylim(
-        low - padding,
-        high + padding
-    )
 
-    # -----------------------------------------------------
-    # X LABELS
-    # -----------------------------------------------------
-
-    labels = []
-
-    for candle in candles:
-
-        dt = candle_datetime(
-            candle
-        )
-
-        if dt:
-            labels.append(
-                dt.strftime("%H:%M")
-            )
-        else:
-            labels.append("")
-
-    step = max(
-        1,
-        len(labels) // 8
-    )
-
-    positions = list(
-        range(
-            0,
-            len(labels),
-            step
-        )
-    )
-
-    ax.set_xticks(
-        positions
-    )
-
-    ax.set_xticklabels(
-        [
-            labels[i]
-            for i in positions
-        ]
-    )
-
-    plt.tight_layout()
-
-    # -----------------------------------------------------
-    # PNG IN MEMORY
-    # -----------------------------------------------------
-
-    buffer = BytesIO()
-
-    fig.savefig(
-        buffer,
-        format="png",
-        dpi=150,
-        bbox_inches="tight"
-    )
-
-    plt.close(fig)
-
-    buffer.seek(0)
-
-    return buffer
-
-
-def chart_caption(
+def build_chart_info(
     coin,
     result
 ):
 
     price = result.get(
         "price"
+    )
+
+    levels = result.get(
+        "major_levels",
+        []
+    )
+
+    sweep = result.get(
+        "sweep"
     )
 
     stage = result.get(
@@ -887,24 +552,36 @@ def chart_caption(
         "direction"
     )
 
-    status, _ = get_chart_status(
-        result
-    )
-
     lines = [
         f"📈 <b>TRADEMIND — {coin}</b>",
         "",
         f"💰 Цена: <b>{format_price(price)}</b>",
-        f"{status}",
+        f"{stage_icon(stage)} "
+        f"<b>{stage_text(stage)}</b>",
         f"⭐ Score: <b>{score}/100</b>",
     ]
 
     if direction:
-        lines.append(
-            f"📐 Направление: <b>{direction}</b>"
-        )
 
-    lines.append("")
+        lines.extend([
+            "",
+            f"📐 Направление: "
+            f"<b>{direction}</b>"
+        ])
+
+    lines.extend([
+        "",
+        "💧 <b>MAJOR LIQUIDITY</b>",
+        format_levels(
+            levels,
+            price
+        ),
+        ""
+    ])
+
+    # -----------------------------------------------------
+    # WAIT
+    # -----------------------------------------------------
 
     if stage == "WAIT":
 
@@ -919,15 +596,38 @@ def chart_caption(
             "❌ В середине движения не входим."
         ])
 
+    # -----------------------------------------------------
+    # SWEEP
+    # -----------------------------------------------------
+
     elif stage == "SWEPT":
 
         lines.extend([
-            "💧 <b>SWEEP ЕСТЬ</b>",
+            "💧 <b>SWEEP ОБНАРУЖЕН</b>",
             "",
-            "✅ Major liquidity снята",
+            "✅ Крупная ликвидность снята",
             "⏳ Ждём 15M confirmation",
             "❌ Вход пока запрещён"
         ])
+
+        if sweep:
+
+            sweep_price = (
+                sweep.get("price")
+                or sweep.get("level")
+            )
+
+            if sweep_price is not None:
+
+                lines.extend([
+                    "",
+                    f"Уровень sweep: "
+                    f"<b>{format_price(sweep_price)}</b>"
+                ])
+
+    # -----------------------------------------------------
+    # 15M
+    # -----------------------------------------------------
 
     elif stage in (
         "CONFIRMED",
@@ -941,17 +641,29 @@ def chart_caption(
             "❌ Вход пока запрещён"
         ])
 
+    # -----------------------------------------------------
+    # READY
+    # -----------------------------------------------------
+
     elif stage == "READY":
 
         lines.extend([
             "🔥 <b>ПОЛНОЕ ПОДТВЕРЖДЕНИЕ</b>",
             "",
-            f"Entry: <b>{format_price(result.get('entry'))}</b>",
-            f"SL: <b>{format_price(result.get('sl'))}</b>",
-            f"TP: <b>{format_price(result.get('tp'))}</b>",
+            f"Entry: "
+            f"<b>{format_price(result.get('entry'))}</b>",
+            f"SL: "
+            f"<b>{format_price(result.get('sl'))}</b>",
+            f"TP: "
+            f"<b>{format_price(result.get('tp'))}</b>",
             "",
             "RR: <b>1:2</b>"
         ])
+
+    lines.extend([
+        "",
+        "1H → MAJOR LIQUIDITY → SWEEP → 15M → 5M"
+    ])
 
     return "\n".join(lines)
 
@@ -967,19 +679,13 @@ async def send_chart(
             COINS[coin]
         )
 
-        image = build_chart(
+        text = build_chart_info(
             coin,
             result
         )
 
-        caption = chart_caption(
-            coin,
-            result
-        )
-
-        await message.reply_photo(
-            photo=image,
-            caption=caption,
+        await message.reply_text(
+            text,
             parse_mode="HTML",
             reply_markup=chart_coin_keyboard(
                 coin
@@ -989,7 +695,7 @@ async def send_chart(
     except Exception as e:
 
         print(
-            f"CHART ERROR {coin}: {e}"
+            f"CHART INFO ERROR {coin}: {e}"
         )
 
         await message.reply_text(
@@ -1002,9 +708,7 @@ async def send_chart(
 # MESSAGES
 # =========================================================
 
-def build_market_message(
-    results
-):
+def build_market_message(results):
 
     lines = [
         "📊 <b>TRADEMIND — РЫНОК</b>",
@@ -1078,9 +782,7 @@ def build_market_message(
     return "\n".join(lines)
 
 
-def build_levels_message(
-    results
-):
+def build_levels_message(results):
 
     lines = [
         "💧 <b>TRADEMIND — КЛЮЧЕВЫЕ УРОВНИ</b>",
@@ -1129,11 +831,10 @@ def build_levels_message(
     return "\n".join(lines)
 
 
-def build_sol_message(
-    result
-):
+def build_sol_message(result):
 
     if result.get("error"):
+
         return (
             "❌ <b>SOL</b>\n\n"
             "Ошибка получения данных."
@@ -1171,7 +872,8 @@ def build_sol_message(
 
         lines.extend([
             "",
-            f"Направление: <b>{direction}</b>"
+            f"Направление: "
+            f"<b>{direction}</b>"
         ])
 
     lines.extend([
@@ -1186,15 +888,18 @@ def build_sol_message(
         )
     ])
 
-    if result.get("entry"):
+    if result.get("entry") is not None:
 
         lines.extend([
             "",
             "🎯 <b>СЕТАП</b>",
             "",
-            f"Entry: <b>{format_price(result['entry'])}</b>",
-            f"SL: <b>{format_price(result['sl'])}</b>",
-            f"TP: <b>{format_price(result['tp'])}</b>",
+            f"Entry: "
+            f"<b>{format_price(result.get('entry'))}</b>",
+            f"SL: "
+            f"<b>{format_price(result.get('sl'))}</b>",
+            f"TP: "
+            f"<b>{format_price(result.get('tp'))}</b>",
             "",
             "RR: <b>1:2</b>"
         ])
@@ -1208,15 +913,13 @@ def build_sol_message(
         lines.extend([
             "",
             "Причина:",
-            reason
+            str(reason)
         ])
 
     return "\n".join(lines)
 
 
-def build_search_message(
-    results
-):
+def build_search_message(results):
 
     lines = [
         "🔎 <b>ПОИСК СЕТАПА</b>",
@@ -1235,12 +938,16 @@ def build_search_message(
             "🟢 <b>НАЙДЕН СЕТАП</b>",
             "",
             f"Монета: <b>{coin}</b>",
-            f"Направление: <b>{result.get('direction')}</b>",
+            f"Направление: "
+            f"<b>{result.get('direction')}</b>",
             f"Score: <b>{score}/100</b>",
             "",
-            f"Entry: <b>{format_price(result.get('entry'))}</b>",
-            f"SL: <b>{format_price(result.get('sl'))}</b>",
-            f"TP: <b>{format_price(result.get('tp'))}</b>",
+            f"Entry: "
+            f"<b>{format_price(result.get('entry'))}</b>",
+            f"SL: "
+            f"<b>{format_price(result.get('sl'))}</b>",
+            f"TP: "
+            f"<b>{format_price(result.get('tp'))}</b>",
             "",
             "RR: <b>1:2</b>",
             "",
@@ -1337,7 +1044,9 @@ async def market_command(
     results = scan_all_coins()
 
     await update.message.reply_text(
-        build_market_message(results),
+        build_market_message(
+            results
+        ),
         parse_mode="HTML",
         reply_markup=back_keyboard()
     )
@@ -1351,7 +1060,9 @@ async def levels_command(
     results = scan_all_coins()
 
     await update.message.reply_text(
-        build_levels_message(results),
+        build_levels_message(
+            results
+        ),
         parse_mode="HTML",
         reply_markup=back_keyboard()
     )
@@ -1365,7 +1076,9 @@ async def search_command(
     results = scan_all_coins()
 
     await update.message.reply_text(
-        build_search_message(results),
+        build_search_message(
+            results
+        ),
         parse_mode="HTML",
         reply_markup=back_keyboard()
     )
@@ -1383,7 +1096,9 @@ async def sol_command(
         )
 
         await update.message.reply_text(
-            build_sol_message(result),
+            build_sol_message(
+                result
+            ),
             parse_mode="HTML",
             reply_markup=back_keyboard()
         )
@@ -1622,8 +1337,10 @@ async def monitor(
 
             state = load_state()
 
-            # Пока есть активный сетап,
-            # новые монеты не запускаем.
+            # -------------------------------------------------
+            # АКТИВНЫЙ СЕТАП
+            # -------------------------------------------------
+
             if state.get("active_coin"):
 
                 await asyncio.sleep(
@@ -1679,7 +1396,8 @@ async def monitor(
 
                     state.update({
 
-                        "active_coin": coin,
+                        "active_coin":
+                            coin,
 
                         "active_symbol":
                             result.get(
@@ -1975,7 +1693,7 @@ async def callbacks(
         return
 
     # -------------------------------------------------------
-    # CHART
+    # CHART / SCENARIO
     # -------------------------------------------------------
 
     if data.startswith("chart_"):
