@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 
 """
-TradeMind 3.4
+TradeMind 3.8
+
 Стратегия:
 
 1H context
@@ -9,9 +10,11 @@ TradeMind 3.4
 → Major liquidity sweep
 → 15M confirmation ПОСЛЕ sweep
 → 5M trigger ПОСЛЕ confirmation
-→ Entry / SL / TP
-→ RR 1:2
-→ Один TP
+→ Entry
+→ SL за экстремумом sweep
+→ TP по ближайшей крупной противоположной ликвидности
+→ если ликвидность дальше 2R → TP = 2R
+→ один TP
 """
 
 # =========================================================
@@ -19,6 +22,7 @@ TradeMind 3.4
 # =========================================================
 
 def get_context(candles):
+
     if len(candles) < 12:
         return "neutral"
 
@@ -45,10 +49,6 @@ def get_context(candles):
 # =========================================================
 
 def confirm_15m(candles, direction, after_time=None):
-    """
-    Проверяем только закрытые 15M свечи,
-    которые появились ПОСЛЕ sweep.
-    """
 
     if len(candles) < 6:
         return False, "Недостаточно 15M данных", None
@@ -63,14 +63,19 @@ def confirm_15m(candles, direction, after_time=None):
         ]
 
     if not candidates:
-        return False, "После sweep ещё нет новой 15M свечи", None
+        return (
+            False,
+            "После sweep ещё нет новой 15M свечи",
+            None
+        )
 
-    # Проверяем от самой новой свечи назад
     for last in reversed(candidates):
 
+        idx = candles.index(last)
+
         previous = candles[
-            max(0, candles.index(last) - 4):
-            candles.index(last)
+            max(0, idx - 4):
+            idx
         ]
 
         if len(previous) < 1:
@@ -81,11 +86,19 @@ def confirm_15m(candles, direction, after_time=None):
             0.000001
         )
 
-        body = abs(last["close"] - last["open"])
+        body = abs(
+            last["close"] - last["open"]
+        )
+
         body_ratio = body / candle_range
 
-        previous_high = max(x["high"] for x in previous)
-        previous_low = min(x["low"] for x in previous)
+        previous_high = max(
+            x["high"] for x in previous
+        )
+
+        previous_low = min(
+            x["low"] for x in previous
+        )
 
         # LONG
         if direction == "LONG":
@@ -139,7 +152,11 @@ def confirm_15m(candles, direction, after_time=None):
                     last["open_time"]
                 )
 
-    return False, "Нет подтверждения на 15M", None
+    return (
+        False,
+        "Нет подтверждения на 15M",
+        None
+    )
 
 
 # =========================================================
@@ -147,10 +164,6 @@ def confirm_15m(candles, direction, after_time=None):
 # =========================================================
 
 def check_5m_trigger(candles, direction, after_time=None):
-    """
-    Проверяем только 5M свечи,
-    которые появились ПОСЛЕ 15M confirmation.
-    """
 
     if len(candles) < 6:
         return False, "Недостаточно 5M данных", None
@@ -165,7 +178,11 @@ def check_5m_trigger(candles, direction, after_time=None):
         ]
 
     if not candidates:
-        return False, "После 15M confirmation ещё нет нового 5M trigger", None
+        return (
+            False,
+            "После 15M confirmation ещё нет нового 5M trigger",
+            None
+        )
 
     for last in reversed(candidates):
 
@@ -184,11 +201,19 @@ def check_5m_trigger(candles, direction, after_time=None):
             0.000001
         )
 
-        body = abs(last["close"] - last["open"])
+        body = abs(
+            last["close"] - last["open"]
+        )
+
         body_ratio = body / candle_range
 
-        previous_high = max(x["high"] for x in previous)
-        previous_low = min(x["low"] for x in previous)
+        previous_high = max(
+            x["high"] for x in previous
+        )
+
+        previous_low = min(
+            x["low"] for x in previous
+        )
 
         # LONG
         if direction == "LONG":
@@ -242,7 +267,11 @@ def check_5m_trigger(candles, direction, after_time=None):
                     last["open_time"]
                 )
 
-    return False, "Нет подтверждения на 5M", None
+    return (
+        False,
+        "Нет подтверждения на 5M",
+        None
+    )
 
 
 # =========================================================
@@ -306,11 +335,313 @@ def distance_from_sweep_ok(price, sweep_level):
         float(sweep_level)
     )
 
-    # Не догоняем движение
     if distance > float(price) * 0.015:
         return False
 
     return True
+
+
+# =========================================================
+# SWEEP EXTREME
+# =========================================================
+
+def get_sweep_extreme(
+    candles_15m,
+    direction,
+    sweep_level,
+    sweep_time=None
+):
+    """
+    Фактический экстремум sweep-свечи.
+
+    LONG:
+        SL ниже low sweep.
+
+    SHORT:
+        SL выше high sweep.
+    """
+
+    fallback = float(sweep_level)
+
+    if not candles_15m:
+        return fallback
+
+    # Сначала ищем конкретную sweep-свечу
+    if sweep_time is not None:
+
+        for candle in reversed(candles_15m):
+
+            if candle.get("open_time") == sweep_time:
+
+                if direction == "LONG":
+                    return float(candle["low"])
+
+                if direction == "SHORT":
+                    return float(candle["high"])
+
+    # Fallback: ищем свечу, которая пересекла уровень
+    for candle in reversed(candles_15m[-8:]):
+
+        if direction == "LONG":
+
+            if (
+                float(candle["low"]) <= fallback
+                and float(candle["close"]) > fallback
+            ):
+                return float(candle["low"])
+
+        elif direction == "SHORT":
+
+            if (
+                float(candle["high"]) >= fallback
+                and float(candle["close"]) < fallback
+            ):
+                return float(candle["high"])
+
+    return fallback
+
+
+# =========================================================
+# MAJOR LEVEL PRICE
+# =========================================================
+
+def get_level_price(level):
+
+    if isinstance(level, (int, float)):
+        return float(level)
+
+    if not isinstance(level, dict):
+        return None
+
+    for key in (
+        "price",
+        "level",
+        "value",
+        "high",
+        "low"
+    ):
+
+        value = level.get(key)
+
+        if value is not None:
+
+            try:
+                return float(value)
+            except Exception:
+                continue
+
+    return None
+
+
+# =========================================================
+# FIND OPPOSITE LIQUIDITY
+# =========================================================
+
+def find_nearest_opposite_liquidity(
+    entry,
+    direction,
+    major_levels
+):
+    """
+    LONG:
+        ближайшая крупная зона выше ENTRY.
+
+    SHORT:
+        ближайшая крупная зона ниже ENTRY.
+    """
+
+    if not major_levels:
+        return None
+
+    candidates = []
+
+    for level in major_levels:
+
+        price = get_level_price(level)
+
+        if price is None:
+            continue
+
+        if direction == "LONG":
+
+            if price > entry:
+                candidates.append(price)
+
+        elif direction == "SHORT":
+
+            if price < entry:
+                candidates.append(price)
+
+    if not candidates:
+        return None
+
+    if direction == "LONG":
+        return min(candidates)
+
+    return max(candidates)
+
+
+# =========================================================
+# CALCULATE SL
+# =========================================================
+
+def calculate_sl(
+    entry,
+    direction,
+    sweep_extreme
+):
+    """
+    SL находится за экстремумом sweep.
+    """
+
+    entry = float(entry)
+    extreme = float(sweep_extreme)
+
+    buffer = max(
+        entry * 0.0005,
+        0.05
+    )
+
+    if direction == "LONG":
+        return extreme - buffer
+
+    return extreme + buffer
+
+
+# =========================================================
+# CALCULATE TP
+# =========================================================
+
+def calculate_tp(
+    entry,
+    sl,
+    direction,
+    major_levels
+):
+    """
+    Логика TP:
+
+    1. Рассчитываем 2R.
+
+    2. Ищем ближайшую крупную
+       противоположную ликвидность.
+
+    3. Если зона дальше 2R:
+       TP = 2R.
+
+    4. Если зона ближе 2R:
+       TP перед зоной.
+
+    5. Всегда один TP.
+    """
+
+    entry = float(entry)
+    sl = float(sl)
+
+    risk = abs(entry - sl)
+
+    if risk <= 0:
+        return None, None, None
+
+    # 2R
+    if direction == "LONG":
+        tp_2r = entry + risk * 2
+    else:
+        tp_2r = entry - risk * 2
+
+    # Ближайшая противоположная ликвидность
+    liquidity = find_nearest_opposite_liquidity(
+        entry,
+        direction,
+        major_levels
+    )
+
+    # Нет зоны → обычный 2R
+    if liquidity is None:
+
+        return (
+            tp_2r,
+            2.0,
+            "TP = 2R, крупная противоположная ликвидность не найдена"
+        )
+
+    # =====================================================
+    # LONG
+    # =====================================================
+
+    if direction == "LONG":
+
+        # Зона после 2R
+        if liquidity >= tp_2r:
+
+            return (
+                tp_2r,
+                2.0,
+                "TP = 2R, ближайшая ликвидность дальше"
+            )
+
+        distance_to_zone = liquidity - entry
+
+        if distance_to_zone <= 0:
+
+            return (
+                tp_2r,
+                2.0,
+                "TP = 2R"
+            )
+
+        # 8% расстояния оставляем до зоны
+        tp_buffer = max(
+            distance_to_zone * 0.08,
+            entry * 0.0002
+        )
+
+        tp = liquidity - tp_buffer
+
+    # =====================================================
+    # SHORT
+    # =====================================================
+
+    else:
+
+        # Зона после 2R
+        if liquidity <= tp_2r:
+
+            return (
+                tp_2r,
+                2.0,
+                "TP = 2R, ближайшая ликвидность дальше"
+            )
+
+        distance_to_zone = entry - liquidity
+
+        if distance_to_zone <= 0:
+
+            return (
+                tp_2r,
+                2.0,
+                "TP = 2R"
+            )
+
+        tp_buffer = max(
+            distance_to_zone * 0.08,
+            entry * 0.0002
+        )
+
+        tp = liquidity + tp_buffer
+
+    # Фактический RR
+    actual_reward = abs(
+        tp - entry
+    )
+
+    actual_rr = actual_reward / risk
+
+    return (
+        tp,
+        actual_rr,
+        "TP перед ближайшей крупной противоположной ликвидностью"
+    )
 
 
 # =========================================================
@@ -329,8 +660,13 @@ def analyze(
 
     price = float(current_price)
 
-    context_1h = get_context(candles_1h)
-    context_15m = get_context(candles_15m)
+    context_1h = get_context(
+        candles_1h
+    )
+
+    context_15m = get_context(
+        candles_15m
+    )
 
     result = {
 
@@ -358,6 +694,8 @@ def analyze(
 
         "sweep_level": None,
 
+        "sweep_extreme": None,
+
         "sweep_time": None,
 
         "confirmation_15m": False,
@@ -378,7 +716,9 @@ def analyze(
 
         "context_15m": context_15m,
 
-        "major_levels": major_levels or []
+        "major_levels": major_levels or [],
+
+        "tp_reason": None
     }
 
     # =====================================================
@@ -398,16 +738,19 @@ def analyze(
 
         return result
 
-
     # =====================================================
     # SWEEP
     # =====================================================
 
     direction = sweep["direction"]
 
-    level = float(sweep["level"])
+    level = float(
+        sweep["level"]
+    )
 
-    sweep_time = sweep.get("open_time")
+    sweep_time = sweep.get(
+        "open_time"
+    )
 
     result["direction"] = direction
 
@@ -423,15 +766,19 @@ def analyze(
     # 15M CONFIRMATION
     # =====================================================
 
-    confirmation_15m, confirmation_text, confirmation_time = (
-        confirm_15m(
-            candles_15m,
-            direction,
-            after_time=sweep_time
-        )
+    (
+        confirmation_15m,
+        confirmation_text,
+        confirmation_time
+    ) = confirm_15m(
+        candles_15m,
+        direction,
+        after_time=sweep_time
     )
 
-    result["confirmation_15m"] = confirmation_15m
+    result["confirmation_15m"] = (
+        confirmation_15m
+    )
 
     result["confirmation_15m_text"] = (
         confirmation_text
@@ -441,7 +788,6 @@ def analyze(
         confirmation_time
     )
 
-    # Нет 15M confirmation
     if not confirmation_15m:
 
         result["stage"] = "SWEPT"
@@ -469,12 +815,14 @@ def analyze(
     # 5M TRIGGER
     # =====================================================
 
-    trigger_ok, trigger_text, trigger_time = (
-        check_5m_trigger(
-            candles_5m,
-            direction,
-            after_time=confirmation_time
-        )
+    (
+        trigger_ok,
+        trigger_text,
+        trigger_time
+    ) = check_5m_trigger(
+        candles_5m,
+        direction,
+        after_time=confirmation_time
     )
 
     result["trigger_5m"] = trigger_ok
@@ -483,7 +831,6 @@ def analyze(
 
     result["trigger_5m_time"] = trigger_time
 
-    # Нет 5M trigger
     if not trigger_ok:
 
         result["status"] = "WAIT"
@@ -587,7 +934,10 @@ def analyze(
     # SCORE
     # =====================================================
 
-    score = min(score, 100)
+    score = min(
+        score,
+        100
+    )
 
     if score < 80:
 
@@ -605,29 +955,41 @@ def analyze(
         return result
 
     # =====================================================
-    # ENTRY / SL / TP
+    # ENTRY
     # =====================================================
 
     entry = price
 
-    buffer = max(
-        price * 0.0008,
-        0.08
+    # =====================================================
+    # SWEEP EXTREME
+    # =====================================================
+
+    sweep_extreme = get_sweep_extreme(
+        candles_15m,
+        direction,
+        level,
+        sweep_time
     )
 
-    if direction == "LONG":
+    result["sweep_extreme"] = round(
+        sweep_extreme,
+        4
+    )
 
-        sl = level - buffer
+    # =====================================================
+    # SL BEHIND SWEEP EXTREME
+    # =====================================================
 
-    else:
-
-        sl = level + buffer
+    sl = calculate_sl(
+        entry,
+        direction,
+        sweep_extreme
+    )
 
     risk = abs(
         entry - sl
     )
 
-    # Некорректный риск
     if risk <= 0:
 
         result["stage"] = "INVALID"
@@ -642,7 +1004,6 @@ def analyze(
 
         return result
 
-    # Слишком маленький SL
     if risk < 0.05:
 
         result["stage"] = "INVALID"
@@ -658,16 +1019,33 @@ def analyze(
         return result
 
     # =====================================================
-    # EXACT 1:2
+    # TP BY MAJOR LIQUIDITY
     # =====================================================
 
-    if direction == "LONG":
+    (
+        tp,
+        actual_rr,
+        tp_reason
+    ) = calculate_tp(
+        entry,
+        sl,
+        direction,
+        major_levels or []
+    )
 
-        tp = entry + risk * 2
+    if tp is None:
 
-    else:
+        result["stage"] = "INVALID"
 
-        tp = entry - risk * 2
+        result["status"] = "WAIT"
+
+        result["score"] = 65
+
+        result["reason"] = (
+            "Не удалось рассчитать TP."
+        )
+
+        return result
 
     # =====================================================
     # FINAL READY
@@ -696,48 +1074,23 @@ def analyze(
             4
         ),
 
-        "rr": 2.0,
+        "rr": round(
+            actual_rr,
+            2
+        ),
 
         "one_tp": True,
+
+        "tp_reason": tp_reason,
 
         "reason": (
             "Крупная ликвидность → "
             "sweep → "
             "15M confirmation → "
             "5M trigger → "
-            "можно входить."
+            "SL за экстремумом sweep → "
+            "TP по ближайшей крупной ликвидности."
         )
     })
 
     return result
-
-
-# =========================================================
-# SOL ANALYSIS
-# =========================================================
-
-def analyze_sol(
-    candles_1h,
-    candles_15m,
-    candles_5m,
-    current_price,
-    order_flow=None,
-    sweep=None
-):
-
-    return analyze(
-
-        candles_1h,
-
-        candles_15m,
-
-        candles_5m,
-
-        current_price,
-
-        sweep=sweep,
-
-        order_flow=order_flow,
-
-        major_levels=None
-    )
