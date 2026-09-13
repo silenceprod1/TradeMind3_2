@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 """
-TradeMind 3.4
-Market data: Binance Spot SOLUSDT
+TradeMind 3.5
+Market data: Binance Spot
 
 Логика ликвидности:
 - только 1H major liquidity
@@ -103,8 +103,14 @@ def get_closed_klines(
     if len(candles) <= 1:
         return candles
 
+    # Последняя свеча может быть ещё незакрыта.
+    # Для анализа стратегии используем только закрытые.
     return candles[:-1]
 
+
+# =========================================================
+# MARKET DATA
+# =========================================================
 
 def get_market_data(symbol=SYMBOL):
 
@@ -128,17 +134,27 @@ def get_market_data(symbol=SYMBOL):
         200
     )
 
+    # ВАЖНО:
+    # main.py ожидает именно эти ключи:
+    #
+    # candles_1h
+    # candles_15m
+    # candles_5m
+    #
+    # Раньше здесь были "1h", "15m", "5m",
+    # из-за чего main.py получал KeyError.
+
     return {
 
         "symbol": symbol,
 
         "price": price,
 
-        "1h": candles_1h,
+        "candles_1h": candles_1h,
 
-        "15m": candles_15m,
+        "candles_15m": candles_15m,
 
-        "5m": candles_5m
+        "candles_5m": candles_5m
 
     }
 
@@ -197,7 +213,10 @@ def find_swing_levels(
             ]
         ]
 
-        # Major HIGH candidate
+        # =================================================
+        # MAJOR HIGH CANDIDATE
+        # =================================================
+
         if (
             current_high >= max(left_highs)
             and current_high > max(right_highs)
@@ -214,7 +233,10 @@ def find_swing_levels(
 
             })
 
-        # Major LOW candidate
+        # =================================================
+        # MAJOR LOW CANDIDATE
+        # =================================================
+
         if (
             current_low <= min(left_lows)
             and current_low < min(right_lows)
@@ -245,29 +267,29 @@ def find_major_liquidity(
 ):
 
     """
-    ВАЖНО:
-
     Используем ТОЛЬКО 1H swing levels.
 
-    Не берём 5M.
-    Не берём 15M.
-    Не берём близкие локальные экстремумы.
+    Не используем:
+    - 5M liquidity
+    - 15M liquidity
+    - мелкие локальные уровни
 
-    Минимальная дистанция от цены:
+    Минимальная дистанция от текущей цены:
     0.5%
 
-    Это защищает от ситуаций вроде:
-
-    SOL = 101.39
-    liquidity = 101.23
-
-    Такой уровень НЕ считается major liquidity.
+    Близкие major levels:
+    минимум 0.7% между уровнями
+    либо $0.50.
     """
 
     current_price = float(
         current_price
     )
 
+    if not candles_1h:
+        return []
+
+    # Берём последние 150 закрытых 1H свечей.
     candles = candles_1h[-150:]
 
     highs, lows = find_swing_levels(
@@ -278,22 +300,20 @@ def find_major_liquidity(
 
     candidates = []
 
-    # -----------------------------------------------------
+    # =====================================================
     # MINIMUM DISTANCE
-    # -----------------------------------------------------
+    # =====================================================
 
     MIN_DISTANCE = 0.005
-
-    # 0.5%
 
     min_distance = (
         current_price *
         MIN_DISTANCE
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # HIGH LIQUIDITY
-    # -----------------------------------------------------
+    # =====================================================
 
     for swing in highs:
 
@@ -306,8 +326,8 @@ def find_major_liquidity(
             current_price
         )
 
-        # Только ABOVE price
-        # и минимум 0.5%
+        # Только уровни ВЫШЕ текущей цены.
+        # Минимум 0.5%.
 
         if distance >= min_distance:
 
@@ -328,9 +348,9 @@ def find_major_liquidity(
 
             })
 
-    # -----------------------------------------------------
+    # =====================================================
     # LOW LIQUIDITY
-    # -----------------------------------------------------
+    # =====================================================
 
     for swing in lows:
 
@@ -343,8 +363,8 @@ def find_major_liquidity(
             level_price
         )
 
-        # Только BELOW price
-        # и минимум 0.5%
+        # Только уровни НИЖЕ текущей цены.
+        # Минимум 0.5%.
 
         if distance >= min_distance:
 
@@ -365,9 +385,9 @@ def find_major_liquidity(
 
             })
 
-    # -----------------------------------------------------
+    # =====================================================
     # SORT BY DISTANCE
-    # -----------------------------------------------------
+    # =====================================================
 
     candidates.sort(
         key=lambda x:
@@ -377,13 +397,14 @@ def find_major_liquidity(
         )
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # REMOVE NEAR-DUPLICATES
-    # -----------------------------------------------------
+    # =====================================================
 
     selected = []
 
-    # 0.7% gap between major levels
+    # Между крупными уровнями минимум 0.7%
+    # или $0.50.
 
     MIN_LEVEL_GAP = max(
         current_price * 0.007,
@@ -433,12 +454,21 @@ def detect_sweep(
 
     Никаких самостоятельных 5M/15M liquidity levels.
 
-    Поэтому уровень вроде 101.23 не сможет
-    внезапно стать sweep level, если его нет
-    среди настоящих major levels.
+    LONG:
+        цена прокалывает 1H MAJOR LOW
+        и закрывается обратно выше уровня
+        зелёной свечой.
+
+    SHORT:
+        цена прокалывает 1H MAJOR HIGH
+        и закрывается обратно ниже уровня
+        красной свечой.
     """
 
     if not major_levels:
+        return None
+
+    if not candles_5m:
         return None
 
     if len(candles_5m) < 3:
@@ -448,9 +478,9 @@ def detect_sweep(
         -lookback:
     ]
 
-    # -----------------------------------------------------
+    # =====================================================
     # SAFETY FILTER
-    # -----------------------------------------------------
+    # =====================================================
 
     valid_levels = []
 
@@ -472,14 +502,21 @@ def detect_sweep(
 
             continue
 
+        if level_price <= 0:
+            continue
+
         valid_levels.append(
             level
         )
 
-    # -----------------------------------------------------
-    # CHECK SWEEP
-    # -----------------------------------------------------
+    if not valid_levels:
+        return None
 
+    # =====================================================
+    # CHECK SWEEP
+    # =====================================================
+
+    # Смотрим от самой новой свечи назад.
     for candle in reversed(recent):
 
         for level in valid_levels:
@@ -490,7 +527,7 @@ def detect_sweep(
 
             # =================================================
             # LONG
-            # Sweep LOW
+            # Sweep 1H MAJOR LOW
             # =================================================
 
             if level["direction"] == "LONG":
@@ -540,7 +577,7 @@ def detect_sweep(
 
             # =================================================
             # SHORT
-            # Sweep HIGH
+            # Sweep 1H MAJOR HIGH
             # =================================================
 
             if level["direction"] == "SHORT":
