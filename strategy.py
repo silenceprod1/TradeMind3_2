@@ -1,5 +1,5 @@
 """
-TradeMind 5.4
+TradeMind 5.5
 
 D1 -> W1 fallback -> 1H synchronization
 -> Major Liquidity -> Fresh Sweep
@@ -16,20 +16,16 @@ from dataclasses import dataclass, asdict
 from typing import Any, Optional
 
 
-STRATEGY_VERSION = "5.4"
+STRATEGY_VERSION = "5.5"
 
 MIN_SCORE_READY = 80
 
-# Максимальное расстояние входа от swept liquidity.
 MAX_ENTRY_DISTANCE_PCT = 0.75
 
-# Минимальное восстановление после манипуляции.
 MIN_RECOVERY_RATIO = 1.0 / 3.0
 
-# Буфер за экстремумом sweep.
 SL_BUFFER_PCT = 0.10
 
-# Допустимая дистанция структурного TP.
 MIN_TP_DISTANCE_PCT = 0.15
 MAX_TP_DISTANCE_PCT = 8.0
 
@@ -42,17 +38,12 @@ LEVEL_CLUSTER_PCT = 0.35
 MIN_MAJOR_TOUCHES = 2
 MAX_MAJOR_LEVELS = 6
 
-# Sweep должен быть свежим.
 MAX_SWEEP_AGE_5M = 6
 
-# Минимальная глубина прокола liquidity.
 MIN_SWEEP_DEPTH_PCT = 0.10
 
-# Минимальный body ratio последней reversal candle.
 MIN_REVERSAL_BODY_RATIO = 0.35
 
-# Сколько 5M свечей разрешаем после sweep
-# для формирования V/L reversal.
 MAX_REVERSAL_CANDLES = 3
 
 REQUIRE_5M_IMBALANCE_INVERSION = True
@@ -143,10 +134,6 @@ def _bear(c):
 
 
 def _time_after(a, b):
-    """
-    True если timestamp a строго позже b.
-    Поддерживает числовые timestamps.
-    """
     if a is None or b is None:
         return False
 
@@ -245,7 +232,7 @@ def _swings(candles, radius=SWING_RADIUS):
 
 
 # ============================================================
-# MARKET STRUCTURE
+# MARKET STRUCTURE — 5.5
 # ============================================================
 
 def market_structure(candles):
@@ -269,29 +256,92 @@ def market_structure(candles):
         if x["type"] == "LOW"
     ]
 
-    if len(highs) < 2 or len(lows) < 2:
+    # Нужно достаточно подтверждённых свингов.
+    if len(highs) < 3 or len(lows) < 3:
         return "neutral"
 
-    last_high = highs[-1]["price"]
-    prev_high = highs[-2]["price"]
+    # Берём последние 3 подтверждённых High / Low.
+    recent_highs = highs[-3:]
+    recent_lows = lows[-3:]
 
-    last_low = lows[-1]["price"]
-    prev_low = lows[-2]["price"]
+    high_prices = [
+        x["price"]
+        for x in recent_highs
+    ]
 
-    # HH + HL
-    if (
-        last_high > prev_high
+    low_prices = [
+        x["price"]
+        for x in recent_lows
+    ]
+
+    higher_highs = sum(
+        1
+        for i in range(
+            1,
+            len(high_prices)
+        )
+        if high_prices[i]
+        > high_prices[i - 1]
+    )
+
+    lower_highs = sum(
+        1
+        for i in range(
+            1,
+            len(high_prices)
+        )
+        if high_prices[i]
+        < high_prices[i - 1]
+    )
+
+    higher_lows = sum(
+        1
+        for i in range(
+            1,
+            len(low_prices)
+        )
+        if low_prices[i]
+        > low_prices[i - 1]
+    )
+
+    lower_lows = sum(
+        1
+        for i in range(
+            1,
+            len(low_prices)
+        )
+        if low_prices[i]
+        < low_prices[i - 1]
+    )
+
+    # ========================================================
+    # BULLISH
+    # ========================================================
+
+    bullish_structure = (
+        higher_highs >= 2
         and
-        last_low > prev_low
-    ):
+        higher_lows >= 1
+        and
+        lower_highs == 0
+    )
+
+    if bullish_structure:
         return "bullish"
 
-    # LH + LL
-    if (
-        last_high < prev_high
+    # ========================================================
+    # BEARISH
+    # ========================================================
+
+    bearish_structure = (
+        lower_highs >= 2
         and
-        last_low < prev_low
-    ):
+        lower_lows >= 1
+        and
+        higher_lows == 0
+    )
+
+    if bearish_structure:
         return "bearish"
 
     return "neutral"
@@ -474,8 +524,6 @@ def get_major_liquidity(
 
         candidates = repeated
 
-        # Разрешаем несколько сильных одиночных
-        # уровней, только если повторных мало.
         if len(candidates) < 3:
 
             singles.sort(
@@ -489,8 +537,6 @@ def get_major_liquidity(
 
     else:
 
-        # Если повторных уровней вообще нет,
-        # не возвращаем весь шум.
         candidates = sorted(
             candidates,
             key=lambda x: x["strength"],
@@ -953,8 +999,6 @@ def _confirm_15m(
 
         c_time = _time(c)
 
-        # Критически важно:
-        # confirmation должна быть ПОСЛЕ sweep.
         if (
             sweep_time is not None
             and
@@ -1037,10 +1081,6 @@ def _reversal_5m(
     if sweep_index >= len(candles) - 1:
         return None
 
-    # ========================================================
-    # ТОЛЬКО ПЕРВЫЕ 3 СВЕЧИ ПОСЛЕ SWEEP
-    # ========================================================
-
     after = candles[
         sweep_index + 1:
         sweep_index + 1
@@ -1093,8 +1133,6 @@ def _reversal_5m(
             manipulation
         )
 
-        # Последняя доступная candle
-        # должна дать полноценный trigger.
         trigger = after[-1]
 
         last_close = _v(
@@ -1225,9 +1263,6 @@ def structural_target(
 
     # ========================================================
     # LONG
-    #
-    # TP = local high, from which the current correction
-    # started.
     # ========================================================
 
     if direction == "LONG":
@@ -1245,24 +1280,14 @@ def structural_target(
         if not highs:
             return None
 
-        # Если знаем индекс sweep,
-        # ищем structural high ДО sweep.
-        if sweep_index is not None:
+        valid = [
+            x
+            for x in highs
+            if x["price"] > entry
+        ]
 
-            # sweep_index относится к 5M,
-            # поэтому прямое сравнение с 1H индексом
-            # невозможно.
-            #
-            # Используем последний структурный high
-            # перед текущим участком.
-            valid = [
-                x
-                for x in highs
-                if x["price"] > entry
-            ]
-
-            if valid:
-                return valid[-1]["price"]
+        if valid:
+            return valid[-1]["price"]
 
         return highs[-1]["price"]
 
@@ -1283,16 +1308,14 @@ def structural_target(
     if not lows:
         return None
 
-    if sweep_index is not None:
+    valid = [
+        x
+        for x in lows
+        if x["price"] < entry
+    ]
 
-        valid = [
-            x
-            for x in lows
-            if x["price"] < entry
-        ]
-
-        if valid:
-            return valid[-1]["price"]
+    if valid:
+        return valid[-1]["price"]
 
     return lows[-1]["price"]
 
@@ -1970,9 +1993,6 @@ def analyze(
         else 0
     )
 
-    # RR теперь информационный.
-    # TP определяется структурой.
-
     tp_dist = _pct(
         tp,
         entry
@@ -2164,7 +2184,7 @@ def analyze(
             score=score,
 
             reason=(
-                "Full TradeMind 5.4 "
+                "Full TradeMind 5.5 "
                 "confirmation."
             ),
 
