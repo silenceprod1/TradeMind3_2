@@ -1,32 +1,35 @@
 """
-TradeMind 5.2
-D1 -> 1H -> Major Liquidity -> Sweep -> 5M V/L
--> 5M FVG Inversion -> Entry -> SL -> Structural TP
+TradeMind 5.3
+D1 -> 1H -> Major Liquidity -> Sweep -> 15M Confirmation
+-> 5M V/L -> 5M FVG Inversion -> Entry -> SL -> Structural TP
 
 STRICT VERSION
 
-Правила:
-- D1 определяет активный тренд.
-- 1H должен совпадать с D1.
-- Major Liquidity берётся только с 1H.
-- Sweep обязан снять Major Liquidity.
-- Микро-проколы не считаются sweep.
-- Sweep должен быть свежим.
-- После sweep нужен 5M V/L reversal.
-- Recovery >= 1/3 манипуляции.
-- Нужна сильная reversal-свеча.
-- Нужна обязательная 5M imbalance/FVG inversion.
-- Entry только после полного подтверждения.
-- SL за экстремумом sweep.
-- TP структурный HIGH/LOW.
-- TP один.
-- Фиксированный 1:2 НЕ используется.
-- Не входить в середине движения.
-- Не догонять цену.
+Главные правила:
+
+1. D1 определяет активный тренд.
+2. 1H обязан совпадать с D1.
+3. Major Liquidity берётся ТОЛЬКО с 1H.
+4. Слабые одиночные swing-уровни отбрасываются.
+5. Близкие уровни объединяются в liquidity cluster.
+6. Sweep обязан снять Major Liquidity.
+7. Sweep обязан быть значимым и свежим.
+8. После Sweep нужен 15M confirmation.
+9. После 15M confirmation нужен 5M V/L.
+10. Recovery >= 1/3 манипуляции.
+11. Нужна сильная reversal-свеча.
+12. Нужна обязательная 5M FVG inversion.
+13. Entry только после полного подтверждения.
+14. SL за экстремумом Sweep.
+15. TP один и структурный.
+16. Фиксированный 1:2 НЕ используется.
+17. Не входить в середине движения.
+18. Не догонять цену.
+19. Высокий Score не может обходить Hard Gate.
 """
 
 from dataclasses import dataclass, asdict
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import math
 
 
@@ -34,7 +37,7 @@ import math
 # VERSION
 # ============================================================
 
-STRATEGY_VERSION = "5.2"
+STRATEGY_VERSION = "5.3"
 
 
 # ============================================================
@@ -43,43 +46,57 @@ STRATEGY_VERSION = "5.2"
 
 MIN_SCORE_READY = 80
 
-# Максимальная дистанция Entry от sweep
 MAX_ENTRY_DISTANCE_PCT = 0.75
 
-# Минимальное восстановление манипуляции
 MIN_RECOVERY_RATIO = 1.0 / 3.0
 
-# Буфер SL за sweep
 SL_BUFFER_PCT = 0.10
 
-# TP
 MIN_TP_DISTANCE_PCT = 0.15
 MAX_TP_DISTANCE_PCT = 8.0
 
-# Structure
 STRUCTURE_LOOKBACK = 60
 
-# Major Liquidity
-LIQUIDITY_LOOKBACK = 60
+
+# ============================================================
+# MAJOR LIQUIDITY
+# ============================================================
+
+LIQUIDITY_LOOKBACK = 80
+
 SWING_RADIUS = 2
+
+# Максимальное расстояние между уровнями одного кластера.
 LEVEL_CLUSTER_PCT = 0.15
+
+# Минимальное количество участников для сильного кластера.
+MIN_CLUSTER_MEMBERS = 2
+
+# Максимальное количество Major Liquidity.
+MAX_MAJOR_LEVELS = 6
+
 
 # ============================================================
 # STRICT SWEEP
 # ============================================================
 
-# Максимальный возраст sweep в 5M свечах
 MAX_SWEEP_AGE_5M = 6
 
-# Минимальная глубина sweep
-# 0.03% больше НЕ считается полноценным sweep
+# Sweep меньше 0.10% считаем микро-проколом.
 MIN_SWEEP_DEPTH_PCT = 0.10
 
-# Минимальная сила reversal body
 MIN_REVERSAL_BODY_RATIO = 0.35
 
-# Обязательная FVG inversion
 REQUIRE_5M_IMBALANCE_INVERSION = True
+
+
+# ============================================================
+# 15M CONFIRMATION
+# ============================================================
+
+REQUIRE_15M_CONFIRMATION = True
+
+MIN_15M_BODY_RATIO = 0.30
 
 
 # ============================================================
@@ -286,10 +303,7 @@ def candle_body_ratio(c):
 # SWING STRUCTURE
 # ============================================================
 
-def swing_highs(
-    candles,
-    radius=SWING_RADIUS
-):
+def swing_highs(candles, radius=SWING_RADIUS):
 
     result = []
 
@@ -326,17 +340,12 @@ def swing_highs(
 
         if value >= max(neighbours):
 
-            result.append(
-                (i, value)
-            )
+            result.append((i, value))
 
     return result
 
 
-def swing_lows(
-    candles,
-    radius=SWING_RADIUS
-):
+def swing_lows(candles, radius=SWING_RADIUS):
 
     result = []
 
@@ -373,9 +382,7 @@ def swing_lows(
 
         if value <= min(neighbours):
 
-            result.append(
-                (i, value)
-            )
+            result.append((i, value))
 
     return result
 
@@ -427,104 +434,130 @@ def context_1h(candles):
 
 
 # ============================================================
-# MAJOR LIQUIDITY
+# MAJOR LIQUIDITY — STRICT
 # ============================================================
 
-def cluster_levels(
-    levels: List[Dict[str, Any]]
-):
+def cluster_levels(levels):
 
     if not levels:
         return []
 
-    sorted_levels = sorted(
-        levels,
-        key=lambda x: x["price"]
-    )
+    highs = [
+        x for x in levels
+        if x.get("type") == "HIGH"
+    ]
 
-    clusters = []
+    lows = [
+        x for x in levels
+        if x.get("type") == "LOW"
+    ]
 
-    for level in sorted_levels:
+    result = []
 
-        price = f(
-            level.get("price")
+    for group in (highs, lows):
+
+        group = sorted(
+            group,
+            key=lambda x: x["price"]
         )
 
-        if price is None:
-            continue
+        clusters = []
 
-        placed = False
+        for level in group:
 
-        for cluster in clusters:
-
-            center = f(
-                cluster["price"]
+            price = f(
+                level.get("price")
             )
 
-            if center is None:
+            if price is None:
                 continue
 
-            dist = distance_pct(
-                price,
-                center
-            )
+            placed = False
 
-            if (
-                dist is not None
-                and dist <= LEVEL_CLUSTER_PCT
-            ):
+            for cluster in clusters:
 
-                cluster["members"] += 1
-
-                cluster["indices"].append(
-                    level["index"]
+                center = f(
+                    cluster["price"]
                 )
 
-                cluster["price"] = (
-                    (
-                        center
-                        * (
-                            cluster["members"] - 1
+                if center is None:
+                    continue
+
+                dist = distance_pct(
+                    price,
+                    center
+                )
+
+                if (
+                    dist is not None
+                    and dist <= LEVEL_CLUSTER_PCT
+                ):
+
+                    old_members = cluster[
+                        "members"
+                    ]
+
+                    cluster["price"] = (
+                        (
+                            center
+                            * old_members
                         )
+                        + price
+                    ) / (
+                        old_members + 1
                     )
-                    + price
-                ) / cluster["members"]
 
-                cluster["strength"] = min(
-                    1.0,
-                    cluster["strength"] + 0.08
-                )
+                    cluster["members"] += 1
 
-                placed = True
-                break
+                    cluster["indices"].append(
+                        level["index"]
+                    )
 
-        if not placed:
+                    cluster["strength"] = min(
+                        1.0,
+                        0.55
+                        + (
+                            cluster["members"]
+                            - 1
+                        ) * 0.12
+                    )
 
-            clusters.append({
-                "price": price,
-                "type": level["type"],
-                "index": level["index"],
-                "indices": [level["index"]],
-                "members": 1,
-                "strength": 0.55
-            })
+                    placed = True
+                    break
 
-    return clusters
+            if not placed:
+
+                clusters.append({
+                    "price": price,
+                    "type": level["type"],
+                    "members": 1,
+                    "indices": [
+                        level["index"]
+                    ],
+                    "strength": 0.55
+                })
+
+        result.extend(clusters)
+
+    return result
 
 
 def get_major_liquidity(
     candles_1h,
     current_price=None
 ):
-
     """
-    Major Liquidity считается ТОЛЬКО на 1H.
+    Источник Major Liquidity:
+        ТОЛЬКО 1H.
 
-    Источник:
-        1H swing highs
-        1H swing lows
+    Приоритет:
+        1. Повторные swing levels.
+        2. Близкие swing levels.
+        3. Сила кластера.
+        4. Близость к текущей цене.
 
-    Никаких 5M уровней.
+    Обычный одиночный swing теперь не считается
+    автоматически Major Liquidity.
     """
 
     if not candles_1h:
@@ -566,22 +599,36 @@ def get_major_liquidity(
     if not raw:
         return []
 
-    levels = cluster_levels(raw)
+    clusters = cluster_levels(raw)
 
     current = f(
         current_price
     )
 
-    result = []
+    prepared = []
 
-    for level in levels:
+    for cluster in clusters:
 
         price = f(
-            level.get("price")
+            cluster.get("price")
         )
 
         if price is None:
             continue
+
+        members = int(
+            cluster.get(
+                "members",
+                1
+            )
+        )
+
+        strength = f(
+            cluster.get(
+                "strength",
+                0.55
+            )
+        ) or 0.55
 
         dist = None
 
@@ -592,35 +639,124 @@ def get_major_liquidity(
                 price
             )
 
-        result.append({
+        # ----------------------------------------------------
+        # Дополнительная оценка важности
+        # ----------------------------------------------------
+
+        importance = strength
+
+        # Повторные касания сильно повышают значение.
+        if members >= 3:
+            importance += 0.20
+
+        elif members >= 2:
+            importance += 0.10
+
+        # Слишком далёкие уровни не должны доминировать
+        # над рабочими уровнями.
+        if dist is not None:
+
+            if dist <= 3.0:
+                importance += 0.10
+
+            elif dist <= 6.0:
+                importance += 0.05
+
+        importance = min(
+            1.0,
+            importance
+        )
+
+        prepared.append({
             "price": round(
                 price,
                 8
             ),
-            "type": level["type"],
+            "type": cluster["type"],
             "strength": round(
-                level["strength"],
+                strength,
                 2
             ),
-            "members": level["members"],
-            "index": level["index"],
+            "importance": round(
+                importance,
+                2
+            ),
+            "members": members,
+            "index": max(
+                cluster.get(
+                    "indices",
+                    [0]
+                )
+            ),
             "distance_pct": (
-                round(dist, 3)
+                round(
+                    dist,
+                    3
+                )
                 if dist is not None
                 else None
             )
         })
 
-    result.sort(
+    if not prepared:
+        return []
+
+    # --------------------------------------------------------
+    # Сначала сильные кластеры.
+    # --------------------------------------------------------
+
+    prepared.sort(
         key=lambda x: (
-            -x["strength"],
+            -x["importance"],
+            -x["members"],
             x["distance_pct"]
             if x["distance_pct"] is not None
             else 999999
         )
     )
 
-    return result
+    # --------------------------------------------------------
+    # Не даём одному типу ликвидности полностью
+    # забить список.
+    # --------------------------------------------------------
+
+    selected = []
+
+    high_count = 0
+    low_count = 0
+
+    for level in prepared:
+
+        if len(selected) >= MAX_MAJOR_LEVELS:
+            break
+
+        if level["type"] == "HIGH":
+
+            if high_count >= 4:
+                continue
+
+            high_count += 1
+
+        else:
+
+            if low_count >= 4:
+                continue
+
+            low_count += 1
+
+        selected.append(level)
+
+    # Если есть хотя бы 2 уровня — отлично.
+    # Если есть только один сильный уровень, оставляем его.
+    selected.sort(
+        key=lambda x: (
+            x["distance_pct"]
+            if x["distance_pct"] is not None
+            else 999999
+        )
+    )
+
+    return selected
 
 
 def nearest_major_levels(
@@ -638,24 +774,20 @@ def nearest_major_levels(
     )
 
     if current is None:
-        return []
+        return levels
 
-    result = [
-        dict(x)
-        for x in levels
-    ]
-
-    result.sort(
-        key=lambda x: abs(
-            x["price"] - current
+    return sorted(
+        levels,
+        key=lambda x: (
+            x["distance_pct"]
+            if x["distance_pct"] is not None
+            else 999999
         )
     )
 
-    return result
-
 
 # ============================================================
-# FVG / IMBALANCE
+# FVG
 # ============================================================
 
 def find_imbalances(candles):
@@ -675,40 +807,40 @@ def find_imbalances(candles):
         len(data)
     ):
 
-        a = data[i - 2]
-        c = data[i]
+        first = data[i - 2]
+        third = data[i]
 
-        a_high = h(a)
-        a_low = l(a)
+        first_high = h(first)
+        first_low = l(first)
 
-        c_high = h(c)
-        c_low = l(c)
+        third_high = h(third)
+        third_low = l(third)
 
         if None in (
-            a_high,
-            a_low,
-            c_high,
-            c_low
+            first_high,
+            first_low,
+            third_high,
+            third_low
         ):
             continue
 
         # Bullish FVG
-        if c_low > a_high:
+        if third_low > first_high:
 
             result.append({
                 "direction": "bullish",
-                "low": a_high,
-                "high": c_low,
+                "low": first_high,
+                "high": third_low,
                 "index": i
             })
 
         # Bearish FVG
-        if c_high < a_low:
+        if third_high < first_low:
 
             result.append({
                 "direction": "bearish",
-                "low": c_high,
-                "high": a_low,
+                "low": third_high,
+                "high": first_low,
                 "index": i
             })
 
@@ -757,6 +889,162 @@ def imbalance_context(
 
 
 # ============================================================
+# 15M CONFIRMATION
+# ============================================================
+
+def confirmation_15m(
+    candles_15m,
+    direction,
+    sweep_level_value
+):
+    """
+    После Major Liquidity Sweep:
+
+    LONG:
+        15M должен показать bullish reclaim
+        уровня sweep.
+
+    SHORT:
+        15M должен показать bearish reclaim
+        уровня sweep.
+
+    Это отдельный Hard Gate.
+    """
+
+    if not candles_15m:
+
+        return (
+            False,
+            "15M данные отсутствуют."
+        )
+
+    data = last(
+        candles_15m,
+        8
+    )
+
+    if len(data) < 2:
+
+        return (
+            False,
+            "Недостаточно 15M свечей."
+        )
+
+    level = f(
+        sweep_level_value
+    )
+
+    if level is None:
+
+        return (
+            False,
+            "Нет уровня Sweep для 15M confirmation."
+        )
+
+    # Проверяем последние закрытые свечи.
+    latest = data[-1]
+
+    latest_close = cl(latest)
+
+    if latest_close is None:
+
+        return (
+            False,
+            "Нет close последней 15M свечи."
+        )
+
+    # ========================================================
+    # LONG
+    # ========================================================
+
+    if direction == "LONG":
+
+        # Последняя свеча должна закрыться выше уровня.
+        if latest_close <= level:
+
+            return (
+                False,
+                "15M ещё не вернулся выше sweep."
+            )
+
+        # Нужна bullish структура последних свечей.
+        bullish_count = 0
+
+        for candle in data[-3:]:
+
+            if (
+                candle_direction(candle)
+                == "bullish"
+            ):
+                bullish_count += 1
+
+        body = candle_body_ratio(
+            latest
+        )
+
+        if (
+            bullish_count >= 1
+            and body >= MIN_15M_BODY_RATIO
+        ):
+
+            return (
+                True,
+                (
+                    "15M bullish confirmation: "
+                    "reclaim + bullish body."
+                )
+            )
+
+        return (
+            False,
+            "15M reclaim есть, но свечное подтверждение слабое."
+        )
+
+    # ========================================================
+    # SHORT
+    # ========================================================
+
+    if latest_close >= level:
+
+        return (
+            False,
+            "15M ещё не вернулся ниже sweep."
+        )
+
+    bearish_count = 0
+
+    for candle in data[-3:]:
+
+        if (
+            candle_direction(candle)
+            == "bearish"
+        ):
+            bearish_count += 1
+
+    body = candle_body_ratio(
+        latest
+    )
+
+    if (
+        bearish_count >= 1
+        and body >= MIN_15M_BODY_RATIO
+    ):
+
+        return (
+            True,
+            (
+                "15M bearish confirmation: "
+                "reclaim + bearish body."
+            )
+        )
+
+    return (
+        False,
+        "15M reclaim есть, но свечное подтверждение слабое."
+    )
+
+
+# ============================================================
 # 5M FVG INVERSION
 # ============================================================
 
@@ -766,20 +1054,13 @@ def fvg_inversion_5m(
     sweep_index=None
 ):
 
-    """
-    LONG:
-        bearish FVG должен быть пробит
-        телом bullish свечи сверху.
-
-    SHORT:
-        bullish FVG должен быть пробит
-        телом bearish свечи снизу.
-
-    Это обязательное подтверждение.
-    """
-
     if not candles:
-        return False, "Нет 5M данных.", None
+
+        return (
+            False,
+            "Нет 5M данных.",
+            None
+        )
 
     data = last(
         candles,
@@ -787,12 +1068,24 @@ def fvg_inversion_5m(
     )
 
     if len(data) < 5:
-        return False, "Недостаточно 5M данных для FVG.", None
 
-    gaps = find_imbalances(data)
+        return (
+            False,
+            "Недостаточно 5M данных для FVG.",
+            None
+        )
+
+    gaps = find_imbalances(
+        data
+    )
 
     if not gaps:
-        return False, "5M FVG не найден.", None
+
+        return (
+            False,
+            "5M FVG не найден.",
+            None
+        )
 
     latest = data[-1]
 
@@ -800,111 +1093,101 @@ def fvg_inversion_5m(
     close = cl(latest)
 
     if op is None or close is None:
-        return False, "Нет OHLC последней 5M свечи.", None
 
-    # --------------------------------------------------------
+        return (
+            False,
+            "Нет OHLC последней 5M свечи.",
+            None
+        )
+
+    # ========================================================
     # LONG
-    # --------------------------------------------------------
+    # ========================================================
 
     if direction == "LONG":
 
-        bearish_gaps = [
-            g
-            for g in gaps
+        bearish = [
+            g for g in gaps
             if g["direction"] == "bearish"
         ]
 
-        if not bearish_gaps:
+        if not bearish:
 
             return (
                 False,
-                "Нет bearish 5M FVG для инверсии LONG.",
+                "Нет bearish 5M FVG для LONG inversion.",
                 None
             )
 
-        # Берём самый свежий FVG
-        gap = bearish_gaps[-1]
+        # Ищем свежие FVG, а не обязательно последний.
+        for gap in reversed(bearish):
 
-        gap_low = gap["low"]
-        gap_high = gap["high"]
+            gap_high = gap["high"]
 
-        # Тело должно находиться/закрыться выше FVG
-        body_close_above = (
-            close > gap_high
-            and op <= gap_high
+            if (
+                close > gap_high
+                and op <= gap_high
+            ):
+
+                return (
+                    True,
+                    (
+                        "5M bearish FVG "
+                        "инвертирован bullish body close."
+                    ),
+                    gap
+                )
+
+        return (
+            False,
+            "Bearish 5M FVG ещё не инвертирован вверх.",
+            bearish[-1]
         )
 
-        if body_close_above:
+    # ========================================================
+    # SHORT
+    # ========================================================
+
+    bullish = [
+        g for g in gaps
+        if g["direction"] == "bullish"
+    ]
+
+    if not bullish:
+
+        return (
+            False,
+            "Нет bullish 5M FVG для SHORT inversion.",
+            None
+        )
+
+    for gap in reversed(bullish):
+
+        gap_low = gap["low"]
+
+        if (
+            close < gap_low
+            and op >= gap_low
+        ):
 
             return (
                 True,
                 (
-                    "5M bearish FVG "
-                    "инвертирован bullish body close."
+                    "5M bullish FVG "
+                    "инвертирован bearish body close."
                 ),
                 gap
             )
 
-        return (
-            False,
-            (
-                "5M bearish FVG ещё не "
-                "инвертирован вверх."
-            ),
-            gap
-        )
-
-    # --------------------------------------------------------
-    # SHORT
-    # --------------------------------------------------------
-
-    bullish_gaps = [
-        g
-        for g in gaps
-        if g["direction"] == "bullish"
-    ]
-
-    if not bullish_gaps:
-
-        return (
-            False,
-            "Нет bullish 5M FVG для инверсии SHORT.",
-            None
-        )
-
-    gap = bullish_gaps[-1]
-
-    gap_low = gap["low"]
-    gap_high = gap["high"]
-
-    body_close_below = (
-        close < gap_low
-        and op >= gap_low
-    )
-
-    if body_close_below:
-
-        return (
-            True,
-            (
-                "5M bullish FVG "
-                "инвертирован bearish body close."
-            ),
-            gap
-        )
-
     return (
         False,
-        (
-            "5M bullish FVG ещё не "
-            "инвертирован вниз."
-        ),
-        gap
+        "Bullish 5M FVG ещё не инвертирован вниз.",
+        bullish[-1]
     )
 
 
 # ============================================================
-# SWEEP HELPERS
+# SWEEP
 # ============================================================
 
 def sweep_level(sweep):
@@ -934,10 +1217,10 @@ def sweep_direction(sweep):
         )
     ).upper()
 
-    if direction in {
+    if direction in (
         "LONG",
         "SHORT"
-    }:
+    ):
         return direction
 
     return None
@@ -960,20 +1243,13 @@ def sweep_confirmed(
     )
 
 
-# ============================================================
-# SWEEP VS MAJOR LIQUIDITY
-# ============================================================
-
 def validate_sweep_against_liquidity(
     sweep,
     major_levels,
     direction
 ):
 
-    if not sweep:
-        return False
-
-    if not major_levels:
+    if not sweep or not major_levels:
         return False
 
     level = sweep_level(
@@ -983,7 +1259,7 @@ def validate_sweep_against_liquidity(
     if level is None:
         return False
 
-    expected_type = (
+    wanted = (
         "LOW"
         if direction == "LONG"
         else "HIGH"
@@ -991,21 +1267,19 @@ def validate_sweep_against_liquidity(
 
     for major in major_levels:
 
-        major_price = f(
-            major.get("price")
-        )
-
-        major_type = str(
+        if str(
             major.get(
                 "type",
                 ""
             )
-        ).upper()
+        ).upper() != wanted:
+            continue
 
-        if (
-            major_price is None
-            or major_type != expected_type
-        ):
+        major_price = f(
+            major.get("price")
+        )
+
+        if major_price is None:
             continue
 
         dist = distance_pct(
@@ -1017,7 +1291,6 @@ def validate_sweep_against_liquidity(
             dist is not None
             and dist <= LEVEL_CLUSTER_PCT
         ):
-
             return True
 
     return False
@@ -1044,11 +1317,11 @@ def find_sweep_extreme(
     if direction == "LONG":
 
         values = [
-            l(x)
-            for x in data
+            l(c)
+            for c in data
             if (
-                l(x) is not None
-                and l(x) < level
+                l(c) is not None
+                and l(c) < level
             )
         ]
 
@@ -1058,11 +1331,11 @@ def find_sweep_extreme(
     else:
 
         values = [
-            h(x)
-            for x in data
+            h(c)
+            for c in data
             if (
-                h(x) is not None
-                and h(x) > level
+                h(c) is not None
+                and h(c) > level
             )
         ]
 
@@ -1072,20 +1345,11 @@ def find_sweep_extreme(
     return None
 
 
-# ============================================================
-# SWEEP AGE
-# ============================================================
-
 def calculate_sweep_age(
     candles,
     level,
     direction
 ):
-
-    """
-    Ищем последнюю свечу,
-    которая реально сняла уровень.
-    """
 
     if not candles or level is None:
         return None
@@ -1123,7 +1387,7 @@ def calculate_sweep_age(
 
 
 # ============================================================
-# STRICT SWEEP QUALITY
+# SWEEP QUALITY
 # ============================================================
 
 def validate_sweep_quality(
@@ -1141,14 +1405,10 @@ def validate_sweep_quality(
 
         return (
             False,
-            "Недостаточно данных для проверки sweep.",
+            "Недостаточно данных для Sweep.",
             None,
             None
         )
-
-    # --------------------------------------------------------
-    # DEPTH
-    # --------------------------------------------------------
 
     depth = distance_pct(
         extreme,
@@ -1159,27 +1419,24 @@ def validate_sweep_quality(
 
         return (
             False,
-            "Не удалось рассчитать глубину sweep.",
+            "Не удалось определить глубину Sweep.",
             None,
             None
         )
 
+    # MICRO SWEEP BLOCK
     if depth < MIN_SWEEP_DEPTH_PCT:
 
         return (
             False,
             (
-                f"Sweep слишком маленький: "
+                f"Микро-прокол: "
                 f"{depth:.3f}% < "
                 f"{MIN_SWEEP_DEPTH_PCT:.2f}%."
             ),
             depth,
             None
         )
-
-    # --------------------------------------------------------
-    # AGE
-    # --------------------------------------------------------
 
     age = calculate_sweep_age(
         candles_5m,
@@ -1191,7 +1448,7 @@ def validate_sweep_quality(
 
         return (
             False,
-            "Свежий sweep не найден.",
+            "Свежий Sweep не найден.",
             depth,
             None
         )
@@ -1211,9 +1468,9 @@ def validate_sweep_quality(
     return (
         True,
         (
-            f"Sweep качественный: "
+            f"Sweep valid: "
             f"depth={depth:.3f}%, "
-            f"age={age} candles."
+            f"age={age}."
         ),
         depth,
         age
@@ -1261,9 +1518,9 @@ def detect_fresh_sweep(
             )
         ).upper()
 
-        # ----------------------------------------------------
-        # LONG SWEEP
-        # ----------------------------------------------------
+        # ====================================================
+        # LONG
+        # ====================================================
 
         if level_type == "LOW":
 
@@ -1297,7 +1554,7 @@ def detect_fresh_sweep(
             if latest_close is None:
                 continue
 
-            # Цена должна вернуть уровень
+            # Reclaim
             if latest_close <= price:
                 continue
 
@@ -1307,10 +1564,7 @@ def detect_fresh_sweep(
                 "LONG"
             )
 
-            if age is None:
-                continue
-
-            if age > MAX_SWEEP_AGE_5M:
+            if age is None or age > MAX_SWEEP_AGE_5M:
                 continue
 
             candidates.append({
@@ -1327,9 +1581,9 @@ def detect_fresh_sweep(
                 "sweep_age_5m": age
             })
 
-        # ----------------------------------------------------
-        # SHORT SWEEP
-        # ----------------------------------------------------
+        # ====================================================
+        # SHORT
+        # ====================================================
 
         elif level_type == "HIGH":
 
@@ -1372,10 +1626,7 @@ def detect_fresh_sweep(
                 "SHORT"
             )
 
-            if age is None:
-                continue
-
-            if age > MAX_SWEEP_AGE_5M:
+            if age is None or age > MAX_SWEEP_AGE_5M:
                 continue
 
             candidates.append({
@@ -1416,7 +1667,7 @@ def detect_fresh_sweep(
 
 
 # ============================================================
-# 5M V / L REVERSAL
+# 5M V/L REVERSAL
 # ============================================================
 
 def v_l_reversal(
@@ -1447,7 +1698,7 @@ def v_l_reversal(
 
         return (
             False,
-            "Нет корректного sweep.",
+            "Нет корректного Sweep.",
             None,
             None
         )
@@ -1496,7 +1747,7 @@ def v_l_reversal(
 
             return (
                 False,
-                "Не найден экстремум LONG sweep.",
+                "Не найден экстремум LONG Sweep.",
                 manipulation,
                 0
             )
@@ -1535,9 +1786,8 @@ def v_l_reversal(
             return (
                 False,
                 (
-                    f"V-разворот слабый: "
-                    f"{recovery_ratio:.2f}x "
-                    f"< {MIN_RECOVERY_RATIO:.2f}x."
+                    f"V-recovery слабый: "
+                    f"{recovery_ratio:.2f}x."
                 ),
                 manipulation,
                 recovery
@@ -1556,7 +1806,7 @@ def v_l_reversal(
 
             return (
                 False,
-                "Нет bullish body close выше sweep.",
+                "Нет bullish body close выше Sweep.",
                 manipulation,
                 recovery
             )
@@ -1581,8 +1831,8 @@ def v_l_reversal(
             True,
             (
                 "5M V-reversal подтвержден: "
-                "sweep снизу + recovery >= 1/3 "
-                "+ bullish body close."
+                "Sweep + recovery >= 1/3 "
+                "+ strong bullish body."
             ),
             manipulation,
             recovery
@@ -1616,7 +1866,7 @@ def v_l_reversal(
 
         return (
             False,
-            "Не найден экстремум SHORT sweep.",
+            "Не найден экстремум SHORT Sweep.",
             manipulation,
             0
         )
@@ -1655,9 +1905,8 @@ def v_l_reversal(
         return (
             False,
             (
-                f"L-разворот слабый: "
-                f"{recovery_ratio:.2f}x "
-                f"< {MIN_RECOVERY_RATIO:.2f}x."
+                f"L-recovery слабый: "
+                f"{recovery_ratio:.2f}x."
             ),
             manipulation,
             recovery
@@ -1676,7 +1925,7 @@ def v_l_reversal(
 
         return (
             False,
-            "Нет bearish body close ниже sweep.",
+            "Нет bearish body close ниже Sweep.",
             manipulation,
             recovery
         )
@@ -1701,8 +1950,8 @@ def v_l_reversal(
         True,
         (
             "5M L-reversal подтвержден: "
-            "sweep сверху + recovery >= 1/3 "
-            "+ bearish body close."
+            "Sweep + recovery >= 1/3 "
+            "+ strong bearish body."
         ),
         manipulation,
         recovery
@@ -1734,75 +1983,56 @@ def structural_target(
             SWING_RADIUS
         )
 
-        candidates = []
-
-        for index, value in highs:
-
+        candidates = [
+            {
+                "index": index,
+                "price": value
+            }
+            for index, value in highs
             if (
                 value is not None
                 and value > entry
-            ):
-
-                candidates.append({
-                    "index": index,
-                    "price": value
-                })
+            )
+        ]
 
         if not candidates:
             return None
 
-        # Сначала берём недавно сформированные
+        # Для LONG выбираем ближайший валидный
+        # структурный HIGH.
         candidates.sort(
-            key=lambda x: x["index"],
-            reverse=True
-        )
-
-        recent = candidates[:5]
-
-        # Из них ближайший валидный TP
-        recent.sort(
             key=lambda x: x["price"]
         )
 
-        return recent[0]["price"]
-
-    # SHORT
+        return candidates[0]["price"]
 
     lows = swing_lows(
         data,
         SWING_RADIUS
     )
 
-    candidates = []
-
-    for index, value in lows:
-
+    candidates = [
+        {
+            "index": index,
+            "price": value
+        }
+        for index, value in lows
         if (
             value is not None
             and value < entry
-        ):
-
-            candidates.append({
-                "index": index,
-                "price": value
-            })
+        )
+    ]
 
     if not candidates:
         return None
 
+    # Для SHORT — ближайший структурный LOW.
     candidates.sort(
-        key=lambda x: x["index"],
-        reverse=True
-    )
-
-    recent = candidates[:5]
-
-    recent.sort(
         key=lambda x: x["price"],
         reverse=True
     )
 
-    return recent[0]["price"]
+    return candidates[0]["price"]
 
 
 # ============================================================
@@ -1838,11 +2068,11 @@ def flow_check(
 
     if direction == "LONG":
 
-        if absorption in {
+        if absorption in (
             "buyers",
             "buyer",
             "buy"
-        }:
+        ):
             return True, "buyer absorption"
 
         if delta is not None and delta > 0:
@@ -1853,11 +2083,11 @@ def flow_check(
 
     else:
 
-        if absorption in {
+        if absorption in (
             "sellers",
             "seller",
             "sell"
-        }:
+        ):
             return True, "seller absorption"
 
         if delta is not None and delta < 0:
@@ -1866,7 +2096,8 @@ def flow_check(
         if cvd is not None and cvd < 0:
             return True, "falling CVD"
 
-    return False, (
+    return (
+        False,
         "order flow не подтверждает направление"
     )
 
@@ -1951,10 +2182,7 @@ def build_trade(
         target - entry
     )
 
-    if (
-        risk <= 0
-        or reward <= 0
-    ):
+    if risk <= 0 or reward <= 0:
 
         return (
             None,
@@ -2049,11 +2277,15 @@ def analyze(
 
     else:
 
+        # Если D1 не передан, стратегия не должна
+        # самостоятельно придумывать направление.
         d1 = "neutral"
 
     result.d1_context = d1
 
-    # W1 fallback
+    # ========================================================
+    # W1 FALLBACK
+    # ========================================================
 
     if (
         d1 == "neutral"
@@ -2066,26 +2298,28 @@ def analyze(
 
         result.w1_context = w1
 
-        if w1 in {
+        if w1 in (
             "bullish",
             "bearish"
-        }:
+        ):
 
             d1 = w1
 
-    # D1 unclear
+    # ========================================================
+    # D1 GATE
+    # ========================================================
 
-    if d1 not in {
+    if d1 not in (
         "bullish",
         "bearish"
-    }:
+    ):
 
         result.score = 25
         result.stage = "D1"
 
         result.reason = (
             "D1 не показывает активный тренд "
-            "→ ждём."
+            "→ вход запрещён."
         )
 
         return result.to_dict()
@@ -2125,9 +2359,9 @@ def analyze(
     # MAJOR LIQUIDITY
     # ========================================================
 
-    # КРИТИЧЕСКИ ВАЖНО:
-    # всегда рассчитываем внутреннюю ликвидность.
-    # Она является источником истины.
+    # ВАЖНО:
+    # входной major_levels намеренно НЕ используется
+    # как источник истины.
 
     calculated_levels = get_major_liquidity(
         candles_1h,
@@ -2144,8 +2378,8 @@ def analyze(
         result.stage = "LIQUIDITY"
 
         result.reason = (
-            "Major Liquidity на 1H "
-            "не найдена → ждём."
+            "Major Liquidity на 1H не найдена "
+            "→ ждём."
         )
 
         return result.to_dict()
@@ -2154,11 +2388,27 @@ def analyze(
     # SWEEP
     # ========================================================
 
-    active_sweep = sweep
+    active_sweep = None
 
-    # Если внешний sweep отсутствует —
-    # ищем самостоятельно.
+    # Сначала проверяем переданный sweep.
+    if sweep:
 
+        if (
+            sweep_confirmed(
+                sweep,
+                direction
+            )
+            and validate_sweep_against_liquidity(
+                sweep,
+                calculated_levels,
+                direction
+            )
+        ):
+
+            active_sweep = sweep
+
+    # Если внешний sweep невалидный —
+    # ищем свежий самостоятельно.
     if not active_sweep:
 
         active_sweep = detect_fresh_sweep(
@@ -2166,8 +2416,6 @@ def analyze(
             candles_5m,
             current
         )
-
-    # Проверяем направление
 
     if not sweep_confirmed(
         active_sweep,
@@ -2186,7 +2434,7 @@ def analyze(
         return result.to_dict()
 
     # ========================================================
-    # SWEEP MUST MATCH INTERNAL MAJOR LIQUIDITY
+    # SWEEP VS MAJOR LIQUIDITY
     # ========================================================
 
     if not validate_sweep_against_liquidity(
@@ -2200,8 +2448,7 @@ def analyze(
 
         result.reason = (
             "Sweep отклонён: "
-            "уровень не является "
-            "Major Liquidity 1H."
+            "уровень не является Major Liquidity 1H."
         )
 
         return result.to_dict()
@@ -2259,7 +2506,7 @@ def analyze(
 
         result.reason = (
             "Не удалось определить "
-            "экстремум sweep."
+            "экстремум Sweep."
         )
 
         return result.to_dict()
@@ -2291,7 +2538,7 @@ def analyze(
         result.stage = "SWEEP"
 
         result.reason = (
-            "Sweep есть, но не проходит "
+            "Sweep найден, но не проходит "
             f"strict filter: {sweep_reason}"
         )
 
@@ -2315,12 +2562,42 @@ def analyze(
         result.stage = "SWEPT"
 
         result.reason = (
-            f"Цена ушла от sweep на "
-            f"{dist:.2f}% → "
-            "не догоняем."
+            f"Цена ушла от Sweep на "
+            f"{dist:.2f}% → не догоняем."
         )
 
         return result.to_dict()
+
+    # ========================================================
+    # 15M CONFIRMATION
+    # ========================================================
+
+    (
+        confirmation_15m_ok,
+        confirmation_15m_reason
+    ) = confirmation_15m(
+        candles_15m,
+        direction,
+        level
+    )
+
+    result.confirmation_15m = (
+        confirmation_15m_reason
+    )
+
+    if REQUIRE_15M_CONFIRMATION:
+
+        if not confirmation_15m_ok:
+
+            result.score = 60
+            result.stage = "15M"
+
+            result.reason = (
+                "Major Liquidity Sweep есть, "
+                "но 15M confirmation отсутствует."
+            )
+
+            return result.to_dict()
 
     # ========================================================
     # 5M V/L
@@ -2373,9 +2650,8 @@ def analyze(
         result.stage = "5M"
 
         result.reason = (
-            "Major Liquidity Sweep есть, "
-            "но 5M V/L подтверждение "
-            "ещё не сформировано."
+            "15M confirmation есть, "
+            "но 5M V/L ещё не подтверждён."
         )
 
         return result.to_dict()
@@ -2438,7 +2714,7 @@ def analyze(
 
         result.reason = (
             "Нет валидного структурного "
-            "High/Low для TP."
+            "HIGH/LOW для TP."
         )
 
         return result.to_dict()
@@ -2540,13 +2816,17 @@ def analyze(
 
     breakdown = [
         "Base: +80",
-        "D1 + 1H synchronized: +5"
+        "D1 + 1H synchronized: +5",
+        "Major Liquidity Sweep: mandatory",
+        "15M confirmation: mandatory",
+        "5M V/L: mandatory",
+        "5M FVG inversion: mandatory"
     ]
 
     score += 5
 
     # --------------------------------------------------------
-    # Sweep quality
+    # Sweep depth
     # --------------------------------------------------------
 
     if sweep_depth is not None:
@@ -2568,7 +2848,7 @@ def analyze(
             )
 
     # --------------------------------------------------------
-    # Sweep strength
+    # Liquidity strength
     # --------------------------------------------------------
 
     strength = f(
@@ -2594,6 +2874,18 @@ def analyze(
             breakdown.append(
                 "Weak liquidity strength: -2"
             )
+
+    # --------------------------------------------------------
+    # 15M
+    # --------------------------------------------------------
+
+    if confirmation_15m_ok:
+
+        score += 3
+
+        breakdown.append(
+            "15M confirmation: +3"
+        )
 
     # --------------------------------------------------------
     # 1H imbalance
@@ -2649,7 +2941,7 @@ def analyze(
             )
 
     # --------------------------------------------------------
-    # 5M FVG inversion
+    # FVG
     # --------------------------------------------------------
 
     if fvg_ok:
@@ -2681,11 +2973,8 @@ def analyze(
         )
 
     # --------------------------------------------------------
-    # RR
+    # RR informational
     # --------------------------------------------------------
-
-    # RR НЕ является фиксированным 1:2.
-    # Но хороший RR повышает качество.
 
     if rr >= 2.0:
 
@@ -2720,14 +3009,12 @@ def analyze(
     result.score_breakdown = breakdown
 
     # ========================================================
-    # FINAL HARD GATE
+    # FINAL HARD GATES
     # ========================================================
-
-    # Даже высокий score НЕ может обойти
-    # обязательные условия стратегии.
 
     if not sweep_ok:
 
+        result.score = score
         result.status = "WAIT"
         result.stage = "SWEEP"
 
@@ -2737,13 +3024,30 @@ def analyze(
 
         return result.to_dict()
 
+    if REQUIRE_15M_CONFIRMATION:
+
+        if not confirmation_15m_ok:
+
+            result.score = score
+            result.status = "WAIT"
+            result.stage = "15M"
+
+            result.reason = (
+                "Hard Gate: 15M confirmation "
+                "не подтверждена."
+            )
+
+            return result.to_dict()
+
     if not trigger_ok:
 
+        result.score = score
         result.status = "WAIT"
         result.stage = "5M"
 
         result.reason = (
-            "Hard Gate: 5M V/L не подтверждён."
+            "Hard Gate: 5M V/L "
+            "не подтверждён."
         )
 
         return result.to_dict()
@@ -2752,6 +3056,7 @@ def analyze(
 
         if not fvg_ok:
 
+            result.score = score
             result.status = "WAIT"
             result.stage = "5M_FVG"
 
@@ -2774,7 +3079,7 @@ def analyze(
         result.stage = "READY"
 
         result.reason = (
-            "Сетап сформирован, "
+            "Все обязательные условия выполнены, "
             "но Score ниже минимального."
         )
 
@@ -2792,10 +3097,11 @@ def analyze(
         f"1H {h1} → "
         "Major Liquidity → "
         "Fresh Sweep → "
+        "15M Confirmation → "
         "5M V/L → "
         "5M FVG Inversion → "
         "Entry → "
-        "SL behind sweep → "
+        "SL behind Sweep → "
         "Structural TP."
     )
 
@@ -2880,4 +3186,7 @@ __all__ = [
     "detect_fresh_sweep",
     "find_imbalances",
     "fvg_inversion_5m",
+    "confirmation_15m",
+    "validate_sweep_quality",
+    "v_l_reversal",
 ]
