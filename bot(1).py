@@ -1,34 +1,29 @@
-"""
-TradeMind 5.3
-Telegram scanner / monitor.
-
-D1 -> W1 fallback -> 1H
--> Major Liquidity
--> Sweep
--> 15M confirmation
--> 5M V/L reversal
--> Recovery >= 1/3
--> 5M FVG inversion
--> Entry / SL / Structural TP
-"""
+# ============================================================
+# TradeMind 5.3
+# main.py
+#
+# D1/W1 → 1H → Major Liquidity → Sweep
+# → 15M Confirmation → 5M V/L
+# → Recovery → 5M FVG Inversion
+# → Entry → SL → Structural TP
+#
+# Binance Spot = источник анализа
+# BingX Futures = исполнение, сейчас OFF
+# ============================================================
 
 import os
 import asyncio
 import logging
-from datetime import datetime, date
+from datetime import datetime
 
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,
     ContextTypes,
 )
 
-import bingx
-
 from market import get_market_data
-
 from strategy import (
     analyze,
     get_major_liquidity,
@@ -38,209 +33,292 @@ from strategy import (
 )
 
 
-# =========================================================
-# CONFIG
-# =========================================================
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
+    raise RuntimeError("BOT_TOKEN не найден в переменных окружения")
 
+
+# ------------------------------------------------------------
+# BingX
+# ------------------------------------------------------------
+
+BINGX_MODE = os.getenv("BINGX_MODE", "OFF").upper()
+
+try:
+    import bingx
+    BINGX_AVAILABLE = True
+except Exception:
+    bingx = None
+    BINGX_AVAILABLE = False
+
+
+# ------------------------------------------------------------
+# Монеты для автоматического сканирования
+# ------------------------------------------------------------
 
 SYMBOLS = [
     "SOLUSDT",
     "ETHUSDT",
+    "BTCUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "AVAXUSDT",
+    "LINKUSDT",
 ]
+
+
+# ------------------------------------------------------------
+# Ограничения
+# ------------------------------------------------------------
 
 MAX_TRADES_PER_DAY = 2
 
+MONITOR_INTERVAL = 30
 
-# =========================================================
-# LOGGING
-# =========================================================
+SIGNAL_COOLDOWN_MINUTES = 5
+
+# Максимальное расстояние от текущей цены до Entry,
+# после которого не преследуем движение.
+MAX_ENTRY_DISTANCE_PCT = 0.75
+
+
+# ============================================================
+# СОСТОЯНИЕ
+# ============================================================
+
+trades_today = 0
+daily_stop = False
+
+active_trade = None
+
+last_setups = {}
+
+last_signal_time = {}
+
+state_date = None
+
+
+# ============================================================
+# ЛОГИ
+# ============================================================
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 
 logger = logging.getLogger("TradeMind")
 
 
-# =========================================================
-# STATE
-# =========================================================
-
-trades_today = 0
-daily_stop = False
-active_trade = None
-
-last_setups = {}
-last_signal_time = {}
-
-_state_date = date.today()
-
-
-# =========================================================
-# DAILY RESET
-# =========================================================
+# ============================================================
+# СБРОС ДНЕВНОГО СОСТОЯНИЯ
+# ============================================================
 
 def reset_daily_state():
-
     global trades_today
     global daily_stop
-    global _state_date
+    global active_trade
+    global state_date
 
-    today = date.today()
+    today = datetime.utcnow().date()
 
-    if today != _state_date:
+    if state_date != today:
+        state_date = today
 
         trades_today = 0
         daily_stop = False
         active_trade = None
-        _state_date = today
 
-        logger.info("Daily state reset.")
+        logger.info("Daily state reset")
 
 
-# =========================================================
-# FORMAT HELPERS
-# =========================================================
+# ============================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================
+
+def now():
+    return datetime.utcnow()
+
 
 def fmt_price(value):
-
     if value is None:
         return "—"
 
     try:
-        return f"${float(value):.4f}"
+        value = float(value)
+
+        if value >= 1000:
+            return f"${value:,.2f}"
+
+        if value >= 100:
+            return f"${value:.2f}"
+
+        if value >= 1:
+            return f"${value:.4f}"
+
+        return f"${value:.6f}"
+
     except Exception:
-        return "—"
+        return str(value)
 
 
 def fmt_pct(value):
-
     if value is None:
         return "—"
 
     try:
         return f"{float(value):.2f}%"
     except Exception:
-        return "—"
+        return str(value)
 
 
-def fmt_rr(value):
+def get_value(data, *keys, default=None):
+    """
+    Безопасно достаёт значение из словаря.
+    """
 
-    if value is None:
-        return "—"
+    if not isinstance(data, dict):
+        return default
 
-    try:
-        return f"1:{float(value):.2f}"
-    except Exception:
-        return "—"
+    for key in keys:
+        if key in data:
+            return data[key]
+
+    return default
 
 
-def trend_emoji(trend):
-
-    if trend == "bullish":
+def direction_emoji(direction):
+    if direction == "LONG":
         return "🟢"
 
-    if trend == "bearish":
+    if direction == "SHORT":
         return "🔴"
 
     return "⚪"
 
 
-# =========================================================
-# BUILD ANALYSIS
-# =========================================================
+def stage_text(stage):
+    mapping = {
+        "D1": "D1 TREND",
+        "W1": "W1 TREND",
+        "1H": "1H CONTEXT",
+        "LIQUIDITY": "MAJOR LIQUIDITY",
+        "WAIT": "WAIT",
+        "SWEPT": "SWEEP",
+        "15M_CONFIRMED": "15M CONFIRMATION",
+        "CONFIRMED": "5M CONFIRMED",
+        "READY": "READY",
+    }
+
+    return mapping.get(stage, str(stage))
+
+
+# ============================================================
+# АНАЛИЗ РЫНКА
+# ============================================================
 
 def build_analysis(symbol):
+    """
+    Получает Binance Spot данные и запускает TradeMind 5.3.
+    """
 
-    data = get_market_data(symbol)
+    market = get_market_data(symbol)
 
-    if not data:
-        raise RuntimeError(
-            f"Нет данных для {symbol}"
-        )
+    price = market["price"]
 
-    price = data["price"]
-
-    candles_d1 = data["candles_d1"]
-    candles_w1 = data["candles_w1"]
-    candles_1h = data["candles_1h"]
-    candles_15m = data["candles_15m"]
-    candles_5m = data["candles_5m"]
-
-    major_levels = get_major_liquidity(
-        candles_1h=candles_1h,
-        current_price=price,
+    candles_d1 = market.get(
+        "candles_d1",
+        market.get("d1", [])
     )
 
-    sweep = detect_fresh_sweep(
-        candles_1h=candles_1h,
-        candles_5m=candles_5m,
-        current_price=price,
+    candles_w1 = market.get(
+        "candles_w1",
+        market.get("w1", [])
+    )
+
+    candles_1h = market.get(
+        "candles_1h",
+        market.get("1h", [])
+    )
+
+    candles_15m = market.get(
+        "candles_15m",
+        market.get("15m", [])
+    )
+
+    candles_5m = market.get(
+        "candles_5m",
+        market.get("5m", [])
     )
 
     result = analyze(
-        candles_1h=candles_1h,
-        candles_15m=candles_15m,
-        candles_5m=candles_5m,
-        price=price,
-        major_levels=major_levels,
-        sweep=sweep,
-        candles_d1=candles_d1,
-        candles_w1=candles_w1,
+        candles_d1,
+        candles_w1,
+        candles_1h,
+        candles_15m,
+        candles_5m,
+        price,
     )
 
-    result.update({
-        "symbol": symbol,
-        "price": price,
-        "major_levels": major_levels,
-        "sweep": sweep,
-        "candles_d1": candles_d1,
-        "candles_w1": candles_w1,
-        "candles_1h": candles_1h,
-        "candles_15m": candles_15m,
-        "candles_5m": candles_5m,
-        "strategy_version": STRATEGY_VERSION,
-    })
+    if isinstance(result, dict):
+        result["symbol"] = symbol
+        result["price"] = price
 
     return result
 
 
-# =========================================================
-# FIND READY SETUP
-# =========================================================
+# ============================================================
+# ПОИСК ГОТОВОГО СЕТАПА
+# ============================================================
 
 def find_first_ready():
+    """
+    Сканирует монеты.
+    Возвращает первый полноценный READY-сетап.
+    """
 
     reset_daily_state()
-
-    if daily_stop:
-        return None
-
-    if trades_today >= MAX_TRADES_PER_DAY:
-        return None
 
     for symbol in SYMBOLS:
 
         try:
-
             result = build_analysis(symbol)
+
+            if not isinstance(result, dict):
+                continue
+
+            stage = result.get("stage")
+
+            score = result.get(
+                "score",
+                result.get("total_score", 0)
+            )
+
+            try:
+                score = int(score)
+            except Exception:
+                score = 0
 
             last_setups[symbol] = result
 
-            if (
-                result.get("stage") == "READY"
-                and result.get("score", 0) >= MIN_SCORE_READY
-            ):
+            logger.info(
+                "%s | stage=%s | score=%s",
+                symbol,
+                stage,
+                score,
+            )
+
+            if stage == "READY" and score >= MIN_SCORE_READY:
                 return result
 
         except Exception as e:
-
             logger.exception(
                 "Analysis error %s: %s",
                 symbol,
@@ -250,356 +328,286 @@ def find_first_ready():
     return None
 
 
-# =========================================================
-# FORMAT READY SETUP
-# =========================================================
+# ============================================================
+# ФОРМАТ СЕТАПА
+# ============================================================
 
 def format_setup(setup):
+    symbol = setup.get("symbol", "UNKNOWN")
 
-    symbol = setup.get(
-        "symbol",
-        "UNKNOWN"
-    )
+    price = setup.get("price")
 
     direction = setup.get(
-        "direction"
+        "direction",
+        setup.get("side")
     )
 
     score = setup.get(
         "score",
-        0
+        setup.get("total_score", 0)
     )
 
     entry = setup.get(
-        "entry"
+        "entry",
+        setup.get("entry_price")
     )
 
     sl = setup.get(
-        "sl"
+        "sl",
+        setup.get("stop_loss")
     )
 
     tp = setup.get(
-        "tp"
+        "tp",
+        setup.get("take_profit")
     )
 
-    rr = setup.get(
-        "rr"
-    )
+    stage = setup.get("stage", "UNKNOWN")
 
     sweep = setup.get(
-        "sweep"
+        "sweep",
+        setup.get("fresh_sweep")
     )
 
-    d1 = setup.get(
-        "d1_context",
-        "neutral"
+    confirmation = setup.get(
+        "confirmation_15m",
+        setup.get("confirm_15m")
     )
 
-    w1 = setup.get(
-        "w1_context",
-        "neutral"
+    recovery = setup.get(
+        "recovery_ratio",
+        setup.get("recovery")
     )
 
-    h1 = setup.get(
-        "h1_context",
-        "neutral"
+    fvg = setup.get(
+        "fvg_inversion",
+        setup.get("fvg")
     )
 
-    sweep_depth = setup.get(
-        "sweep_depth"
-    )
+    emoji = direction_emoji(direction)
 
-    sweep_age = setup.get(
-        "sweep_age"
-    )
+    # --------------------------------------------------------
+    # Recovery
+    # --------------------------------------------------------
 
-    recovery_ratio = setup.get(
-        "recovery_ratio"
-    )
+    if recovery is None:
+        recovery_text = "—"
+    else:
+        try:
+            recovery_pct = float(recovery) * 100
+            recovery_text = f"{recovery_pct:.0f}%"
+        except Exception:
+            recovery_text = str(recovery)
 
-    tp_reason = setup.get(
-        "tp_reason"
-    )
+    # --------------------------------------------------------
+    # Sweep
+    # --------------------------------------------------------
 
-    # Направление
-    if direction == "LONG":
-        direction_text = "🟢 LONG"
+    if sweep:
+        sweep_level = get_value(
+            sweep,
+            "level",
+            "price"
+        )
 
-    elif direction == "SHORT":
-        direction_text = "🔴 SHORT"
+        sweep_text = fmt_price(sweep_level)
 
     else:
-        direction_text = "⚪ —"
+        sweep_text = "—"
 
-    # Recovery
-    if recovery_ratio is not None:
+    # --------------------------------------------------------
+    # FVG
+    # --------------------------------------------------------
+
+    if fvg is True:
+        fvg_text = "YES"
+
+    elif fvg is False:
+        fvg_text = "NO"
+
+    else:
+        fvg_text = "—"
+
+    # --------------------------------------------------------
+    # Confirmation
+    # --------------------------------------------------------
+
+    if confirmation is True:
+        confirmation_text = "YES"
+
+    elif confirmation is False:
+        confirmation_text = "NO"
+
+    else:
+        confirmation_text = "—"
+
+    # --------------------------------------------------------
+    # RR
+    # --------------------------------------------------------
+
+    rr = setup.get("rr")
+
+    if rr is None and entry is not None and sl is not None and tp is not None:
 
         try:
-            recovery_text = (
-                f"{float(recovery_ratio):.2f}x"
-            )
+            risk = abs(float(entry) - float(sl))
+            reward = abs(float(tp) - float(entry))
+
+            if risk > 0:
+                rr = reward / risk
+
         except Exception:
-            recovery_text = "—"
+            rr = None
 
-    else:
-        recovery_text = "—"
+    rr_text = "—"
 
-    # Sweep
-    if sweep:
-        sweep_text = "YES"
-    else:
-        sweep_text = "NO"
+    if rr is not None:
 
-    text = (
-        f"🚨 TRADEMIND {STRATEGY_VERSION}"
-        f" — ГОТОВЫЙ СЕТАП\n\n"
+        try:
+            rr_text = f"1:{float(rr):.2f}"
 
-        f"💠 Монета: {symbol}\n"
+        except Exception:
+            rr_text = str(rr)
 
-        f"📐 Направление: "
-        f"{direction_text}\n"
+    # --------------------------------------------------------
+    # READY
+    # --------------------------------------------------------
 
-        f"⭐ Score: {score}/100\n\n"
-
-        f"🟢 МОЖНО ВХОДИТЬ\n\n"
-
-        f"💰 Entry: "
-        f"{fmt_price(entry)}\n"
-
-        f"🛑 SL: "
-        f"{fmt_price(sl)}\n"
-
-        f"🎯 TP: "
-        f"{fmt_price(tp)}\n"
-
-        f"📊 RR: "
-        f"{fmt_rr(rr)}\n\n"
-
-        f"📍 D1: "
-        f"{trend_emoji(d1)} {d1}\n"
-
-        f"📍 W1: "
-        f"{trend_emoji(w1)} {w1}\n"
-
-        f"📍 1H: "
-        f"{trend_emoji(h1)} {h1}\n\n"
-
-        f"💧 Sweep: "
-        f"{sweep_text}\n"
-
-        f"📏 Sweep depth: "
-        f"{fmt_pct(sweep_depth)}\n"
-
-        f"⏱ Sweep age: "
-        f"{sweep_age if sweep_age is not None else '—'} × 5M\n\n"
-
-        f"🔄 Recovery: "
-        f"{recovery_text}\n\n"
-
-        f"🎯 TP logic: "
-        f"{tp_reason or 'Structural target'}\n\n"
-
-        f"⚠️ Не входить в середине.\n"
-
-        f"⚠️ Сигнал действует только "
-        f"при сохранении структуры."
+    ready_text = (
+        "🟢 МОЖНО РАССМАТРИВАТЬ ВХОД"
+        if stage == "READY"
+        else "⏳ ВХОД ПОКА ЗАПРЕЩЁН"
     )
-
-    return text
-
-
-# =========================================================
-# FORMAT WAIT
-# =========================================================
-
-def format_wait(setup):
-
-    symbol = setup.get(
-        "symbol",
-        "UNKNOWN"
-    )
-
-    price = setup.get(
-        "price"
-    )
-
-    stage = setup.get(
-        "stage",
-        "WAIT"
-    )
-
-    score = setup.get(
-        "score",
-        0
-    )
-
-    direction = setup.get(
-        "direction"
-    )
-
-    reason = setup.get(
-        "reason",
-        "No setup."
-    )
-
-    if direction == "LONG":
-        direction_text = "🟢 LONG"
-
-    elif direction == "SHORT":
-        direction_text = "🔴 SHORT"
-
-    else:
-        direction_text = "⚪ NEUTRAL"
 
     return (
-        f"🔎 TRADEMIND {STRATEGY_VERSION}"
-        f" — STATUS\n\n"
+        f"🔎 TRADEMIND {STRATEGY_VERSION}\n\n"
 
         f"💠 {symbol}\n"
+        f"📐 {emoji} {direction or '—'}\n"
+        f"⭐ Score: {score}/100\n"
+        f"📊 Stage: {stage_text(stage)}\n\n"
 
-        f"💵 Price: "
-        f"{fmt_price(price)}\n"
+        f"💰 Цена: {fmt_price(price)}\n\n"
 
-        f"📐 Bias: "
-        f"{direction_text}\n"
+        f"💧 Sweep: {sweep_text}\n"
+        f"🕐 15M confirmation: {confirmation_text}\n"
+        f"↩️ Recovery: {recovery_text}\n"
+        f"🔄 5M FVG inversion: {fvg_text}\n\n"
 
-        f"📊 Stage: "
-        f"{stage}\n"
+        f"🎯 Entry: {fmt_price(entry)}\n"
+        f"🛑 SL: {fmt_price(sl)}\n"
+        f"🏁 TP: {fmt_price(tp)}\n"
+        f"⚖️ RR: {rr_text}\n\n"
 
-        f"⭐ Score: "
-        f"{score}/100\n\n"
-
-        f"⏳ WAIT\n\n"
-
-        f"{reason}"
+        f"{ready_text}"
     )
 
 
-# =========================================================
-# /START
-# =========================================================
+# ============================================================
+# ГЛАВНОЕ МЕНЮ
+# ============================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await track_chat(
-        update,
-        context
-    )
+    track_chat(update)
 
     text = (
-        f"🤖 TRADEMIND {STRATEGY_VERSION}\n\n"
+        "🤖 TRADEMIND 5.3\n\n"
 
-        f"Стратегия:\n"
+        "Стратегия:\n"
+        "D1/W1 → 1H → Major Liquidity\n"
+        "→ Sweep → 15M Confirmation\n"
+        "→ 5M V/L → Recovery\n"
+        "→ 5M FVG inversion\n"
+        "→ Entry → SL → Structural TP\n\n"
 
-        f"D1/W1 → 1H → Major Liquidity\n"
-        f"→ Sweep → 15M Confirmation\n"
-        f"→ 5M V/L → Recovery\n"
-        f"→ 5M FVG inversion\n"
-        f"→ Entry → SL → Structural TP\n\n"
+        f"📊 BingX mode: {BINGX_MODE}\n\n"
 
-        f"📊 BingX mode: "
-        f"{bingx.mode()}\n\n"
-
-        f"Команды:\n"
-
-        f"/status — статус\n"
-        f"/sol — анализ SOL\n"
-        f"/eth — анализ ETH\n"
-        f"/scan — поиск сетапа\n"
-        f"/levels — крупная ликвидность\n"
-        f"/help — помощь"
+        "Команды:\n"
+        "/status — статус бота\n"
+        "/sol — анализ SOL\n"
+        "/eth — анализ ETH\n"
+        "/market — рынок монет\n"
+        "/search — поиск сетапа\n"
+        "/levels — крупная ликвидность\n"
+        "/chart — график/цена\n"
+        "/journal — журнал\n"
+        "/subscribe — включить уведомления\n"
+        "/unsubscribe — выключить уведомления\n"
+        "/bingx — статус BingX\n"
+        "/balance — баланс BingX\n"
+        "/position — позиции BingX\n"
+        "/help — помощь"
     )
+
+    await update.message.reply_text(text)
+
+
+# ============================================================
+# HELP
+# ============================================================
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    track_chat(update)
 
     await update.message.reply_text(
-        text
+        "📚 TRADEMIND 5.3\n\n"
+
+        "Основная логика:\n"
+        "D1/W1 → 1H → крупная ликвидность\n"
+        "→ Sweep → 15M confirmation\n"
+        "→ 5M V/L → Recovery ≥ 1/3\n"
+        "→ 5M FVG inversion\n"
+        "→ Entry → SL → Structural TP\n\n"
+
+        "Главное правило:\n"
+        "❌ Нет подтверждения → нет входа.\n"
+        "❌ Не входить в середине движения.\n"
+        "❌ Не преследовать цену.\n"
+        "❌ Не брать мелкую ликвидность.\n\n"
+
+        "Команды:\n"
+        "/sol\n"
+        "/eth\n"
+        "/market\n"
+        "/search\n"
+        "/levels\n"
+        "/chart\n"
+        "/status\n"
+        "/journal\n"
+        "/subscribe\n"
+        "/unsubscribe"
     )
 
 
-# =========================================================
-# /HELP
-# =========================================================
+# ============================================================
+# STATUS
+# ============================================================
 
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await track_chat(
-        update,
-        context
-    )
-
-    text = (
-        f"🤖 TRADEMIND {STRATEGY_VERSION}\n\n"
-
-        f"/status — статус бота\n"
-        f"/sol — полный анализ SOL\n"
-        f"/eth — полный анализ ETH\n"
-        f"/scan — поиск готового сетапа\n"
-        f"/levels — крупные уровни\n"
-        f"/help — помощь\n\n"
-
-        f"TradeMind НЕ входит без:\n\n"
-
-        f"1️⃣ D1/W1 bias\n"
-        f"2️⃣ 1H sync\n"
-        f"3️⃣ Major liquidity sweep\n"
-        f"4️⃣ 15M confirmation\n"
-        f"5️⃣ 5M V/L reversal\n"
-        f"6️⃣ Recovery >= 1/3\n"
-        f"7️⃣ 5M FVG inversion"
-    )
-
-    await update.message.reply_text(
-        text
-    )
-
-
-# =========================================================
-# /STATUS
-# =========================================================
-
-async def status(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    global trades_today
-
-    await track_chat(
-        update,
-        context
-    )
-
+    track_chat(update)
     reset_daily_state()
 
-    mode = bingx.mode()
+    active_text = "🟢 Нет активной сделки"
 
     if active_trade:
+        active_symbol = active_trade.get("symbol", "UNKNOWN")
+        active_direction = active_trade.get("direction", "—")
 
         active_text = (
-            f"🟢 {active_trade.get('symbol')} "
-            f"{active_trade.get('direction')}"
+            f"🔴 Активная сделка: "
+            f"{active_symbol} {active_direction}"
         )
 
-    else:
+    await update.message.reply_text(
+        f"📊 TRADEMIND {STRATEGY_VERSION} — СТАТУС\n\n"
 
-        active_text = (
-            "🟢 Активной сделки нет."
-        )
-
-    text = (
-        f"📊 TRADEMIND {STRATEGY_VERSION}"
-        f" — СТАТУС\n\n"
-
-        f"Strategy version: "
-        f"{STRATEGY_VERSION}\n"
-
-        f"BingX mode: "
-        f"{mode}\n"
+        f"Стратегия: {STRATEGY_VERSION}\n"
+        f"BingX mode: {BINGX_MODE}\n"
+        f"BingX доступен: "
+        f"{'YES' if BINGX_AVAILABLE else 'NO'}\n\n"
 
         f"Сделок сегодня: "
         f"{trades_today}/{MAX_TRADES_PER_DAY}\n"
@@ -610,253 +618,273 @@ async def status(
         f"{active_text}"
     )
 
+
+# ============================================================
+# ANALYSIS SOL
+# ============================================================
+
+async def sol(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    track_chat(update)
+
     await update.message.reply_text(
-        text
-    )
-
-
-# =========================================================
-# SINGLE SYMBOL ANALYSIS
-# =========================================================
-
-async def analyze_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    symbol
-):
-
-    await track_chat(
-        update,
-        context
+        "🔎 Анализирую SOL по Binance Spot...\n"
+        "D1/W1 → 1H → 15M → 5M"
     )
 
     try:
-
-        result = build_analysis(
-            symbol
-        )
-
-        last_setups[
-            symbol
-        ] = result
-
-        if result.get("stage") == "READY":
-
-            text = format_setup(
-                result
-            )
-
-        else:
-
-            text = format_wait(
-                result
-            )
+        result = build_analysis("SOLUSDT")
 
         await update.message.reply_text(
-            text
+            format_setup(result)
         )
 
     except Exception as e:
 
-        logger.exception(
-            "Command analysis error"
-        )
+        logger.exception("SOL analysis error")
 
         await update.message.reply_text(
-            f"❌ Ошибка анализа {symbol}:\n"
-            f"{e}"
+            f"❌ Ошибка анализа SOL:\n{e}"
         )
 
 
-# =========================================================
-# /SOL
-# =========================================================
+# ============================================================
+# ANALYSIS ETH
+# ============================================================
 
-async def sol_command(
+async def eth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    track_chat(update)
+
+    await update.message.reply_text(
+        "🔎 Анализирую ETH по Binance Spot..."
+    )
+
+    try:
+        result = build_analysis("ETHUSDT")
+
+        await update.message.reply_text(
+            format_setup(result)
+        )
+
+    except Exception as e:
+
+        logger.exception("ETH analysis error")
+
+        await update.message.reply_text(
+            f"❌ Ошибка анализа ETH:\n{e}"
+        )
+
+
+# ============================================================
+# MARKET
+# ============================================================
+
+async def market_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    await analyze_command(
-        update,
-        context,
-        "SOLUSDT"
+    track_chat(update)
+
+    lines = [
+        "📊 TRADEMIND — РЫНОК",
+        "",
+    ]
+
+    for symbol in SYMBOLS:
+
+        try:
+            result = build_analysis(symbol)
+
+            price = result.get("price")
+
+            stage = result.get(
+                "stage",
+                "UNKNOWN"
+            )
+
+            score = result.get(
+                "score",
+                result.get("total_score", 0)
+            )
+
+            direction = result.get(
+                "direction",
+                result.get("side", "—")
+            )
+
+            emoji = direction_emoji(direction)
+
+            lines.append(
+                f"{symbol.replace('USDT', '')}: "
+                f"{fmt_price(price)} | "
+                f"{emoji} {direction} | "
+                f"{stage} | "
+                f"{score}/100"
+            )
+
+        except Exception as e:
+
+            logger.error(
+                "Market error %s: %s",
+                symbol,
+                e,
+            )
+
+            lines.append(
+                f"{symbol.replace('USDT', '')}: ❌ ERROR"
+            )
+
+    await update.message.reply_text(
+        "\n".join(lines)
     )
 
 
-# =========================================================
-# /ETH
-# =========================================================
+# ============================================================
+# SEARCH
+# ============================================================
 
-async def eth_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await analyze_command(
-        update,
-        context,
-        "ETHUSDT"
-    )
-
-
-# =========================================================
-# /SCAN
-# =========================================================
-
-async def scan_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await track_chat(
-        update,
-        context
-    )
-
+    track_chat(update)
     reset_daily_state()
 
     if daily_stop:
 
         await update.message.reply_text(
-            "🛑 Daily stop активирован."
+            "🛑 Daily stop активирован.\n"
+            "Новые сетапы сегодня запрещены."
         )
 
         return
 
-    if trades_today >= MAX_TRADES_PER_DAY:
-
-        await update.message.reply_text(
-            "⛔ Лимит 2 сделки "
-            "на сегодня достигнут."
-        )
-
-        return
-
-    ready = find_first_ready()
-
-    if ready:
-
-        await update.message.reply_text(
-            format_setup(
-                ready
-            )
-        )
-
-    else:
-
-        await update.message.reply_text(
-            f"🔎 TRADEMIND {STRATEGY_VERSION}\n\n"
-
-            f"❌ Готового сетапа "
-            f"не найдено.\n\n"
-
-            f"Проверены:\n"
-            f"• SOLUSDT\n"
-            f"• ETHUSDT\n\n"
-
-            f"Правило:\n"
-            f"нет подтверждения → "
-            f"нет входа."
-        )
-
-
-# =========================================================
-# /LEVELS
-# =========================================================
-
-async def levels_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await track_chat(
-        update,
-        context
+    await update.message.reply_text(
+        "🔎 Ищу новый сетап...\n\n"
+        "Проверяю:\n"
+        "D1/W1 → 1H → Major Liquidity\n"
+        "→ Sweep → 15M → 5M"
     )
 
     try:
 
-        result = build_analysis(
-            "SOLUSDT"
-        )
+        setup = find_first_ready()
 
-        price = result["price"]
-
-        levels = result[
-            "major_levels"
-        ]
-
-        if not levels:
+        if not setup:
 
             await update.message.reply_text(
-                "❌ Крупные уровни не найдены."
+                "❌ READY-сетап не найден.\n\n"
+                "Ничего не форсируем."
+            )
+
+            return
+
+        symbol = setup.get("symbol")
+
+        last_setups[symbol] = setup
+
+        await update.message.reply_text(
+            format_setup(setup)
+        )
+
+    except Exception as e:
+
+        logger.exception("Search error")
+
+        await update.message.reply_text(
+            f"❌ Ошибка поиска:\n{e}"
+        )
+
+
+# ============================================================
+# LEVELS
+# ============================================================
+
+async def levels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    track_chat(update)
+
+    symbol = "SOLUSDT"
+
+    if context.args:
+
+        requested = context.args[0].upper()
+
+        if not requested.endswith("USDT"):
+            requested += "USDT"
+
+        if requested in SYMBOLS:
+            symbol = requested
+
+    try:
+
+        market = get_market_data(symbol)
+
+        price = market["price"]
+
+        candles_1h = market.get(
+            "candles_1h",
+            market.get("1h", [])
+        )
+
+        levels_data = get_major_liquidity(
+            candles_1h,
+            price,
+        )
+
+        if not levels_data:
+
+            await update.message.reply_text(
+                f"💧 {symbol}\n\n"
+                "Крупная ликвидность не найдена."
             )
 
             return
 
         lines = [
-            f"💧 TRADEMIND {STRATEGY_VERSION}",
-            "",
-            "💠 SOLUSDT",
-            f"💵 Price: {fmt_price(price)}",
-            "",
-            "КРУПНАЯ ЛИКВИДНОСТЬ:",
+            f"💧 TRADEMIND — КРУПНАЯ ЛИКВИДНОСТЬ",
+            f"💠 {symbol}",
+            f"💰 Цена: {fmt_price(price)}",
             "",
         ]
 
         for i, level in enumerate(
-            levels,
-            1
+            levels_data,
+            start=1
         ):
-
-            side = level.get(
-                "side",
-                "?"
-            )
 
             level_price = level.get(
                 "level",
-                level.get(
-                    "price"
-                )
+                level.get("price")
+            )
+
+            side = level.get(
+                "side",
+                "—"
             )
 
             touches = level.get(
                 "touches",
-                1
+                0
             )
 
-            if side == "LONG":
-                icon = "🟢"
+            liquidity_type = level.get(
+                "liquidity_type",
+                "Major"
+            )
 
-            elif side == "SHORT":
-                icon = "🔴"
-
-            else:
-                icon = "⚪"
-
-            try:
-
-                distance = (
-                    abs(
-                        float(level_price)
-                        - float(price)
-                    )
-                    / float(price)
-                    * 100
-                )
-
-            except Exception:
-
-                distance = 0
+            emoji = (
+                "🔴"
+                if side == "SHORT"
+                else "🟢"
+            )
 
             lines.append(
-                f"{i}. {icon} "
-                f"{fmt_price(level_price)} "
-                f"({side})\n"
-                f"   Touches: {touches} | "
-                f"Distance: {distance:.2f}%"
+                f"{i}. {emoji} "
+                f"{fmt_price(level_price)}\n"
+                f"   {side} | "
+                f"touches: {touches}\n"
+                f"   {liquidity_type}"
             )
 
         await update.message.reply_text(
@@ -865,88 +893,289 @@ async def levels_command(
 
     except Exception as e:
 
-        logger.exception(
-            "Levels error"
-        )
+        logger.exception("Levels error")
 
         await update.message.reply_text(
-            f"❌ Ошибка:\n{e}"
+            f"❌ Ошибка уровней:\n{e}"
         )
 
 
-# =========================================================
-# CALLBACK
-# =========================================================
+# ============================================================
+# CHART
+# ============================================================
 
-async def callback_query(
+async def chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    track_chat(update)
+
+    symbol = "SOLUSDT"
+
+    if context.args:
+
+        requested = context.args[0].upper()
+
+        if not requested.endswith("USDT"):
+            requested += "USDT"
+
+        if requested in SYMBOLS:
+            symbol = requested
+
+    try:
+
+        market = get_market_data(symbol)
+
+        price = market["price"]
+
+        await update.message.reply_text(
+            f"📈 {symbol}\n\n"
+            f"Источник: Binance Spot\n"
+            f"Цена: {fmt_price(price)}\n\n"
+            f"Таймфреймы:\n"
+            f"D1 → W1 → 1H → 15M → 5M"
+        )
+
+    except Exception as e:
+
+        logger.exception("Chart error")
+
+        await update.message.reply_text(
+            f"❌ Ошибка графика:\n{e}"
+        )
+
+
+# ============================================================
+# SUBSCRIBERS
+# ============================================================
+
+def track_chat(update: Update):
+
+    try:
+
+        chat_id = update.effective_chat.id
+
+        subscribers = (
+            update.get_bot().application.bot_data
+            .setdefault("subscribers", set())
+        )
+
+        subscribers.add(chat_id)
+
+    except Exception as e:
+
+        logger.error(
+            "Could not track subscriber: %s",
+            e,
+        )
+
+
+async def subscribe(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    query = update.callback_query
+    track_chat(update)
 
-    await query.answer()
+    subscribers = (
+        context.application.bot_data
+        .setdefault("subscribers", set())
+    )
 
-    if query.data == "scan":
+    subscribers.add(
+        update.effective_chat.id
+    )
 
-        ready = find_first_ready()
+    await update.message.reply_text(
+        "🔔 Уведомления включены.\n\n"
+        "Бот будет искать READY-сетапы "
+        "по TradeMind 5.3."
+    )
 
-        if ready:
 
-            await query.message.reply_text(
-                format_setup(
-                    ready
-                )
+async def unsubscribe(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    subscribers = (
+        context.application.bot_data
+        .setdefault("subscribers", set())
+    )
+
+    chat_id = update.effective_chat.id
+
+    subscribers.discard(chat_id)
+
+    await update.message.reply_text(
+        "🔕 Уведомления выключены."
+    )
+
+
+# ============================================================
+# JOURNAL
+# ============================================================
+
+async def journal(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    track_chat(update)
+
+    await update.message.reply_text(
+        "📒 TRADEMIND — ЖУРНАЛ\n\n"
+
+        "Сейчас журнал работает в режиме "
+        "мониторинга сигналов.\n\n"
+
+        "Автоматическая статистика сделок "
+        "будет считаться после подключения "
+        "учёта фактических результатов BingX."
+    )
+
+
+# ============================================================
+# BINGX STATUS
+# ============================================================
+
+async def bingx_status(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    track_chat(update)
+
+    await update.message.reply_text(
+        "📊 BINGX STATUS\n\n"
+        f"Mode: {BINGX_MODE}\n"
+        f"Module: "
+        f"{'AVAILABLE' if BINGX_AVAILABLE else 'NOT AVAILABLE'}"
+    )
+
+
+# ============================================================
+# BINGX BALANCE
+# ============================================================
+
+async def balance(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    track_chat(update)
+
+    if not BINGX_AVAILABLE:
+
+        await update.message.reply_text(
+            "❌ BingX модуль недоступен."
+        )
+
+        return
+
+    if BINGX_MODE != "ON":
+
+        await update.message.reply_text(
+            "📊 BingX mode: OFF\n\n"
+            "Автоматическое получение баланса "
+            "не используется."
+        )
+
+        return
+
+    try:
+
+        if hasattr(bingx, "get_balance"):
+
+            result = await asyncio.to_thread(
+                bingx.get_balance
+            )
+
+            await update.message.reply_text(
+                f"💰 BingX баланс:\n\n{result}"
             )
 
         else:
 
-            await query.message.reply_text(
-                "❌ Готового сетапа нет."
+            await update.message.reply_text(
+                "⚠️ В текущем bingx.py "
+                "нет функции get_balance()."
             )
 
+    except Exception as e:
 
-# =========================================================
-# TRACK CHAT
-# =========================================================
+        logger.exception("Balance error")
 
-async def track_chat(
-    update,
-    context
+        await update.message.reply_text(
+            f"❌ Ошибка BingX:\n{e}"
+        )
+
+
+# ============================================================
+# BINGX POSITIONS
+# ============================================================
+
+async def position(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if update.effective_chat is None:
+    track_chat(update)
+
+    if not BINGX_AVAILABLE:
+
+        await update.message.reply_text(
+            "❌ BingX модуль недоступен."
+        )
+
         return
 
-    chat_id = update.effective_chat.id
+    if BINGX_MODE != "ON":
 
-    subscribers = (
-        context.application.bot_data
-        .setdefault(
-            "subscribers",
-            set()
+        await update.message.reply_text(
+            "📊 BingX mode: OFF"
         )
-    )
 
-    subscribers.add(
-        chat_id
-    )
+        return
+
+    try:
+
+        if hasattr(bingx, "get_positions"):
+
+            result = await asyncio.to_thread(
+                bingx.get_positions
+            )
+
+            await update.message.reply_text(
+                f"📌 BingX позиции:\n\n{result}"
+            )
+
+        else:
+
+            await update.message.reply_text(
+                "⚠️ В текущем bingx.py "
+                "нет функции get_positions()."
+            )
+
+    except Exception as e:
+
+        logger.exception("Position error")
+
+        await update.message.reply_text(
+            f"❌ Ошибка BingX:\n{e}"
+        )
 
 
-# =========================================================
+# ============================================================
 # MONITOR
-# =========================================================
+# ============================================================
 
-async def monitor(
-    application
-):
+async def monitor(application):
 
     global trades_today
     global daily_stop
     global active_trade
 
     logger.info(
-        "TradeMind monitor started."
+        "TradeMind monitor started"
     )
 
     while True:
@@ -958,15 +1187,30 @@ async def monitor(
             if daily_stop:
 
                 await asyncio.sleep(
-                    60
+                    MONITOR_INTERVAL
                 )
 
                 continue
 
             if trades_today >= MAX_TRADES_PER_DAY:
 
+                daily_stop = True
+
                 await asyncio.sleep(
-                    60
+                    MONITOR_INTERVAL
+                )
+
+                continue
+
+            subscribers = (
+                application.bot_data
+                .get("subscribers", set())
+            )
+
+            if not subscribers:
+
+                await asyncio.sleep(
+                    MONITOR_INTERVAL
                 )
 
                 continue
@@ -976,173 +1220,264 @@ async def monitor(
             if setup:
 
                 symbol = setup.get(
-                    "symbol"
+                    "symbol",
+                    "UNKNOWN"
                 )
 
-                now = datetime.utcnow()
-
-                previous = last_signal_time.get(
-                    symbol
+                direction = setup.get(
+                    "direction",
+                    setup.get("side")
                 )
 
-                # Не отправляем один и тот же
-                # сигнал чаще одного раза в 5 минут.
-                if previous:
+                # ------------------------------------------------
+                # Защита от повторного сигнала
+                # ------------------------------------------------
+
+                key = f"{symbol}:{direction}"
+
+                current_time = now()
+
+                previous_time = last_signal_time.get(key)
+
+                if previous_time:
 
                     elapsed = (
-                        now - previous
-                    ).total_seconds()
+                        current_time - previous_time
+                    ).total_seconds() / 60
 
-                    if elapsed < 300:
+                    if elapsed < SIGNAL_COOLDOWN_MINUTES:
 
                         await asyncio.sleep(
-                            30
+                            MONITOR_INTERVAL
                         )
 
                         continue
 
-                last_signal_time[
-                    symbol
-                ] = now
+                last_signal_time[key] = current_time
 
-                text = format_setup(
-                    setup
+                last_setups[symbol] = setup
+
+                message = (
+                    "🚨 TRADEMIND 5.3 — READY\n\n"
+                    + format_setup(setup)
                 )
 
-                # =========================================
-                # BINGX
-                # =========================================
+                # ------------------------------------------------
+                # BingX OFF = только сигнал
+                # ------------------------------------------------
 
-                mode = bingx.mode()
+                if BINGX_MODE != "ON":
 
-                if mode == "OFF":
+                    execution_text = (
+                        "\n\n"
+                        "📊 BingX mode: OFF\n"
+                        "⚠️ Сделка НЕ открыта.\n"
+                        "Это только сигнал."
+                    )
 
-                    execution = {
-                        "status": "signal_only"
-                    }
+                    message += execution_text
+
+                # ------------------------------------------------
+                # BingX ON
+                # ------------------------------------------------
 
                 else:
 
-                    execution = (
-                        await asyncio.to_thread(
-                            bingx.open_trade,
-                            setup
+                    if not BINGX_AVAILABLE:
+
+                        message += (
+                            "\n\n"
+                            "❌ BingX module unavailable."
                         )
-                    )
 
-                # =========================================
-                # EXECUTION RESULT
-                # =========================================
+                    else:
 
-                if execution.get(
-                    "status"
-                ) == "signal_only":
+                        try:
 
-                    text += (
-                        "\n\n"
-                        "📡 BingX mode OFF — "
-                        "только сигнал."
-                    )
+                            if hasattr(
+                                bingx,
+                                "open_trade"
+                            ):
 
-                else:
+                                result = await asyncio.to_thread(
+                                    bingx.open_trade,
+                                    setup
+                                )
 
-                    text += (
-                        "\n\n"
-                        f"⚙️ Execution: "
-                        f"{execution}"
-                    )
+                                active_trade = setup
 
-                    active_trade = setup
+                                trades_today += 1
 
-                    trades_today += 1
+                                message += (
+                                    "\n\n"
+                                    "🟢 BingX: "
+                                    f"{result}"
+                                )
 
-                    if (
-                        trades_today
-                        >= MAX_TRADES_PER_DAY
-                    ):
+                            else:
 
-                        daily_stop = True
+                                message += (
+                                    "\n\n"
+                                    "⚠️ bingx.py не содержит "
+                                    "open_trade()."
+                                )
 
-                # =========================================
-                # SEND
-                # =========================================
+                        except Exception as e:
 
-                subscribers = (
-                    application.bot_data.get(
-                        "subscribers",
-                        set()
-                    )
-                )
+                            logger.exception(
+                                "BingX execution error"
+                            )
 
-                for chat_id in subscribers:
+                            message += (
+                                "\n\n"
+                                f"❌ Ошибка BingX:\n{e}"
+                            )
+
+                # ------------------------------------------------
+                # Отправка подписчикам
+                # ------------------------------------------------
+
+                for chat_id in list(subscribers):
 
                     try:
 
                         await application.bot.send_message(
                             chat_id=chat_id,
-                            text=text
+                            text=message,
                         )
 
-                    except Exception:
+                    except Exception as e:
 
-                        logger.exception(
-                            "Telegram send error"
+                        logger.error(
+                            "Send error %s: %s",
+                            chat_id,
+                            e,
                         )
-
-            await asyncio.sleep(
-                30
-            )
 
         except Exception as e:
 
             logger.exception(
-                "Monitor loop error: %s",
-                e
+                "Monitor error: %s",
+                e,
             )
 
-            await asyncio.sleep(
-                30
-            )
+        await asyncio.sleep(
+            MONITOR_INTERVAL
+        )
 
 
-# =========================================================
+# ============================================================
 # POST INIT
-# =========================================================
+# ============================================================
 
-async def post_init(
-    application
-):
+async def post_init(application):
 
-    application.bot_data[
-        "subscribers"
-    ] = set()
+    await application.bot.set_my_commands(
+        [
+            BotCommand(
+                "start",
+                "Главное меню"
+            ),
+            BotCommand(
+                "market",
+                "Рынок монет"
+            ),
+            BotCommand(
+                "levels",
+                "Крупная ликвидность"
+            ),
+            BotCommand(
+                "search",
+                "Поиск сетапа"
+            ),
+            BotCommand(
+                "chart",
+                "График"
+            ),
+            BotCommand(
+                "status",
+                "Статус"
+            ),
+            BotCommand(
+                "bingx",
+                "BingX статус"
+            ),
+            BotCommand(
+                "balance",
+                "BingX баланс"
+            ),
+            BotCommand(
+                "position",
+                "BingX позиции"
+            ),
+            BotCommand(
+                "subscribe",
+                "Включить уведомления"
+            ),
+            BotCommand(
+                "unsubscribe",
+                "Выключить уведомления"
+            ),
+            BotCommand(
+                "sol",
+                "Анализ SOL"
+            ),
+            BotCommand(
+                "eth",
+                "Анализ ETH"
+            ),
+            BotCommand(
+                "journal",
+                "Журнал"
+            ),
+            BotCommand(
+                "help",
+                "Помощь"
+            ),
+        ]
+    )
 
     application.create_task(
-        monitor(
-            application
-        )
+        monitor(application)
     )
 
     logger.info(
-        "TradeMind %s started.",
+        "TradeMind %s started",
         STRATEGY_VERSION
     )
 
 
-# =========================================================
+# ============================================================
+# ERROR HANDLER
+# ============================================================
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    logger.exception(
+        "Telegram error: %s",
+        context.error,
+    )
+
+
+# ============================================================
 # MAIN
-# =========================================================
+# ============================================================
 
 def main():
 
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .post_init(
-            post_init
-        )
+        .post_init(post_init)
         .build()
     )
+
+    # --------------------------------------------------------
+    # Основные команды
+    # --------------------------------------------------------
 
     application.add_handler(
         CommandHandler(
@@ -1165,50 +1500,127 @@ def main():
         )
     )
 
+    # --------------------------------------------------------
+    # Анализ
+    # --------------------------------------------------------
+
     application.add_handler(
         CommandHandler(
             "sol",
-            sol_command
+            sol
         )
     )
 
     application.add_handler(
         CommandHandler(
             "eth",
-            eth_command
+            eth
         )
     )
 
     application.add_handler(
         CommandHandler(
-            "scan",
-            scan_command
+            "market",
+            market_command
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "search",
+            search
         )
     )
 
     application.add_handler(
         CommandHandler(
             "levels",
-            levels_command
+            levels
         )
     )
 
     application.add_handler(
-        CallbackQueryHandler(
-            callback_query
+        CommandHandler(
+            "chart",
+            chart
         )
     )
 
-    logger.info(
-        "Starting polling..."
+    # --------------------------------------------------------
+    # Уведомления
+    # --------------------------------------------------------
+
+    application.add_handler(
+        CommandHandler(
+            "subscribe",
+            subscribe
+        )
     )
 
-    application.run_polling()
+    application.add_handler(
+        CommandHandler(
+            "unsubscribe",
+            unsubscribe
+        )
+    )
+
+    # --------------------------------------------------------
+    # Журнал
+    # --------------------------------------------------------
+
+    application.add_handler(
+        CommandHandler(
+            "journal",
+            journal
+        )
+    )
+
+    # --------------------------------------------------------
+    # BingX
+    # --------------------------------------------------------
+
+    application.add_handler(
+        CommandHandler(
+            "bingx",
+            bingx_status
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "balance",
+            balance
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "position",
+            position
+        )
+    )
+
+    # --------------------------------------------------------
+    # Errors
+    # --------------------------------------------------------
+
+    application.add_error_handler(
+        error_handler
+    )
+
+    logger.info(
+        "Starting TradeMind %s",
+        STRATEGY_VERSION
+    )
+
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES
+    )
 
 
-# =========================================================
-# ENTRY POINT
-# =========================================================
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
     main()
