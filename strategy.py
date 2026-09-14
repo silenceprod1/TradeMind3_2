@@ -39,6 +39,17 @@
 # LONG / SHORT symmetric.
 
 
+# ============================================================
+# VERSION
+# ============================================================
+
+STRATEGY_VERSION = "4.4.2"
+
+
+# ============================================================
+# CORE
+# ============================================================
+
 MIN_SCORE = 80
 REQUIRED_RR = 2.0
 
@@ -62,7 +73,6 @@ LIQUIDITY_PENALTY_WARNING = 5
 # 6 x 5M = approximately 30 minutes.
 MAX_SWEEP_AGE_CANDLES = 6
 
-# Much tighter than previous 1.5%.
 # Price must remain genuinely close to the Sweep.
 MAX_DISTANCE_FROM_SWEEP_PCT = 0.0075
 
@@ -1696,7 +1706,6 @@ def analyze(
     # ========================================================
     # ENTRY
     #
-    # IMPORTANT:
     # Entry is current price ONLY if current price
     # remains close to the original Sweep.
     # ========================================================
