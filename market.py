@@ -1,22 +1,34 @@
 # -*- coding: utf-8 -*-
 
 """
-TradeMind 3.5
+TradeMind 3.9
 Market data: Binance Spot
 
-Логика ликвидности:
+Оптимизация:
+- без кэша
+- параллельная загрузка price / 1H / 15M / 5M
+- меньше задержка одного цикла
+- подходит для сканирования каждые 15 секунд
 - только 1H major liquidity
 - мелкие уровни отбрасываются
-- минимальная дистанция major liquidity: 0.5%
+- минимум 0.5% от текущей цены
 - близкие уровни группируются
-- sweep разрешён только по найденным major levels
+- sweep только по major liquidity
 """
 
 import requests
+from concurrent.futures import ThreadPoolExecutor
 
 
 BASE_URL = "https://api.binance.com/api/v3"
+
 SYMBOL = "SOLUSDT"
+
+# Таймаут одного HTTP-запроса.
+REQUEST_TIMEOUT = 5
+
+# Для Binance Spot этого более чем достаточно.
+MAX_WORKERS = 4
 
 
 # =========================================================
@@ -28,13 +40,17 @@ def _get(path, params):
     response = requests.get(
         BASE_URL + path,
         params=params,
-        timeout=10
+        timeout=REQUEST_TIMEOUT
     )
 
     response.raise_for_status()
 
     return response.json()
 
+
+# =========================================================
+# PRICE
+# =========================================================
 
 def get_price(symbol=SYMBOL):
 
@@ -47,6 +63,10 @@ def get_price(symbol=SYMBOL):
 
     return float(data["price"])
 
+
+# =========================================================
+# KLINES
+# =========================================================
 
 def get_klines(
     symbol=SYMBOL,
@@ -103,46 +123,77 @@ def get_closed_klines(
     if len(candles) <= 1:
         return candles
 
-    # Последняя свеча может быть ещё незакрыта.
-    # Для анализа стратегии используем только закрытые.
+    # Последняя свеча может быть незакрыта.
+    # Стратегия работает только с закрытыми свечами.
     return candles[:-1]
 
 
 # =========================================================
-# MARKET DATA
+# PARALLEL MARKET DATA
 # =========================================================
 
 def get_market_data(symbol=SYMBOL):
 
-    price = get_price(symbol)
+    """
+    Получаем все данные одной монеты параллельно.
 
-    candles_1h = get_closed_klines(
-        symbol,
-        "1h",
-        200
-    )
+    Раньше:
 
-    candles_15m = get_closed_klines(
-        symbol,
-        "15m",
-        200
-    )
+        price
+        ↓
+        1H
+        ↓
+        15M
+        ↓
+        5M
 
-    candles_5m = get_closed_klines(
-        symbol,
-        "5m",
-        200
-    )
+    Теперь:
 
-    # ВАЖНО:
-    # main.py ожидает именно эти ключи:
-    #
-    # candles_1h
-    # candles_15m
-    # candles_5m
-    #
-    # Раньше здесь были "1h", "15m", "5m",
-    # из-за чего main.py получал KeyError.
+        price ─┐
+        1H    ─┤
+        15M   ─┼── одновременно
+        5M    ─┘
+
+    Это сильно уменьшает задержку цикла.
+    """
+
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
+
+        future_price = executor.submit(
+            get_price,
+            symbol
+        )
+
+        future_1h = executor.submit(
+            get_closed_klines,
+            symbol,
+            "1h",
+            200
+        )
+
+        future_15m = executor.submit(
+            get_closed_klines,
+            symbol,
+            "15m",
+            200
+        )
+
+        future_5m = executor.submit(
+            get_closed_klines,
+            symbol,
+            "5m",
+            200
+        )
+
+        price = future_price.result()
+
+        candles_1h = future_1h.result()
+
+        candles_15m = future_15m.result()
+
+        candles_5m = future_5m.result()
 
     return {
 
@@ -214,12 +265,13 @@ def find_swing_levels(
         ]
 
         # =================================================
-        # MAJOR HIGH CANDIDATE
+        # MAJOR HIGH
         # =================================================
 
         if (
             current_high >= max(left_highs)
-            and current_high > max(right_highs)
+            and
+            current_high > max(right_highs)
         ):
 
             highs.append({
@@ -234,12 +286,13 @@ def find_swing_levels(
             })
 
         # =================================================
-        # MAJOR LOW CANDIDATE
+        # MAJOR LOW
         # =================================================
 
         if (
             current_low <= min(left_lows)
-            and current_low < min(right_lows)
+            and
+            current_low < min(right_lows)
         ):
 
             lows.append({
@@ -274,12 +327,11 @@ def find_major_liquidity(
     - 15M liquidity
     - мелкие локальные уровни
 
-    Минимальная дистанция от текущей цены:
+    Минимальная дистанция:
     0.5%
 
-    Близкие major levels:
-    минимум 0.7% между уровнями
-    либо $0.50.
+    Минимальный gap между major levels:
+    0.7% или $0.50.
     """
 
     current_price = float(
@@ -289,7 +341,7 @@ def find_major_liquidity(
     if not candles_1h:
         return []
 
-    # Берём последние 150 закрытых 1H свечей.
+    # Последние 150 закрытых 1H свечей.
     candles = candles_1h[-150:]
 
     highs, lows = find_swing_levels(
@@ -326,9 +378,7 @@ def find_major_liquidity(
             current_price
         )
 
-        # Только уровни ВЫШЕ текущей цены.
-        # Минимум 0.5%.
-
+        # Только выше текущей цены.
         if distance >= min_distance:
 
             candidates.append({
@@ -363,9 +413,7 @@ def find_major_liquidity(
             level_price
         )
 
-        # Только уровни НИЖЕ текущей цены.
-        # Минимум 0.5%.
-
+        # Только ниже текущей цены.
         if distance >= min_distance:
 
             candidates.append({
@@ -386,7 +434,7 @@ def find_major_liquidity(
             })
 
     # =====================================================
-    # SORT BY DISTANCE
+    # SORT
     # =====================================================
 
     candidates.sort(
@@ -402,9 +450,6 @@ def find_major_liquidity(
     # =====================================================
 
     selected = []
-
-    # Между крупными уровнями минимум 0.7%
-    # или $0.50.
 
     MIN_LEVEL_GAP = max(
         current_price * 0.007,
@@ -452,17 +497,15 @@ def detect_sweep(
     """
     Sweep разрешён ТОЛЬКО по major_levels.
 
-    Никаких самостоятельных 5M/15M liquidity levels.
-
     LONG:
-        цена прокалывает 1H MAJOR LOW
-        и закрывается обратно выше уровня
-        зелёной свечой.
+        прокол 1H MAJOR LOW
+        закрытие обратно выше
+        зелёная свеча.
 
     SHORT:
-        цена прокалывает 1H MAJOR HIGH
-        и закрывается обратно ниже уровня
-        красной свечой.
+        прокол 1H MAJOR HIGH
+        закрытие обратно ниже
+        красная свеча.
     """
 
     if not major_levels:
@@ -516,7 +559,7 @@ def detect_sweep(
     # CHECK SWEEP
     # =====================================================
 
-    # Смотрим от самой новой свечи назад.
+    # Самая новая свеча проверяется первой.
     for candle in reversed(recent):
 
         for level in valid_levels:
@@ -527,7 +570,6 @@ def detect_sweep(
 
             # =================================================
             # LONG
-            # Sweep 1H MAJOR LOW
             # =================================================
 
             if level["direction"] == "LONG":
@@ -577,7 +619,6 @@ def detect_sweep(
 
             # =================================================
             # SHORT
-            # Sweep 1H MAJOR HIGH
             # =================================================
 
             if level["direction"] == "SHORT":
