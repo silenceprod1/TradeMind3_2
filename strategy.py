@@ -1748,11 +1748,147 @@ def analyze(
             "rr": tp_result.get("rr"),
             "reason": tp_result.get("reason"),
             "opposing_liquidity": (
-                tp_result.get("opposing_liquidity")
+                tp_result.get(
+                    "opposing_liquidity"
+                )
             ),
             "liquidity_r": (
-                tp_result.get("liquidity_r")
+                tp_result.get(
+                    "liquidity_r"
+                )
             ),
             "liquidity_penalty": 0,
             "sweep": sweep,
-            "sweep_extreme": sweep_ext
+            "sweep_extreme": sweep_extreme,
+            "sweep_age": sweep_age,
+            "distance_from_sweep_pct": distance_pct,
+            "confirmation_15m_time": (
+                confirmation_15m_time
+            ),
+            "trigger_5m_time": trigger_5m_time
+        }
+
+    # ========================================================
+    # LIQUIDITY PENALTY
+    # ========================================================
+
+    liquidity_penalty = tp_result.get(
+        "liquidity_penalty",
+        0
+    )
+
+    final_score = max(
+        0,
+        score - liquidity_penalty
+    )
+
+    # ========================================================
+    # FINAL SCORE FILTER
+    # ========================================================
+
+    if final_score < MIN_SCORE:
+
+        return {
+            "status": "WAIT",
+            "stage": "SCORE_FILTER",
+            "score": final_score,
+            "direction": direction,
+            "context_1h": context_1h,
+            "structure": structure,
+            "entry": entry,
+            "sl": sl,
+            "tp": tp_result.get("tp"),
+            "rr": tp_result.get("rr"),
+            "reason": "score_below_minimum",
+            "opposing_liquidity": (
+                tp_result.get(
+                    "opposing_liquidity"
+                )
+            ),
+            "liquidity_r": (
+                tp_result.get(
+                    "liquidity_r"
+                )
+            ),
+            "liquidity_penalty": liquidity_penalty,
+            "sweep": sweep,
+            "sweep_extreme": sweep_extreme,
+            "sweep_age": sweep_age,
+            "distance_from_sweep_pct": distance_pct,
+            "trigger_distance_pct": (
+                trigger_distance_pct
+            ),
+            "confirmation_15m_time": (
+                confirmation_15m_time
+            ),
+            "trigger_5m_time": (
+                trigger_5m_time
+            )
+        }
+
+    # ========================================================
+    # READY
+    # ========================================================
+
+    return {
+        "status": "READY",
+        "stage": "READY",
+        "score": final_score,
+        "direction": direction,
+
+        "context_1h": context_1h,
+        "structure": structure,
+
+        "entry": entry,
+        "sl": sl,
+        "tp": tp_result.get("tp"),
+        "rr": tp_result.get("rr"),
+
+        "risk": risk,
+        "risk_pct": (
+            risk / entry * 100
+            if entry
+            else None
+        ),
+
+        "sweep": sweep,
+        "sweep_extreme": sweep_extreme,
+        "sweep_age": sweep_age,
+
+        "distance_from_sweep_pct": distance_pct,
+        "trigger_distance_pct": (
+            trigger_distance_pct
+        ),
+
+        "confirmation_15m_time": (
+            confirmation_15m_time
+        ),
+        "trigger_5m_time": (
+            trigger_5m_time
+        ),
+
+        "opposing_liquidity": (
+            tp_result.get(
+                "opposing_liquidity"
+            )
+        ),
+
+        "liquidity_r": (
+            tp_result.get(
+                "liquidity_r"
+            )
+        ),
+
+        "liquidity_penalty": liquidity_penalty,
+
+        "reason": (
+            "TradeMind 4.4.1 READY: "
+            "fresh major sweep → "
+            "15M reclaim/rejection → "
+            "5M trigger → "
+            "trigger near sweep → "
+            "entry near sweep → "
+            "SL behind sweep extreme → "
+            "TP 2R"
+        )
+    }
