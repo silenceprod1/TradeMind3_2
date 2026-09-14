@@ -1,38 +1,31 @@
 # -*- coding: utf-8 -*-
 
 """
-TradeMind 3.10
+TradeMind 3.11
 
-Стратегия:
+Основная стратегия:
 
 1H context
 → 15M key zone
-→ Major liquidity sweep 2.0
+→ Major liquidity
+→ 5M Major Liquidity Sweep 2.0
 → 15M confirmation ПОСЛЕ sweep
 → CHoCH / BOS как дополнительный Score
 → 5M trigger ПОСЛЕ confirmation
 → Entry
-→ SL за экстремумом sweep
+→ SL за ФАКТИЧЕСКИМ экстремумом 5M sweep
 → TP по ближайшей крупной противоположной ликвидности
 → если ликвидность дальше 2R → TP = 2R
 → один TP
 
-ВАЖНО:
-
-CHoCH / BOS НЕ являются обязательным условием входа.
-
-Они только усиливают Score:
+CHoCH / BOS НЕ обязательны.
 
 CHoCH = +10
 BOS   = +7
-
-Если структуры нет:
-сделка всё равно может пройти,
-если выполнены основные условия стратегии.
 """
 
 # =========================================================
-# OPTIONAL STRUCTURE IMPORT
+# STRUCTURE IMPORT
 # =========================================================
 
 try:
@@ -130,7 +123,6 @@ def confirm_15m(candles, direction, after_time=None):
 
         if direction == "LONG":
 
-            # Сильное bullish подтверждение
             if (
                 last["close"] > last["open"]
                 and last["close"] > previous_high
@@ -142,7 +134,6 @@ def confirm_15m(candles, direction, after_time=None):
                     last["open_time"]
                 )
 
-            # Bullish rejection
             if (
                 last["low"] < previous_low
                 and last["close"] > last["open"]
@@ -161,7 +152,6 @@ def confirm_15m(candles, direction, after_time=None):
 
         if direction == "SHORT":
 
-            # Сильное bearish подтверждение
             if (
                 last["close"] < last["open"]
                 and last["close"] < previous_low
@@ -173,7 +163,6 @@ def confirm_15m(candles, direction, after_time=None):
                     last["open_time"]
                 )
 
-            # Bearish rejection
             if (
                 last["high"] > previous_high
                 and last["close"] < last["open"]
@@ -382,42 +371,71 @@ def distance_from_sweep_ok(price, sweep_level):
 
 
 # =========================================================
-# SWEEP EXTREME
+# SWEEP EXTREME 3.0
 # =========================================================
 
 def get_sweep_extreme(
-    candles_15m,
+    candles_5m,
     direction,
     sweep_level,
-    sweep_time=None
+    sweep_time=None,
+    sweep=None
 ):
     """
-    Фактический экстремум sweep-свечи.
+    ВАЖНО:
+
+    Теперь SL строится от ФАКТИЧЕСКОГО экстремума
+    5M sweep-свечи.
 
     LONG:
-        SL ниже low sweep.
+        low настоящей sweep-свечи.
 
     SHORT:
-        SL выше high sweep.
+        high настоящей sweep-свечи.
 
-    ВАЖНО:
-    Если sweep произошёл на 5M, а 15M sweep_time
-    не совпал с 15M свечой, используем fallback
-    по фактическому пересечению уровня.
+    Приоритет:
+
+    1. sweep["low"] / sweep["high"]
+    2. поиск свечи по sweep_time
+    3. поиск свечи, пересёкшей уровень
+    4. fallback на sweep_level
     """
 
     fallback = float(sweep_level)
 
-    if not candles_15m:
-        return fallback
+    # =====================================================
+    # 1. ПРИОРИТЕТ — ДАННЫЕ ИЗ SWEEP 2.0
+    # =====================================================
 
-    # ---------------------------------------------------------
-    # Сначала ищем конкретную свечу
-    # ---------------------------------------------------------
+    if isinstance(sweep, dict):
 
-    if sweep_time is not None:
+        if direction == "LONG":
 
-        for candle in reversed(candles_15m):
+            sweep_low = sweep.get("low")
+
+            if sweep_low is not None:
+                try:
+                    return float(sweep_low)
+                except Exception:
+                    pass
+
+        elif direction == "SHORT":
+
+            sweep_high = sweep.get("high")
+
+            if sweep_high is not None:
+                try:
+                    return float(sweep_high)
+                except Exception:
+                    pass
+
+    # =====================================================
+    # 2. ПОИСК ПО ВРЕМЕНИ В 5M
+    # =====================================================
+
+    if candles_5m and sweep_time is not None:
+
+        for candle in reversed(candles_5m):
 
             if candle.get("open_time") == sweep_time:
 
@@ -427,28 +445,29 @@ def get_sweep_extreme(
                 if direction == "SHORT":
                     return float(candle["high"])
 
-    # ---------------------------------------------------------
-    # Fallback:
-    # ищем фактическое пересечение уровня
-    # ---------------------------------------------------------
+    # =====================================================
+    # 3. FALLBACK — ИЩЕМ ПЕРЕСЕЧЕНИЕ УРОВНЯ
+    # =====================================================
 
-    for candle in reversed(candles_15m[-8:]):
+    if candles_5m:
 
-        if direction == "LONG":
+        for candle in reversed(candles_5m[-12:]):
 
-            if (
-                float(candle["low"]) <= fallback
-                and float(candle["close"]) > fallback
-            ):
-                return float(candle["low"])
+            if direction == "LONG":
 
-        elif direction == "SHORT":
+                if (
+                    float(candle["low"]) <= fallback
+                    and float(candle["close"]) > fallback
+                ):
+                    return float(candle["low"])
 
-            if (
-                float(candle["high"]) >= fallback
-                and float(candle["close"]) < fallback
-            ):
-                return float(candle["high"])
+            elif direction == "SHORT":
+
+                if (
+                    float(candle["high"]) >= fallback
+                    and float(candle["close"]) < fallback
+                ):
+                    return float(candle["high"])
 
     return fallback
 
@@ -496,10 +515,10 @@ def find_nearest_opposite_liquidity(
 ):
     """
     LONG:
-        ближайшая крупная зона выше ENTRY.
+        ближайшая крупная ликвидность выше Entry.
 
     SHORT:
-        ближайшая крупная зона ниже ENTRY.
+        ближайшая крупная ликвидность ниже Entry.
     """
 
     if not major_levels:
@@ -543,7 +562,7 @@ def calculate_sl(
     sweep_extreme
 ):
     """
-    SL находится за экстремумом sweep.
+    SL за ФАКТИЧЕСКИМ экстремумом sweep.
     """
 
     entry = float(entry)
@@ -571,20 +590,15 @@ def calculate_tp(
     major_levels
 ):
     """
-    Логика TP:
+    TP:
 
-    1. Рассчитываем 2R.
+    Если ближайшая крупная противоположная
+    ликвидность дальше 2R → TP = 2R.
 
-    2. Ищем ближайшую крупную
-       противоположную ликвидность.
+    Если ликвидность ближе 2R →
+    TP немного перед ней.
 
-    3. Если зона дальше 2R:
-       TP = 2R.
-
-    4. Если зона ближе 2R:
-       TP перед зоной.
-
-    5. Всегда один TP.
+    Всегда один TP.
     """
 
     entry = float(entry)
@@ -605,7 +619,7 @@ def calculate_tp(
         tp_2r = entry - risk * 2
 
     # =====================================================
-    # Ближайшая противоположная ликвидность
+    # OPPOSITE LIQUIDITY
     # =====================================================
 
     liquidity = find_nearest_opposite_liquidity(
@@ -614,7 +628,7 @@ def calculate_tp(
         major_levels
     )
 
-    # Нет зоны → 2R
+    # Нет крупной зоны → 2R
     if liquidity is None:
 
         return (
@@ -629,7 +643,6 @@ def calculate_tp(
 
     if direction == "LONG":
 
-        # Ликвидность дальше 2R
         if liquidity >= tp_2r:
 
             return (
@@ -648,7 +661,6 @@ def calculate_tp(
                 "TP = 2R"
             )
 
-        # Оставляем небольшой запас перед ликвидностью
         tp_buffer = max(
             distance_to_zone * 0.08,
             entry * 0.0002
@@ -662,7 +674,6 @@ def calculate_tp(
 
     else:
 
-        # Ликвидность дальше 2R
         if liquidity <= tp_2r:
 
             return (
@@ -689,7 +700,7 @@ def calculate_tp(
         tp = liquidity + tp_buffer
 
     # =====================================================
-    # Фактический RR
+    # ACTUAL RR
     # =====================================================
 
     actual_reward = abs(
@@ -710,16 +721,6 @@ def calculate_tp(
 # =========================================================
 
 def get_sweep_bonus(sweep):
-    """
-    Дополнительные баллы за качество Sweep 2.0.
-
-    STRONG  → +5
-    NORMAL  → +3
-    WEAK    → +0
-
-    Сам sweep всё равно остаётся обязательной
-    частью основной стратегии.
-    """
 
     if not sweep:
         return 0
@@ -730,15 +731,12 @@ def get_sweep_bonus(sweep):
 
     sweep_score = sweep.get("score")
 
-    # Если market.py дал quality
     if quality == "STRONG":
         return 5
 
     if quality == "NORMAL":
         return 3
 
-    # Если quality отсутствует,
-    # используем numeric score
     try:
 
         if sweep_score is not None:
@@ -768,14 +766,11 @@ def get_structure_analysis(
     direction
 ):
     """
-    Получает CHoCH/BOS.
-
     CHoCH = +10
     BOS   = +7
     NONE  = +0
 
-    Если structure недоступна:
-    сделка НЕ блокируется.
+    CHoCH/BOS не блокирует сделку.
     """
 
     default = {
@@ -809,20 +804,12 @@ def get_structure_analysis(
             )
         ).upper()
 
-        # -----------------------------------------------------
-        # CHoCH
-        # -----------------------------------------------------
-
-        if structure_type == "CHoCH":
+        if structure_type == "CHOCH":
 
             return {
                 **structure,
                 "score": 10
             }
-
-        # -----------------------------------------------------
-        # BOS
-        # -----------------------------------------------------
 
         if structure_type == "BOS":
 
@@ -935,17 +922,6 @@ def analyze(
     # NO SWEEP
     # =====================================================
 
-    # Совместимость со старым и новым market.py.
-    #
-    # Старый вариант мог использовать:
-    # sweep["swept"] = True
-    #
-    # Новый market.py возвращает sweep напрямую,
-    # без поля "swept".
-    #
-    # Поэтому главным условием теперь является
-    # наличие корректного sweep.
-
     if not sweep:
 
         result["stage"] = "WAIT"
@@ -960,7 +936,7 @@ def analyze(
         return result
 
     # =====================================================
-    # SWEEP VALIDATION
+    # VALIDATE SWEEP
     # =====================================================
 
     direction = sweep.get(
@@ -1073,10 +1049,6 @@ def analyze(
 
         result["status"] = "WAIT"
 
-        # Sweep quality влияет на ожидание,
-        # но не превращает sweep без confirmation
-        # в готовую сделку.
-
         result["score"] = min(
             55 + sweep_bonus,
             79
@@ -1093,12 +1065,11 @@ def analyze(
     # 15M CONFIRMED
     # =====================================================
 
-    # Базовый Score после полноценного 15M confirmation
     score = 75
 
     result["stage"] = "15M_CONFIRMED"
 
-    # Качество sweep
+    # Sweep quality
     score += sweep_bonus
 
     # =====================================================
@@ -1195,7 +1166,7 @@ def analyze(
         return result
 
     # =====================================================
-    # 5M CONFIRMED
+    # 5M TRIGGER CONFIRMED
     # =====================================================
 
     score += 20
@@ -1242,9 +1213,6 @@ def analyze(
     )
 
     result["order_flow"] = flow_text
-
-    # Order Flow не подключён:
-    # ничего не добавляем и не блокируем.
 
     if flow_ok is False:
 
@@ -1323,14 +1291,15 @@ def analyze(
     entry = price
 
     # =====================================================
-    # SWEEP EXTREME
+    # REAL 5M SWEEP EXTREME
     # =====================================================
 
     sweep_extreme = get_sweep_extreme(
-        candles_15m,
+        candles_5m,
         direction,
         level,
-        sweep_time
+        sweep_time,
+        sweep=sweep
     )
 
     result["sweep_extreme"] = round(
@@ -1451,11 +1420,11 @@ def analyze(
 
         "reason": (
             "Major liquidity → "
-            "Sweep 2.0 → "
+            "5M Sweep 2.0 → "
             "15M confirmation → "
             "CHoCH/BOS bonus → "
             "5M trigger → "
-            "SL за экстремумом sweep → "
+            "SL за реальным экстремумом sweep → "
             "TP по ближайшей крупной ликвидности."
         )
     })
