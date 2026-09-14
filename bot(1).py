@@ -1,10 +1,22 @@
+# ============================================================
+# TRADEMIND 5.0 — BOT.PY
+# Binance Spot market data → TradeMind 5.0 strategy
+# Telegram bot
+#
+# FLOW:
+# D1 → W1 fallback → 1H → Major Liquidity → Sweep
+# → 15M confirmation → 5M V/L → Entry → SL → structural TP
+#
+# BingX AUTO intentionally remains OFF by default.
+# ============================================================
+
 import asyncio
-import io
 import json
 import os
-import struct
-import zlib
-from datetime import datetime
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from telegram import (
@@ -12,44 +24,32 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     BotCommand,
-    InputFile,
 )
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    ContextTypes,
 )
 
-from market import (
-    get_market_data,
-    find_major_liquidity,
-    detect_sweep,
-)
-
-import strategy
 from strategy import analyze
 
-import bingx
-
 
 # ============================================================
-# TRADEMIND 4.4.2
+# CONFIG
 # ============================================================
-
-BOT_VERSION = "4.4.2"
-
-# Если в strategy.py уже есть STRATEGY_VERSION,
-# бот покажет её. Если нет — покажет UNKNOWN.
-STRATEGY_VERSION = getattr(
-    strategy,
-    "STRATEGY_VERSION",
-    "UNKNOWN",
-)
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-CHECK_INTERVAL = 15
-SCAN_WORKERS = 9
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
+SCAN_WORKERS = int(os.getenv("SCAN_WORKERS", "9"))
+
+BINANCE_BASE = "https://api.binance.com"
+
+# BingX is NOT used for opening trades in this version.
+BINGX_MODE = os.getenv("BINGX_MODE", "OFF").upper()
+
+MIN_SCORE = 80
 
 COINS = {
     "BTC": "BTCUSDT",
@@ -65,11 +65,10 @@ COINS = {
 
 SUBSCRIBERS_FILE = "subscribers.json"
 STATE_FILE = "monitor_state.json"
-PENDING_FILE = "bingx_pending.json"
 
 
 # ============================================================
-# JSON / STATE
+# JSON STATE
 # ============================================================
 
 def load_json(filename, default):
@@ -78,7 +77,9 @@ def load_json(filename, default):
             return default
 
         with open(filename, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+
+        return data
 
     except Exception as exc:
         print(f"JSON LOAD ERROR {filename}: {exc}")
@@ -100,44 +101,34 @@ def save_json(filename, data):
 
 
 def load_subscribers():
-    return load_json(
-        SUBSCRIBERS_FILE,
-        [],
-    )
+    return load_json(SUBSCRIBERS_FILE, [])
 
 
 def save_subscribers(data):
-    save_json(
-        SUBSCRIBERS_FILE,
-        data,
-    )
+    save_json(SUBSCRIBERS_FILE, data)
 
 
 def default_state():
     return {
-        "active_coin": None,
-        "active_symbol": None,
-        "active_direction": None,
-        "active_setup_key": None,
-
-        "active_entry": None,
-        "active_sl": None,
-        "active_tp": None,
-        "active_rr": None,
-
-        "active_tp_reason": None,
-        "active_sweep_extreme": None,
-        "active_score": None,
-        "active_stage": None,
-
-        "last_alert": None,
-        "last_signal_key": None,
-
         "daily_date": None,
         "daily_trades": 0,
         "daily_stop": False,
 
+        "active_coin": None,
+        "active_symbol": None,
+        "active_direction": None,
+        "active_entry": None,
+        "active_sl": None,
+        "active_tp": None,
+        "active_rr": None,
+        "active_score": None,
+        "active_stage": None,
+
+        "last_signal_key": None,
+
         "coins": {},
+
+        "last_scan": None,
     }
 
 
@@ -150,150 +141,460 @@ def load_state():
     if not isinstance(state, dict):
         state = default_state()
 
-    defaults = default_state()
-
-    for key, value in defaults.items():
-        state.setdefault(key, value)
-
-    if not isinstance(state.get("coins"), dict):
-        state["coins"] = {}
+    state.setdefault("coins", {})
 
     return state
 
 
 def save_state(state):
-    save_json(STATE_FILE, state)
-
-
-def reset_daily_if_needed(state):
-    today = datetime.utcnow().date().isoformat()
-
-    if state.get("daily_date") != today:
-        state["daily_date"] = today
-        state["daily_trades"] = 0
-        state["daily_stop"] = False
-
-        save_state(state)
+    save_json(
+        STATE_FILE,
+        state,
+    )
 
 
 # ============================================================
-# KEYBOARDS
+# BINANCE API
 # ============================================================
 
-def main_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📊 Рынок",
-                callback_data="market",
-            ),
-            InlineKeyboardButton(
-                "💧 Уровни",
-                callback_data="levels",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🔎 Поиск сетапа",
-                callback_data="search",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "📈 График",
-                callback_data="chart",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🔔 Включить",
-                callback_data="subscribe",
-            ),
-            InlineKeyboardButton(
-                "🔕 Выключить",
-                callback_data="unsubscribe",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "📈 SOL",
-                callback_data="sol",
-            ),
-            InlineKeyboardButton(
-                "📊 Статус",
-                callback_data="status",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🟠 BingX",
-                callback_data="bingx",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "📒 Журнал",
-                callback_data="journal",
-            ),
-        ],
-    ])
+def binance_request(path, params=None):
+    if params is None:
+        params = {}
+
+    query = urllib.parse.urlencode(params)
+
+    url = BINANCE_BASE + path
+
+    if query:
+        url += "?" + query
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "TradeMind/5.0",
+            "Accept": "application/json",
+        },
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=15,
+    ) as response:
+
+        raw = response.read()
+
+    return json.loads(raw.decode("utf-8"))
 
 
-def chart_keyboard():
-    icons = {
-        "BTC": "₿",
-        "ETH": "Ξ",
-        "SOL": "◎",
-        "BNB": "🟡",
-        "XRP": "💠",
-        "HYPE": "🔥",
-        "DOGE": "🐶",
-        "LINK": "🔗",
-        "SUI": "💧",
+def get_binance_price(symbol):
+    data = binance_request(
+        "/api/v3/ticker/price",
+        {
+            "symbol": symbol,
+        },
+    )
+
+    return float(data["price"])
+
+
+def get_binance_klines(
+    symbol,
+    interval,
+    limit=300,
+):
+    data = binance_request(
+        "/api/v3/klines",
+        {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+        },
+    )
+
+    candles = []
+
+    for row in data:
+
+        if len(row) < 6:
+            continue
+
+        try:
+
+            candles.append({
+                "open_time": int(row[0]),
+
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+
+                "volume": float(row[5]),
+
+                "close_time": int(row[6]),
+            })
+
+        except Exception:
+            continue
+
+    return candles
+
+
+# ============================================================
+# DATA NORMALIZATION
+# ============================================================
+
+def normalize_candles(candles):
+
+    if not candles:
+        return []
+
+    result = []
+
+    for candle in candles:
+
+        if isinstance(candle, dict):
+
+            try:
+
+                result.append({
+                    "open_time": candle.get(
+                        "open_time",
+                        candle.get(
+                            "timestamp",
+                            candle.get(
+                                "time",
+                                0,
+                            ),
+                        ),
+                    ),
+
+                    "open": float(
+                        candle.get(
+                            "open",
+                            candle.get("o"),
+                        )
+                    ),
+
+                    "high": float(
+                        candle.get(
+                            "high",
+                            candle.get("h"),
+                        )
+                    ),
+
+                    "low": float(
+                        candle.get(
+                            "low",
+                            candle.get("l"),
+                        )
+                    ),
+
+                    "close": float(
+                        candle.get(
+                            "close",
+                            candle.get("c"),
+                        )
+                    ),
+
+                    "volume": float(
+                        candle.get(
+                            "volume",
+                            candle.get("v", 0),
+                        )
+                    ),
+
+                })
+
+            except Exception:
+                continue
+
+        elif isinstance(candle, (list, tuple)):
+
+            if len(candle) < 6:
+                continue
+
+            try:
+
+                result.append({
+                    "open_time": int(candle[0]),
+                    "open": float(candle[1]),
+                    "high": float(candle[2]),
+                    "low": float(candle[3]),
+                    "close": float(candle[4]),
+                    "volume": float(candle[5]),
+                })
+
+            except Exception:
+                continue
+
+    return result
+
+
+# ============================================================
+# FULL MARKET DATA FOR TRADEMIND 5.0
+# ============================================================
+
+def get_full_market_data(symbol):
+
+    print(
+        f"[DATA] Loading "
+        f"{symbol}: D1 / W1 / 1H / 15M / 5M"
+    )
+
+    price = get_binance_price(symbol)
+
+    candles_d1 = normalize_candles(
+        get_binance_klines(
+            symbol,
+            "1d",
+            250,
+        )
+    )
+
+    candles_w1 = normalize_candles(
+        get_binance_klines(
+            symbol,
+            "1w",
+            100,
+        )
+    )
+
+    candles_1h = normalize_candles(
+        get_binance_klines(
+            symbol,
+            "1h",
+            300,
+        )
+    )
+
+    candles_15m = normalize_candles(
+        get_binance_klines(
+            symbol,
+            "15m",
+            300,
+        )
+    )
+
+    candles_5m = normalize_candles(
+        get_binance_klines(
+            symbol,
+            "5m",
+            300,
+        )
+    )
+
+    if not candles_d1:
+        raise RuntimeError(
+            f"{symbol}: D1 data unavailable"
+        )
+
+    if not candles_1h:
+        raise RuntimeError(
+            f"{symbol}: 1H data unavailable"
+        )
+
+    if not candles_15m:
+        raise RuntimeError(
+            f"{symbol}: 15M data unavailable"
+        )
+
+    if not candles_5m:
+        raise RuntimeError(
+            f"{symbol}: 5M data unavailable"
+        )
+
+    return {
+        "symbol": symbol,
+        "price": price,
+
+        "candles_d1": candles_d1,
+        "candles_w1": candles_w1,
+
+        "candles_1h": candles_1h,
+        "candles_15m": candles_15m,
+        "candles_5m": candles_5m,
     }
 
-    coins = list(COINS.keys())
-    rows = []
 
-    for i in range(0, len(coins), 3):
-        row = []
+# ============================================================
+# STRATEGY
+# ============================================================
 
-        for coin in coins[i:i + 3]:
-            row.append(
-                InlineKeyboardButton(
-                    f"{icons.get(coin, '💠')} {coin}",
-                    callback_data=f"chart_{coin}",
-                )
-            )
+def run_strategy(symbol):
 
-        rows.append(row)
+    data = get_full_market_data(symbol)
 
-    rows.append([
-        InlineKeyboardButton(
-            "⬅️ Главное меню",
-            callback_data="start",
+    price = data["price"]
+
+    candles_d1 = data["candles_d1"]
+    candles_w1 = data["candles_w1"]
+
+    candles_1h = data["candles_1h"]
+    candles_15m = data["candles_15m"]
+    candles_5m = data["candles_5m"]
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # TradeMind 5.0 receives all required timeframes.
+    # --------------------------------------------------------
+
+    try:
+
+        result = analyze(
+            candles_d1=candles_d1,
+
+            candles_w1=candles_w1,
+
+            candles_1h=candles_1h,
+
+            candles_15m=candles_15m,
+
+            candles_5m=candles_5m,
+
+            current_price=price,
+
+            price=price,
         )
-    ])
 
-    return InlineKeyboardMarkup(rows)
+    except TypeError:
 
+        # Compatibility with versions of strategy.py
+        # that use only price= instead of current_price=.
 
-def back_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "⬅️ Главное меню",
-                callback_data="start",
-            )
-        ]
-    ])
+        result = analyze(
+            candles_d1=candles_d1,
+
+            candles_w1=candles_w1,
+
+            candles_1h=candles_1h,
+
+            candles_15m=candles_15m,
+
+            candles_5m=candles_5m,
+
+            price=price,
+        )
+
+    if not isinstance(result, dict):
+        result = {}
+
+    result.update({
+        "symbol": symbol,
+        "price": price,
+
+        "candles_d1": candles_d1,
+        "candles_w1": candles_w1,
+
+        "candles_1h": candles_1h,
+        "candles_15m": candles_15m,
+        "candles_5m": candles_5m,
+    })
+
+    return result
 
 
 # ============================================================
-# FORMAT
+# SCANNING
+# ============================================================
+
+def scan_one_coin(coin, symbol):
+
+    try:
+
+        result = run_strategy(symbol)
+
+        return (
+            coin,
+            result,
+        )
+
+    except Exception as exc:
+
+        print(
+            f"[SCAN ERROR] "
+            f"{coin} / {symbol}: {exc}"
+        )
+
+        return (
+            coin,
+            {
+                "error": str(exc),
+                "symbol": symbol,
+                "price": None,
+                "stage": "ERROR",
+                "score": 0,
+            },
+        )
+
+
+def scan_all_coins():
+
+    results = {}
+
+    with ThreadPoolExecutor(
+        max_workers=SCAN_WORKERS
+    ) as executor:
+
+        futures = {
+            executor.submit(
+                scan_one_coin,
+                coin,
+                symbol,
+            ): coin
+
+            for coin, symbol in COINS.items()
+        }
+
+        for future in as_completed(futures):
+
+            coin = futures[future]
+
+            try:
+
+                c, result = future.result()
+
+                results[c] = result
+
+            except Exception as exc:
+
+                print(
+                    f"[WORKER ERROR] "
+                    f"{coin}: {exc}"
+                )
+
+                results[coin] = {
+                    "error": str(exc),
+                    "stage": "ERROR",
+                    "score": 0,
+                }
+
+    return {
+        coin: results.get(
+            coin,
+            {
+                "error": "No result",
+                "stage": "ERROR",
+                "score": 0,
+            },
+        )
+
+        for coin in COINS
+    }
+
+
+async def scan_all_coins_async():
+
+    return await asyncio.to_thread(
+        scan_all_coins
+    )
+
+
+# ============================================================
+# FORMATTING
 # ============================================================
 
 def format_price(price):
+
     if price is None:
         return "N/A"
 
@@ -312,60 +613,80 @@ def format_price(price):
 
 
 def format_rr(rr):
+
     if rr is None:
         return "N/A"
 
     try:
-        return f"1:{float(rr):.2f}"
+
+        value = float(rr)
+
+        return f"1:{value:.2f}"
+
     except Exception:
         return "N/A"
 
 
-# ============================================================
-# STAGES — TRADEMIND 4.4.2
-# ============================================================
-
 def stage_icon(stage):
+
     return {
         "READY": "🟢",
+
         "CONFIRMED": "🟡",
         "15M_CONFIRMED": "🟡",
-        "WAIT_5M_TRIGGER": "🟡",
+
         "SWEPT": "🟠",
-        "WAIT_SWEEP": "⚪",
-        "LOW_SCORE": "⚪",
-        "LIQUIDITY_FILTER": "🔴",
+        "SWEEP": "🟠",
+
         "WAIT": "⚪",
+        "ERROR": "❌",
     }.get(
-        stage,
+        str(stage).upper(),
         "⚪",
     )
 
 
 def stage_text(stage):
+
     return {
-        "READY": "ГОТОВ — МОЖНО ВХОДИТЬ",
-        "CONFIRMED": "15M подтверждение",
+        "READY": "МОЖНО ВХОДИТЬ",
+
+        "CONFIRMED": "5M подтверждение",
         "15M_CONFIRMED": "15M подтверждение",
-        "WAIT_5M_TRIGGER": "Ждём 5M trigger",
+
         "SWEPT": "SWEEP обнаружен",
-        "WAIT_SWEEP": "Ждём SWEEP",
-        "LOW_SCORE": "Score недостаточен",
-        "LIQUIDITY_FILTER": "Ликвидность мешает входу",
+        "SWEEP": "SWEEP обнаружен",
+
         "WAIT": "Ожидание",
+
+        "ERROR": "Ошибка",
     }.get(
-        stage,
+        str(stage).upper(),
         "Ожидание",
     )
 
 
+def direction_icon(direction):
+
+    if direction == "LONG":
+        return "🟢"
+
+    if direction == "SHORT":
+        return "🔴"
+
+    return "⚪"
+
+
 # ============================================================
-# LEVELS
+# LIQUIDITY DISPLAY
 # ============================================================
 
 def format_levels(levels, price):
+
     if not levels:
-        return "💧 Крупные уровни не найдены."
+        return (
+            "💧 Крупные уровни не найдены."
+        )
 
     try:
         current = float(price)
@@ -375,183 +696,139 @@ def format_levels(levels, price):
     lines = []
 
     for level in levels:
+
         try:
-            level_price = float(level.get("price"))
+
+            lp = float(
+                level.get(
+                    "price",
+                    level.get(
+                        "level",
+                        0,
+                    ),
+                )
+            )
+
         except Exception:
             continue
 
-        kind = level.get(
-            "type",
-            "",
-        )
+        level_type = str(
+            level.get(
+                "type",
+                level.get(
+                    "liquidity_type",
+                    "",
+                ),
+            )
+        ).upper()
 
-        distance = (
-            abs(level_price - current)
-            / current
-            * 100
-            if current
-            else 0
-        )
+        distance = 0
 
-        icon = (
-            "🔴"
-            if "HIGH" in kind
-            else "🟢"
-        )
+        if current:
+            distance = (
+                abs(lp - current)
+                / current
+                * 100
+            )
+
+        if (
+            "HIGH" in level_type
+            or "SELL" in level_type
+        ):
+            icon = "🔴"
+
+        else:
+            icon = "🟢"
 
         lines.append(
-            f"{icon} {kind}: "
-            f"{format_price(level_price)} "
+            f"{icon} "
+            f"{level_type or 'LEVEL'}: "
+            f"{format_price(lp)} "
             f"({distance:.2f}%)"
         )
 
     if not lines:
-        return "💧 Крупные уровни не найдены."
+        return (
+            "💧 Крупные уровни не найдены."
+        )
 
     return "\n".join(lines)
 
 
 # ============================================================
-# MARKET ANALYSIS
+# RESULT HELPERS
 # ============================================================
 
-def build_analysis(symbol):
-    data = get_market_data(symbol)
+def get_stage(result):
 
-    if not data:
-        raise Exception(
-            f"Нет данных для {symbol}"
-        )
-
-    price = data["price"]
-
-    candles_1h = data["candles_1h"]
-    candles_15m = data["candles_15m"]
-    candles_5m = data["candles_5m"]
-
-    major_levels = find_major_liquidity(
-        candles_1h,
-        price,
-        max_levels=6,
+    stage = result.get(
+        "stage",
+        "WAIT",
     )
 
-    sweep = detect_sweep(
-        candles_5m,
-        major_levels,
+    if stage is None:
+        return "WAIT"
+
+    return str(stage).upper()
+
+
+def is_ready(result):
+
+    if not result:
+        return False
+
+    if result.get("error"):
+        return False
+
+    stage = get_stage(result)
+
+    score = result.get(
+        "score",
+        0,
     )
 
-    result = analyze(
-        price=price,
-        candles_1h=candles_1h,
-        candles_15m=candles_15m,
-        candles_5m=candles_5m,
-        major_levels=major_levels,
-        sweep=sweep,
-    )
-
-    if not isinstance(result, dict):
-        result = {}
-
-    result.update({
-        "symbol": symbol,
-        "price": price,
-        "major_levels": major_levels,
-        "sweep": sweep,
-        "candles_5m": candles_5m,
-    })
-
-    return result
-
-
-def scan_one_coin(coin, symbol):
     try:
-        return (
-            coin,
-            build_analysis(symbol),
-        )
+        score = float(score)
+    except Exception:
+        score = 0
 
-    except Exception as exc:
-        print(
-            f"{coin} ERROR: {exc}"
-        )
-
-        return (
-            coin,
-            {
-                "error": str(exc),
-                "symbol": symbol,
-            },
-        )
-
-
-def scan_all_coins():
-    results = {}
-
-    with ThreadPoolExecutor(
-        max_workers=SCAN_WORKERS
-    ) as executor:
-
-        futures = {
-            executor.submit(
-                scan_one_coin,
-                coin,
-                symbol,
-            ): coin
-            for coin, symbol in COINS.items()
-        }
-
-        for future in as_completed(
-            futures
-        ):
-            coin = futures[future]
-
-            try:
-                result_coin, result = (
-                    future.result()
-                )
-
-                results[result_coin] = result
-
-            except Exception as exc:
-                results[coin] = {
-                    "error": str(exc),
-                    "symbol": COINS[coin],
-                }
-
-    return {
-        coin: results[coin]
-        for coin in COINS
-        if coin in results
-    }
-
-
-async def scan_all_coins_async():
-    return await asyncio.to_thread(
-        scan_all_coins
+    return (
+        stage == "READY"
+        and score >= MIN_SCORE
+        and result.get("direction")
+        in {"LONG", "SHORT"}
+        and result.get("entry") is not None
+        and result.get("sl") is not None
+        and result.get("tp") is not None
     )
 
 
-def find_first_ready(results):
+def find_best_ready(results):
+
     ready = []
 
     for coin, result in results.items():
-        if not isinstance(result, dict):
+
+        if not is_ready(result):
             continue
 
-        if result.get("error"):
-            continue
-
-        if (
-            result.get("stage") == "READY"
-            and result.get("score", 0) >= 80
-        ):
-            ready.append(
-                (
-                    result.get("score", 0),
-                    coin,
-                    result,
+        try:
+            score = float(
+                result.get(
+                    "score",
+                    0,
                 )
             )
+        except Exception:
+            score = 0
+
+        ready.append(
+            (
+                score,
+                coin,
+                result,
+            )
+        )
 
     if not ready:
         return None
@@ -565,62 +842,67 @@ def find_first_ready(results):
 
 
 # ============================================================
-# READY MESSAGE
+# TELEGRAM KEYBOARDS
 # ============================================================
 
-def build_ready_message(coin, result, mode=None):
-    score = result.get("score", 0)
-    raw_score = result.get("raw_score")
+def main_keyboard():
 
-    lines = [
-        f"🚨 <b>TRADEMIND {BOT_VERSION} — ГОТОВЫЙ СЕТАП</b>",
-        "",
-        f"💠 Монета: <b>{coin}</b>",
-        f"📐 Направление: <b>{result.get('direction')}</b>",
-        f"⭐ Score: <b>{score}/100</b>",
-    ]
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "📊 Рынок",
+                callback_data="market",
+            ),
 
-    if raw_score is not None and raw_score != score:
-        lines.append(
-            f"Raw Score: {raw_score}/100"
-        )
+            InlineKeyboardButton(
+                "💧 Уровни",
+                callback_data="levels",
+            ),
+        ],
 
-    lines += [
-        "",
-        "🟢 <b>МОЖНО ВХОДИТЬ</b>",
-        "",
-        f"Entry: <b>{format_price(result.get('entry'))}</b>",
-        f"SL: <b>{format_price(result.get('sl'))}</b>",
-        f"TP: <b>{format_price(result.get('tp'))}</b>",
-        f"RR: <b>{format_rr(result.get('rr'))}</b>",
-        "",
-        "✅ Major Liquidity",
-        "✅ Sweep",
-        "✅ 15M confirmation",
-        "✅ 5M trigger",
-        "🎯 Один TP",
-        "📐 RR = 1:2",
-    ]
+        [
+            InlineKeyboardButton(
+                "🔎 Поиск сетапа",
+                callback_data="search",
+            )
+        ],
 
-    if result.get("liquidity_warning"):
-        lines += [
-            "",
-            f"⚠️ {result.get('liquidity_warning')}",
+        [
+            InlineKeyboardButton(
+                "📈 SOL",
+                callback_data="sol",
+            ),
+
+            InlineKeyboardButton(
+                "📊 Статус",
+                callback_data="status",
+            ),
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🔔 Включить",
+                callback_data="subscribe",
+            ),
+
+            InlineKeyboardButton(
+                "🔕 Выключить",
+                callback_data="unsubscribe",
+            ),
+        ],
+    ])
+
+
+def back_keyboard():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "⬅️ Главное меню",
+                callback_data="start",
+            )
         ]
-
-    if result.get("reason"):
-        lines += [
-            "",
-            f"🧠 <b>Причина:</b> {result.get('reason')}",
-        ]
-
-    if mode:
-        lines += [
-            "",
-            bingx_mode_text(),
-        ]
-
-    return "\n".join(lines)
+    ])
 
 
 # ============================================================
@@ -628,61 +910,74 @@ def build_ready_message(coin, result, mode=None):
 # ============================================================
 
 def build_market_message(results):
+
     lines = [
-        f"📊 <b>TRADEMIND {BOT_VERSION} — РЫНОК</b>",
+        "📊 <b>TRADEMIND 5.0 — РЫНОК</b>",
         "",
     ]
 
     for coin in COINS:
-        result = results.get(coin)
 
-        if not result:
-            continue
-
-        if result.get("error"):
-            lines += [
-                f"❌ <b>{coin}</b>",
-                "Ошибка данных",
-                "",
-                "────────────",
-                "",
-            ]
-            continue
-
-        price = result.get("price")
-        stage = result.get("stage", "WAIT")
-        score = result.get("score", 0)
-        direction = result.get("direction")
-
-        stage_line = (
-            f"{stage_icon(stage)} "
-            f"{stage_text(stage)}"
+        result = results.get(
+            coin,
+            {},
         )
 
+        if result.get("error"):
+
+            lines += [
+                f"❌ <b>{coin}</b> — ошибка",
+                "",
+            ]
+
+            continue
+
+        price = result.get(
+            "price"
+        )
+
+        stage = get_stage(result)
+
+        score = result.get(
+            "score",
+            0,
+        )
+
+        direction = result.get(
+            "direction"
+        )
+
+        direction_text = ""
+
         if direction:
-            stage_line += f" — {direction}"
+            direction_text = (
+                f" {direction_icon(direction)} "
+                f"{direction}"
+            )
 
         lines += [
-            f"💠 <b>{coin}</b> "
-            f"{format_price(price)}",
-            stage_line,
-            f"Score: <b>{score}/100</b>",
-            "💧 <b>Крупная ликвидность:</b>",
-            format_levels(
-                result.get(
-                    "major_levels",
-                    [],
-                ),
-                price,
+            (
+                f"💠 <b>{coin}</b> "
+                f"{format_price(price)}"
             ),
-            "",
-            "────────────",
+
+            (
+                f"{stage_icon(stage)} "
+                f"{stage_text(stage)}"
+                f"{direction_text}"
+            ),
+
+            f"⭐ Score: <b>{score}/100</b>",
             "",
         ]
 
     lines += [
-        "1H → Major Liquidity → Sweep → 15M → 5M",
+        "━━━━━━━━━━━━━━",
+        "D1 → 1H → Liquidity → Sweep",
+        "→ 15M → 5M → Entry",
+        "",
         "❌ В середине движения не входим.",
+        "❌ Нет подтверждения → нет входа.",
     ]
 
     return "\n".join(lines)
@@ -693,35 +988,37 @@ def build_market_message(results):
 # ============================================================
 
 def build_levels_message(results):
+
     lines = [
-        f"💧 <b>TRADEMIND {BOT_VERSION} — "
-        "КЛЮЧЕВЫЕ УРОВНИ</b>",
+        "💧 <b>TRADEMIND 5.0 — MAJOR LIQUIDITY</b>",
         "",
-        "Используем только крупную "
-        "ликвидность 1H.",
+        "Основные уровни берём с 1H.",
         "",
     ]
 
     for coin in COINS:
-        result = results.get(coin)
 
-        if not result:
-            continue
+        result = results.get(
+            coin,
+            {},
+        )
 
         if result.get("error"):
             continue
 
-        price = result.get("price")
+        levels = result.get(
+            "major_levels",
+            result.get(
+                "liquidity_levels",
+                [],
+            ),
+        )
 
         lines += [
-            f"💠 <b>{coin}</b> "
-            f"{format_price(price)}",
+            f"💠 <b>{coin}</b>",
             format_levels(
-                result.get(
-                    "major_levels",
-                    [],
-                ),
-                price,
+                levels,
+                result.get("price"),
             ),
             "",
             "────────────",
@@ -736,39 +1033,85 @@ def build_levels_message(results):
 # ============================================================
 
 def build_search_message(results):
-    ready = find_first_ready(results)
+
+    ready = find_best_ready(
+        results
+    )
 
     if ready:
+
         score, coin, result = ready
 
-        return build_ready_message(
-            coin,
-            result,
+        direction = result.get(
+            "direction"
         )
 
+        return "\n".join([
+            "🚨 <b>TRADEMIND 5.0 — ГОТОВЫЙ СЕТАП</b>",
+            "",
+
+            f"💠 Монета: <b>{coin}</b>",
+
+            (
+                f"📐 Направление: "
+                f"{direction_icon(direction)} "
+                f"<b>{direction}</b>"
+            ),
+
+            f"⭐ Score: <b>{score:.0f}/100</b>",
+
+            "",
+            "🟢 <b>МОЖНО ВХОДИТЬ</b>",
+            "",
+
+            (
+                f"Entry: "
+                f"<b>{format_price(result.get('entry'))}</b>"
+            ),
+
+            (
+                f"SL: "
+                f"<b>{format_price(result.get('sl'))}</b>"
+            ),
+
+            (
+                f"TP: "
+                f"<b>{format_price(result.get('tp'))}</b>"
+            ),
+
+            (
+                f"RR: "
+                f"<b>{format_rr(result.get('rr'))}</b>"
+            ),
+
+            "",
+            "🎯 TP — структурный уровень.",
+            "❌ Фиксированный 1:2 больше не обязателен.",
+        ])
+
     lines = [
-        "🔎 <b>ПОИСК СЕТАПА</b>",
+        "🔎 <b>TRADEMIND 5.0 — ПОИСК СЕТАПА</b>",
         "",
         "❌ <b>ГОТОВОГО ВХОДА СЕЙЧАС НЕТ</b>",
         "",
     ]
 
     for coin in COINS:
-        result = results.get(coin)
 
-        if not result:
-            continue
+        result = results.get(
+            coin,
+            {},
+        )
 
         if result.get("error"):
+
             lines.append(
                 f"❌ {coin}: ошибка"
             )
+
             continue
 
-        stage = result.get(
-            "stage",
-            "WAIT",
-        )
+        stage = get_stage(result)
 
         score = result.get(
             "score",
@@ -779,21 +1122,26 @@ def build_search_message(results):
             "direction"
         )
 
-        line = (
-            f"{stage_icon(stage)} "
-            f"{coin}: "
-            f"{stage_text(stage)} "
-            f"— {score}/100"
-        )
+        direction_text = ""
 
         if direction:
-            line += f" — {direction}"
+            direction_text = (
+                f" — {direction}"
+            )
 
-        lines.append(line)
+        lines.append(
+            f"{stage_icon(stage)} "
+            f"<b>{coin}</b>: "
+            f"{stage_text(stage)} "
+            f"— {score}/100"
+            f"{direction_text}"
+        )
 
     lines += [
         "",
-        "Ждём → Major Liquidity → Sweep → 15M → 5M.",
+        "Ждём → D1 → 1H → Major Liquidity",
+        "→ Sweep → 15M → 5M.",
+        "",
         "❌ В середине движения не входим.",
         "❌ Нет подтверждения → нет входа.",
     ]
@@ -806,1137 +1154,926 @@ def build_search_message(results):
 # ============================================================
 
 def build_sol_message(result):
+
     if result.get("error"):
+
         return (
             "❌ <b>SOL</b>\n\n"
+            f"Ошибка: "
             f"{result.get('error')}"
         )
-
-    stage = result.get(
-        "stage",
-        "WAIT",
-    )
-
-    lines = [
-        f"📈 <b>TRADEMIND {BOT_VERSION} — SOL</b>",
-        "",
-        f"💰 Цена: "
-        f"<b>{format_price(result.get('price'))}</b>",
-        f"{stage_icon(stage)} "
-        f"{stage_text(stage)}",
-        f"Score: "
-        f"<b>{result.get('score', 0)}/100</b>",
-    ]
-
-    if result.get("direction"):
-        lines.append(
-            f"Направление: "
-            f"<b>{result.get('direction')}</b>"
-        )
-
-    lines += [
-        "",
-        "💧 <b>КРУПНАЯ ЛИКВИДНОСТЬ:</b>",
-        format_levels(
-            result.get(
-                "major_levels",
-                [],
-            ),
-            result.get("price"),
-        ),
-    ]
-
-    if result.get("sweep"):
-        lines += [
-            "",
-            "🔎 <b>SWEEP</b>",
-            "Крупная ликвидность снята.",
-        ]
-
-    if stage in {
-        "CONFIRMED",
-        "15M_CONFIRMED",
-        "WAIT_5M_TRIGGER",
-    }:
-        lines += [
-            "",
-            "✅ Sweep",
-            "✅ 15M confirmation",
-            "⏳ Ждём 5M trigger",
-            "❌ <b>ВХОД ЗАПРЕЩЁН</b>",
-        ]
-
-    elif stage == "SWEPT":
-        lines += [
-            "",
-            "💧 Sweep обнаружен",
-            "⏳ Ждём 15M confirmation",
-            "❌ <b>ВХОД ЗАПРЕЩЁН</b>",
-        ]
-
-    elif stage == "WAIT_SWEEP":
-        lines += [
-            "",
-            "⏳ Ждём Sweep крупной ликвидности",
-            "❌ В середине движения не входим.",
-        ]
-
-    if stage == "READY":
-        lines += [
-            "",
-            "🎯 <b>СЕТАП ГОТОВ</b>",
-            "",
-            "🟢 <b>МОЖНО ВХОДИТЬ</b>",
-            "",
-            f"Entry: "
-            f"<b>{format_price(result.get('entry'))}</b>",
-            f"SL: "
-            f"<b>{format_price(result.get('sl'))}</b>",
-            f"TP: "
-            f"<b>{format_price(result.get('tp'))}</b>",
-            f"RR: "
-            f"<b>{format_rr(result.get('rr'))}</b>",
-            "",
-            "🎯 Один TP.",
-            "📐 RR = 1:2.",
-        ]
-
-    if result.get("liquidity_warning"):
-        lines += [
-            "",
-            f"⚠️ "
-            f"{result.get('liquidity_warning')}",
-        ]
-
-    if result.get("reason"):
-        lines += [
-            "",
-            f"🧠 Причина: "
-            f"{result.get('reason')}",
-        ]
-
-    return "\n".join(lines)
-
-
-# ============================================================
-# SETUP
-# ============================================================
-
-def make_setup(coin, result):
-    return {
-        "coin": coin,
-        "symbol": result.get(
-            "symbol",
-            COINS.get(coin),
-        ),
-        "direction": result.get(
-            "direction"
-        ),
-        "entry": result.get(
-            "entry"
-        ),
-        "sl": result.get(
-            "sl"
-        ),
-        "tp": result.get(
-            "tp"
-        ),
-        "rr": result.get(
-            "rr"
-        ),
-        "score": result.get(
-            "score"
-        ),
-        "raw_score": result.get(
-            "raw_score"
-        ),
-        "stage": result.get(
-            "stage"
-        ),
-        "tp_reason": result.get(
-            "tp_reason"
-        ),
-        "sweep_extreme": result.get(
-            "sweep_extreme"
-        ),
-        "liquidity_warning": result.get(
-            "liquidity_warning"
-        ),
-        "reason": result.get(
-            "reason"
-        ),
-        "risk_usdt": getattr(
-            bingx,
-            "RISK_USDT",
-            10,
-        ),
-        "created_at": datetime.utcnow().isoformat(),
-    }
-
-
-def setup_key(setup):
-    return (
-        f"{setup.get('coin')}_"
-        f"{setup.get('direction')}_"
-        f"{setup.get('entry')}_"
-        f"{setup.get('sl')}_"
-        f"{setup.get('tp')}"
-    )
-
-
-# ============================================================
-# BINGX
-# ============================================================
-
-def bingx_mode_text():
-    mode = bingx.mode()
-
-    return {
-        "OFF":
-            "⚪ OFF — только сигнал, "
-            "сделка НЕ открывается",
-
-        "PAPER":
-            "🟡 PAPER — виртуальная сделка",
-
-        "CONFIRM":
-            "🟠 CONFIRM — setup сохранён, "
-            "используй /execute",
-
-        "AUTO":
-            "🟢 AUTO — реальный ордер",
-    }.get(
-        mode,
-        f"⚪ {mode}",
-    )
-
-
-def build_bingx_message():
-    try:
-        cfg = bingx.config_status()
-    except Exception:
-        cfg = {
-            "mode": bingx.mode(),
-            "configured": False,
-            "leverage": 5,
-            "risk_usdt": 10,
-        }
-
-    return "\n".join([
-        f"🟠 <b>TRADEMIND {BOT_VERSION} — BINGX</b>",
-        "",
-        f"Режим: "
-        f"<b>{bingx_mode_text()}</b>",
-        "",
-        (
-            "API: ✅"
-            if cfg.get("configured")
-            else "API: ❌"
-        ),
-        f"Leverage: "
-        f"<b>{cfg.get('leverage', 5)}x</b>",
-        f"Risk: "
-        f"<b>${float(cfg.get('risk_usdt', 10)):.2f}</b>",
-        "",
-        "⚠️ AUTO сейчас не используем.",
-        "Сначала тестируем сигналы.",
-    ])
-
-
-def load_pending():
-    return load_json(
-        PENDING_FILE,
-        None,
-    )
-
-
-def save_pending(data):
-    save_json(
-        PENDING_FILE,
-        data,
-    )
-
-
-def clear_pending():
-    try:
-        if os.path.exists(
-            PENDING_FILE
-        ):
-            os.remove(
-                PENDING_FILE
-            )
-    except Exception as exc:
-        print(
-            f"PENDING DELETE ERROR: {exc}"
-        )
-
-
-def execution_success(data):
-    if not isinstance(
-        data,
-        dict,
-    ):
-        return False
-
-    if data.get("ok") is True:
-        return True
-
-    status = data.get(
-        "status"
-    )
-
-    return status in {
-        "submitted",
-        "simulated",
-        "success",
-        "filled",
-    }
-
-
-# ============================================================
-# PNG CHART
-# ============================================================
-
-def png_chunk(kind, data):
-    return (
-        struct.pack(
-            ">I",
-            len(data),
-        )
-        + kind
-        + data
-        + struct.pack(
-            ">I",
-            zlib.crc32(
-                kind + data
-            ) & 0xffffffff,
-        )
-    )
-
-
-def make_png(
-    width,
-    height,
-    pixels,
-):
-    raw = bytearray()
-
-    for row in pixels:
-        raw.append(0)
-        raw.extend(row)
-
-    png = bytearray(
-        b"\x89PNG\r\n\x1a\n"
-    )
-
-    png.extend(
-        png_chunk(
-            b"IHDR",
-            struct.pack(
-                ">IIBBBBB",
-                width,
-                height,
-                8,
-                2,
-                0,
-                0,
-                0,
-            ),
-        )
-    )
-
-    png.extend(
-        png_chunk(
-            b"IDAT",
-            zlib.compress(
-                bytes(raw),
-                6,
-            ),
-        )
-    )
-
-    png.extend(
-        png_chunk(
-            b"IEND",
-            b"",
-        )
-    )
-
-    return bytes(png)
-
-
-def new_canvas(
-    width,
-    height,
-    color,
-):
-    row = bytearray(
-        color * width
-    )
-
-    return [
-        bytearray(row)
-        for _ in range(height)
-    ]
-
-
-def set_pixel(
-    pixels,
-    x,
-    y,
-    color,
-):
-    if not pixels:
-        return
-
-    if not pixels[0]:
-        return
-
-    height = len(pixels)
-    width = len(
-        pixels[0]
-    ) // 3
-
-    if (
-        0 <= x < width
-        and
-        0 <= y < height
-    ):
-        index = x * 3
-
-        pixels[y][
-            index:index + 3
-        ] = bytes(color)
-
-
-def draw_line(
-    pixels,
-    x1,
-    y1,
-    x2,
-    y2,
-    color,
-    thickness=1,
-):
-    dx = x2 - x1
-    dy = y2 - y1
-
-    steps = max(
-        abs(dx),
-        abs(dy),
-        1,
-    )
-
-    for i in range(
-        steps + 1
-    ):
-        x = int(
-            x1
-            + dx * i / steps
-        )
-
-        y = int(
-            y1
-            + dy * i / steps
-        )
-
-        radius = max(
-            0,
-            thickness // 2,
-        )
-
-        for xx in range(
-            x - radius,
-            x + radius + 1,
-        ):
-            for yy in range(
-                y - radius,
-                y + radius + 1,
-            ):
-                set_pixel(
-                    pixels,
-                    xx,
-                    yy,
-                    color,
-                )
-
-
-def draw_rect(
-    pixels,
-    x1,
-    y1,
-    x2,
-    y2,
-    color,
-):
-    if x1 > x2:
-        x1, x2 = x2, x1
-
-    if y1 > y2:
-        y1, y2 = y2, y1
-
-    height = len(
-        pixels
-    )
-
-    width = len(
-        pixels[0]
-    ) // 3
-
-    for y in range(
-        max(0, y1),
-        min(
-            height,
-            y2 + 1,
-        ),
-    ):
-        for x in range(
-            max(0, x1),
-            min(
-                width,
-                x2 + 1,
-            ),
-        ):
-            set_pixel(
-                pixels,
-                x,
-                y,
-                color,
-            )
-
-
-def candle_value(
-    candle,
-    key,
-):
-    if not isinstance(
-        candle,
-        dict,
-    ):
-        return None
-
-    value = candle.get(
-        key
-    )
-
-    aliases = {
-        "open": ["o"],
-        "high": ["h"],
-        "low": ["l"],
-        "close": ["c"],
-        "open_time": [
-            "time",
-            "timestamp",
-        ],
-    }
-
-    if value is None:
-        for alias in aliases.get(
-            key,
-            [],
-        ):
-            if alias in candle:
-                value = candle[
-                    alias
-                ]
-                break
-
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
-def render_chart_png(
-    coin,
-    result,
-):
-    candles = result.get(
-        "candles_5m",
-        [],
-    )
-
-    levels = result.get(
-        "major_levels",
-        [],
-    )
 
     price = result.get(
         "price"
     )
 
-    entry = result.get(
-        "entry"
+    stage = get_stage(result)
+
+    score = result.get(
+        "score",
+        0,
     )
 
-    sl = result.get(
-        "sl"
-    )
-
-    tp = result.get(
-        "tp"
-    )
-
-    valid = []
-
-    for candle in candles:
-        values = {
-            key: candle_value(
-                candle,
-                key,
-            )
-            for key in (
-                "open",
-                "high",
-                "low",
-                "close",
-            )
-        }
-
-        if all(
-            value is not None
-            for value in values.values()
-        ):
-            valid.append(
-                values
-            )
-
-    valid = valid[-80:]
-
-    if not valid:
-        raise Exception(
-            "Нет 5M свечей."
-        )
-
-    width = 1200
-    height = 700
-
-    left = 60
-    right = 60
-    top = 40
-    bottom = 40
-
-    chart_width = (
-        width
-        - left
-        - right
-    )
-
-    chart_height = (
-        height
-        - top
-        - bottom
-    )
-
-    background = (
-        14,
-        18,
-        24,
-    )
-
-    grid = (
-        45,
-        52,
-        62,
-    )
-
-    bullish = (
-        50,
-        210,
-        130,
-    )
-
-    bearish = (
-        235,
-        80,
-        90,
-    )
-
-    blue = (
-        80,
-        170,
-        255,
-    )
-
-    high_color = (
-        240,
-        80,
-        90,
-    )
-
-    low_color = (
-        50,
-        210,
-        130,
-    )
-
-    entry_color = (
-        255,
-        215,
-        70,
-    )
-
-    tp_color = (
-        80,
-        220,
-        150,
-    )
-
-    pixels = new_canvas(
-        width,
-        height,
-        background,
-    )
-
-    values = []
-
-    for candle in valid:
-        values += [
-            candle["high"],
-            candle["low"],
-        ]
-
-    for level in levels:
-        try:
-            values.append(
-                float(
-                    level["price"]
-                )
-            )
-        except Exception:
-            pass
-
-    for value in (
-        price,
-        entry,
-        sl,
-        tp,
-    ):
-        try:
-            if value is not None:
-                values.append(
-                    float(value)
-                )
-        except Exception:
-            pass
-
-    if not values:
-        raise Exception(
-            "Нет данных для графика."
-        )
-
-    low = min(values)
-    high = max(values)
-
-    if high == low:
-        high += 1
-        low -= 1
-
-    padding = (
-        high - low
-    ) * 0.08
-
-    high += padding
-    low -= padding
-
-    def y_of(value):
-        ratio = (
-            high - value
-        ) / (
-            high - low
-        )
-
-        return int(
-            top
-            + ratio * chart_height
-        )
-
-    for i in range(1, 8):
-        y = (
-            top
-            + int(
-                chart_height
-                * i
-                / 8
-            )
-        )
-
-        draw_line(
-            pixels,
-            left,
-            y,
-            width - right,
-            y,
-            grid,
-        )
-
-    for level in levels:
-        try:
-            level_price = float(
-                level["price"]
-            )
-        except Exception:
-            continue
-
-        color = (
-            high_color
-            if "HIGH"
-            in level.get(
-                "type",
-                "",
-            )
-            else low_color
-        )
-
-        y = y_of(
-            level_price
-        )
-
-        draw_line(
-            pixels,
-            left,
-            y,
-            width - right,
-            y,
-            color,
-            2,
-        )
-
-    count = len(valid)
-
-    space = (
-        chart_width
-        / count
-    )
-
-    candle_width = max(
-        3,
-        int(
-            space * 0.55
-        ),
-    )
-
-    for i, candle in enumerate(
-        valid
-    ):
-        x = int(
-            left
-            + (
-                i + 0.5
-            )
-            * space
-        )
-
-        open_y = y_of(
-            candle["open"]
-        )
-
-        high_y = y_of(
-            candle["high"]
-        )
-
-        low_y = y_of(
-            candle["low"]
-        )
-
-        close_y = y_of(
-            candle["close"]
-        )
-
-        color = (
-            bullish
-            if candle["close"]
-            >= candle["open"]
-            else bearish
-        )
-
-        draw_line(
-            pixels,
-            x,
-            high_y,
-            x,
-            low_y,
-            color,
-        )
-
-        top_y = min(
-            open_y,
-            close_y,
-        )
-
-        bottom_y = max(
-            open_y,
-            close_y,
-        )
-
-        if top_y == bottom_y:
-            bottom_y += 2
-
-        draw_rect(
-            pixels,
-            x - candle_width // 2,
-            top_y,
-            x + candle_width // 2,
-            bottom_y,
-            color,
-        )
-
-    if price is not None:
-        try:
-            y = y_of(
-                float(price)
-            )
-
-            draw_line(
-                pixels,
-                left,
-                y,
-                width - right,
-                y,
-                blue,
-                2,
-            )
-        except Exception:
-            pass
-
-    for value, color in (
-        (
-            entry,
-            entry_color,
-        ),
-        (
-            sl,
-            high_color,
-        ),
-        (
-            tp,
-            tp_color,
-        ),
-    ):
-        if value is None:
-            continue
-
-        try:
-            y = y_of(
-                float(value)
-            )
-
-            draw_line(
-                pixels,
-                left,
-                y,
-                width - right,
-                y,
-                color,
-                3,
-            )
-        except Exception:
-            pass
-
-    return io.BytesIO(
-        make_png(
-            width,
-            height,
-            pixels,
-        )
-    )
-
-
-def build_chart_caption(
-    coin,
-    result,
-):
-    stage = result.get(
-        "stage",
-        "WAIT",
+    direction = result.get(
+        "direction"
     )
 
     lines = [
-        f"📈 <b>TRADEMIND {BOT_VERSION} — {coin}</b>",
+        "📈 <b>TRADEMIND 5.0 — SOL</b>",
         "",
-        f"💰 Цена: "
-        f"<b>{format_price(result.get('price'))}</b>",
-        f"{stage_icon(stage)} "
-        f"{stage_text(stage)}",
-        f"⭐ Score: "
-        f"<b>{result.get('score', 0)}/100</b>",
+        f"💰 Цена: <b>{format_price(price)}</b>",
+        (
+            f"{stage_icon(stage)} "
+            f"<b>{stage_text(stage)}</b>"
+        ),
+        f"⭐ Score: <b>{score}/100</b>",
+    ]
+
+    if direction:
+
+        lines += [
+            "",
+            (
+                f"📐 Направление: "
+                f"{direction_icon(direction)} "
+                f"<b>{direction}</b>"
+            ),
+        ]
+
+    levels = result.get(
+        "major_levels",
+        result.get(
+            "liquidity_levels",
+            [],
+        ),
+    )
+
+    lines += [
         "",
         "💧 <b>MAJOR LIQUIDITY</b>",
         format_levels(
-            result.get(
-                "major_levels",
-                [],
-            ),
-            result.get("price"),
+            levels,
+            price,
         ),
     ]
 
-    if result.get("direction"):
+    if result.get("entry") is not None:
+
         lines += [
             "",
-            f"📐 Направление: "
-            f"<b>{result.get('direction')}</b>",
+            "🎯 <b>СЕТАП</b>",
+
+            (
+                f"Entry: "
+                f"<b>{format_price(result.get('entry'))}</b>"
+            ),
+
+            (
+                f"SL: "
+                f"<b>{format_price(result.get('sl'))}</b>"
+            ),
+
+            (
+                f"TP: "
+                f"<b>{format_price(result.get('tp'))}</b>"
+            ),
+
+            (
+                f"RR: "
+                f"<b>{format_rr(result.get('rr'))}</b>"
+            ),
         ]
 
-    if stage == "READY":
-        lines += [
-            "",
-            "🚨 <b>ГОТОВЫЙ СЕТАП</b>",
-            "",
-            "🟢 <b>МОЖНО ВХОДИТЬ</b>",
-            "",
-            f"Entry: "
-            f"<b>{format_price(result.get('entry'))}</b>",
-            f"SL: "
-            f"<b>{format_price(result.get('sl'))}</b>",
-            f"TP: "
-            f"<b>{format_price(result.get('tp'))}</b>",
-            f"RR: "
-            f"<b>{format_rr(result.get('rr'))}</b>",
-            "",
-            "🎯 Один TP.",
-            "📐 RR = 1:2.",
-        ]
+        if result.get(
+            "tp_reason"
+        ):
 
-    elif stage in (
-        "CONFIRMED",
-        "15M_CONFIRMED",
-        "WAIT_5M_TRIGGER",
-    ):
-        lines += [
-            "",
-            "✅ Sweep",
-            "✅ 15M confirmation",
-            "⏳ Ждём 5M trigger",
-            "❌ <b>ВХОД ЗАПРЕЩЁН</b>",
-        ]
+            lines.append(
+                f"🎯 {result.get('tp_reason')}"
+            )
 
-    elif stage == "SWEPT":
-        lines += [
-            "",
-            "💧 Sweep обнаружен",
-            "⏳ Ждём 15M confirmation",
-            "❌ <b>ВХОД ЗАПРЕЩЁН</b>",
-        ]
+    reason = result.get(
+        "reason"
+    )
 
-    else:
-        lines += [
-            "",
-            "⏳ Ждём Major Liquidity → Sweep",
-            "❌ В середине движения не входим.",
-        ]
+    if reason:
 
-    if result.get(
-        "liquidity_warning"
-    ):
         lines += [
             "",
-            f"⚠️ "
-            f"{result.get('liquidity_warning')}",
-        ]
-
-    if result.get("reason"):
-        lines += [
-            "",
-            f"🧠 Причина: {result.get('reason')}",
+            "🧠 <b>Причина:</b>",
+            str(reason),
         ]
 
     return "\n".join(lines)
 
 
-async def send_chart(
-    message,
+# ============================================================
+# SETUP KEY
+# ============================================================
+
+def make_setup_key(
     coin,
+    result,
 ):
-    try:
-        result = await asyncio.to_thread(
-            build_analysis,
-            COINS[coin],
-        )
 
-        image = render_chart_png(
-            coin,
-            result,
-        )
-
-        image.seek(0)
-
-        await message.reply_photo(
-            photo=InputFile(
-                image,
-                filename=(
-                    f"{coin.lower()}_5m.png"
-                ),
-            ),
-            caption=build_chart_caption(
-                coin,
-                result,
-            ),
-            parse_mode="HTML",
-            reply_markup=chart_keyboard(),
-        )
-
-    except Exception as exc:
-        await message.reply_text(
-            f"❌ Ошибка графика "
-            f"{coin}: {exc}",
-            reply_markup=back_keyboard(),
-        )
+    return "|".join([
+        str(coin),
+        str(
+            result.get(
+                "direction"
+            )
+        ),
+        str(
+            result.get(
+                "entry"
+            )
+        ),
+        str(
+            result.get(
+                "sl"
+            )
+        ),
+        str(
+            result.get(
+                "tp"
+            )
+        ),
+    ])
 
 
 # ============================================================
-# TELEGRAM HELPERS
+# SUBSCRIBER BROADCAST
 # ============================================================
 
 async def broadcast(
     application,
     text,
-    keyboard=None,
 ):
+
     subscribers = load_subscribers()
 
     if not subscribers:
         return
 
     async def send_one(chat_id):
+
         try:
+
             await application.bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 parse_mode="HTML",
-                reply_markup=keyboard,
             )
 
         except Exception as exc:
+
             print(
-                f"BROADCAST ERROR "
+                f"[TELEGRAM ERROR] "
                 f"{chat_id}: {exc}"
             )
 
     await asyncio.gather(
-        *(
+        *[
             send_one(chat_id)
             for chat_id in subscribers
-        ),
+        ],
         return_exceptions=True,
     )
 
 
 # ============================================================
-# /START
+# STAGE ALERT
+# ============================================================
+
+def build_stage_alert(
+    coin,
+    result,
+):
+
+    stage = get_stage(result)
+
+    direction = result.get(
+        "direction"
+    )
+
+    price = result.get(
+        "price"
+    )
+
+    if stage in {
+        "SWEPT",
+        "SWEEP",
+    }:
+
+        return "\n".join([
+            "🔎 <b>TRADEMIND 5.0 — SWEEP</b>",
+            "",
+            f"💠 {coin}",
+            (
+                f"📐 {direction_icon(direction)} "
+                f"<b>{direction}</b>"
+            ),
+            f"💰 Цена: <b>{format_price(price)}</b>",
+            "",
+            "💧 Крупная ликвидность снята.",
+            "⏳ Ждём 15M confirmation.",
+            "❌ ВХОД ПОКА ЗАПРЕЩЁН.",
+        ])
+
+    if stage in {
+        "CONFIRMED",
+        "15M_CONFIRMED",
+    }:
+
+        return "\n".join([
+            "🟡 <b>TRADEMIND 5.0 — 15M CONFIRMATION</b>",
+            "",
+            f"💠 {coin}",
+            (
+                f"📐 {direction_icon(direction)} "
+                f"<b>{direction}</b>"
+            ),
+            "",
+            "✅ D1 / 1H направление",
+            "✅ Major Liquidity",
+            "✅ Sweep",
+            "✅ 15M confirmation",
+            "",
+            "⏳ Ждём 5M trigger.",
+            "❌ Вход пока запрещён.",
+        ])
+
+    return None
+
+
+# ============================================================
+# READY ALERT
+# ============================================================
+
+def build_ready_alert(
+    coin,
+    result,
+):
+
+    direction = result.get(
+        "direction"
+    )
+
+    score = result.get(
+        "score",
+        0,
+    )
+
+    return "\n".join([
+        "🚨 <b>TRADEMIND 5.0 — ГОТОВЫЙ СЕТАП</b>",
+        "",
+        f"💠 Монета: <b>{coin}</b>",
+        (
+            f"📐 Направление: "
+            f"{direction_icon(direction)} "
+            f"<b>{direction}</b>"
+        ),
+        f"⭐ Score: <b>{score}/100</b>",
+        "",
+        "🟢 <b>МОЖНО ВХОДИТЬ</b>",
+        "",
+        (
+            f"Entry: "
+            f"<b>{format_price(result.get('entry'))}</b>"
+        ),
+        (
+            f"SL: "
+            f"<b>{format_price(result.get('sl'))}</b>"
+        ),
+        (
+            f"TP: "
+            f"<b>{format_price(result.get('tp'))}</b>"
+        ),
+        (
+            f"RR: "
+            f"<b>{format_rr(result.get('rr'))}</b>"
+        ),
+        "",
+        "🎯 TP = структурный уровень.",
+        "❌ Не фиксированный 1:2.",
+        "",
+        "⚠️ BingX AUTO: OFF",
+    ])
+
+
+# ============================================================
+# MONITOR
+# ============================================================
+
+async def monitor(
+    application,
+):
+
+    print(
+        "===================================="
+    )
+
+    print(
+        "TradeMind 5.0 monitor started."
+    )
+
+    print(
+        f"Interval: {CHECK_INTERVAL}s"
+    )
+
+    print(
+        f"Workers: {SCAN_WORKERS}"
+    )
+
+    print(
+        f"Coins: {', '.join(COINS.keys())}"
+    )
+
+    print(
+        f"BingX mode: {BINGX_MODE}"
+    )
+
+    print(
+        "===================================="
+    )
+
+    while True:
+
+        started = time.monotonic()
+
+        try:
+
+            state = load_state()
+
+            today = datetime.now(
+                timezone.utc
+            ).date().isoformat()
+
+            # ------------------------------------------------
+            # NEW DAY
+            # ------------------------------------------------
+
+            if state.get(
+                "daily_date"
+            ) != today:
+
+                state["daily_date"] = today
+
+                state["daily_trades"] = 0
+
+                state["daily_stop"] = False
+
+                state["active_coin"] = None
+
+                state["active_symbol"] = None
+
+                state["active_direction"] = None
+
+                state["active_entry"] = None
+
+                state["active_sl"] = None
+
+                state["active_tp"] = None
+
+                state["active_rr"] = None
+
+                state["active_score"] = None
+
+                state["active_stage"] = None
+
+                state["last_signal_key"] = None
+
+            # ------------------------------------------------
+            # DAILY LIMIT
+            # ------------------------------------------------
+
+            if state.get(
+                "daily_trades",
+                0,
+            ) >= 2:
+
+                state["daily_stop"] = True
+
+            # ------------------------------------------------
+            # SCAN
+            # ------------------------------------------------
+
+            results = await scan_all_coins_async()
+
+            state["last_scan"] = (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            )
+
+            # ------------------------------------------------
+            # READY SETUP
+            # ------------------------------------------------
+
+            ready = find_best_ready(
+                results
+            )
+
+            if (
+                ready
+                and not state.get(
+                    "daily_stop"
+                )
+            ):
+
+                score, coin, result = ready
+
+                setup_key = make_setup_key(
+                    coin,
+                    result,
+                )
+
+                # Only alert once for exactly
+                # the same setup.
+
+                if (
+                    state.get(
+                        "last_signal_key"
+                    )
+                    != setup_key
+                ):
+
+                    text = build_ready_alert(
+                        coin,
+                        result,
+                    )
+
+                    await broadcast(
+                        application,
+                        text,
+                    )
+
+                    state["last_signal_key"] = (
+                        setup_key
+                    )
+
+                    state["active_coin"] = coin
+
+                    state["active_symbol"] = (
+                        result.get(
+                            "symbol"
+                        )
+                    )
+
+                    state["active_direction"] = (
+                        result.get(
+                            "direction"
+                        )
+                    )
+
+                    state["active_entry"] = (
+                        result.get(
+                            "entry"
+                        )
+                    )
+
+                    state["active_sl"] = (
+                        result.get(
+                            "sl"
+                        )
+                    )
+
+                    state["active_tp"] = (
+                        result.get(
+                            "tp"
+                        )
+                    )
+
+                    state["active_rr"] = (
+                        result.get(
+                            "rr"
+                        )
+                    )
+
+                    state["active_score"] = (
+                        score
+                    )
+
+                    state["active_stage"] = (
+                        "READY"
+                    )
+
+            # ------------------------------------------------
+            # EARLY STAGES
+            # ------------------------------------------------
+
+            for coin, result in results.items():
+
+                if result.get(
+                    "error"
+                ):
+                    continue
+
+                stage = get_stage(
+                    result
+                )
+
+                direction = result.get(
+                    "direction"
+                )
+
+                coin_state = state[
+                    "coins"
+                ].setdefault(
+                    coin,
+                    {},
+                )
+
+                # --------------------------------------------
+                # SWEEP
+                # --------------------------------------------
+
+                sweep = result.get(
+                    "sweep"
+                )
+
+                if sweep:
+
+                    sweep_price = (
+                        sweep.get(
+                            "price"
+                        )
+                        or sweep.get(
+                            "level"
+                        )
+                        or sweep.get(
+                            "sweep_price"
+                        )
+                    )
+
+                    sweep_time = (
+                        sweep.get(
+                            "open_time"
+                        )
+                        or sweep.get(
+                            "timestamp"
+                        )
+                        or sweep.get(
+                            "time"
+                        )
+                    )
+
+                    sweep_key = (
+                        f"{coin}|"
+                        f"{direction}|"
+                        f"{sweep_price}|"
+                        f"{sweep_time}"
+                    )
+
+                    if (
+                        coin_state.get(
+                            "last_sweep"
+                        )
+                        != sweep_key
+                    ):
+
+                        coin_state[
+                            "last_sweep"
+                        ] = sweep_key
+
+                        text = (
+                            build_stage_alert(
+                                coin,
+                                result,
+                            )
+                        )
+
+                        if text:
+
+                            await broadcast(
+                                application,
+                                text,
+                            )
+
+                # --------------------------------------------
+                # 15M CONFIRMATION
+                # --------------------------------------------
+
+                if stage in {
+                    "CONFIRMED",
+                    "15M_CONFIRMED",
+                }:
+
+                    confirmation_time = (
+                        result.get(
+                            "confirmation_15m_time"
+                        )
+                        or result.get(
+                            "confirmation_time"
+                        )
+                        or result.get(
+                            "confirmation_time_15m"
+                        )
+                    )
+
+                    confirmation_key = (
+                        f"{coin}|"
+                        f"{direction}|"
+                        f"{confirmation_time}"
+                    )
+
+                    if (
+                        coin_state.get(
+                            "last_confirmation"
+                        )
+                        != confirmation_key
+                    ):
+
+                        coin_state[
+                            "last_confirmation"
+                        ] = confirmation_key
+
+                        text = (
+                            build_stage_alert(
+                                coin,
+                                result,
+                            )
+                        )
+
+                        if text:
+
+                            await broadcast(
+                                application,
+                                text,
+                            )
+
+            save_state(
+                state
+            )
+
+        except Exception as exc:
+
+            print(
+                f"[MONITOR ERROR] {exc}"
+            )
+
+        elapsed = (
+            time.monotonic()
+            - started
+        )
+
+        sleep_time = max(
+            1,
+            CHECK_INTERVAL
+            - elapsed,
+        )
+
+        await asyncio.sleep(
+            sleep_time
+        )
+
+
+# ============================================================
+# TELEGRAM COMMANDS
 # ============================================================
 
 async def start(
-    update,
-    context,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ):
-    chat_id = (
-        update.effective_chat.id
+
+    await update.message.reply_text(
+        "\n".join([
+            "🤖 <b>TRADEMIND 5.0</b>",
+            "",
+            "Автоматический анализ:",
+            "",
+            "1️⃣ D1 — направление",
+            "2️⃣ 1H — подтверждение",
+            "3️⃣ 1H — Major Liquidity",
+            "4️⃣ Sweep",
+            "5️⃣ 15M confirmation",
+            "6️⃣ 5M V/L trigger",
+            "7️⃣ Entry",
+            "8️⃣ SL за sweep",
+            "9️⃣ TP по структуре",
+            "",
+            f"Монеты: <b>{len(COINS)}</b>",
+            f"Сканирование: <b>{CHECK_INTERVAL} сек.</b>",
+            "",
+            "BingX AUTO: <b>OFF</b>",
+        ]),
+        parse_mode="HTML",
+        reply_markup=main_keyboard(),
     )
+
+
+async def market_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    await update.message.reply_text(
+        "⏳ Сканирую рынок..."
+    )
+
+    results = (
+        await scan_all_coins_async()
+    )
+
+    await update.message.reply_text(
+        build_market_message(
+            results
+        ),
+        parse_mode="HTML",
+        reply_markup=back_keyboard(),
+    )
+
+
+async def levels_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    await update.message.reply_text(
+        "⏳ Получаю Major Liquidity..."
+    )
+
+    results = (
+        await scan_all_coins_async()
+    )
+
+    await update.message.reply_text(
+        build_levels_message(
+            results
+        ),
+        parse_mode="HTML",
+        reply_markup=back_keyboard(),
+    )
+
+
+async def search_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    await update.message.reply_text(
+        "🔎 Ищу сетап..."
+    )
+
+    results = (
+        await scan_all_coins_async()
+    )
+
+    await update.message.reply_text(
+        build_search_message(
+            results
+        ),
+        parse_mode="HTML",
+        reply_markup=back_keyboard(),
+    )
+
+
+async def sol_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    try:
+
+        result = await asyncio.to_thread(
+            run_strategy,
+            "SOLUSDT",
+        )
+
+        await update.message.reply_text(
+            build_sol_message(
+                result
+            ),
+            parse_mode="HTML",
+            reply_markup=back_keyboard(),
+        )
+
+    except Exception as exc:
+
+        await update.message.reply_text(
+            (
+                "❌ <b>Ошибка SOL</b>\n\n"
+                f"{exc}"
+            ),
+            parse_mode="HTML",
+            reply_markup=back_keyboard(),
+        )
+
+
+async def status_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    state = load_state()
+
+    daily_trades = int(
+        state.get(
+            "daily_trades",
+            0,
+        )
+    )
+
+    daily_stop = state.get(
+        "daily_stop",
+        False,
+    )
+
+    active_coin = state.get(
+        "active_coin"
+    )
+
+    if active_coin:
+
+        text = "\n".join([
+            "📊 <b>TRADEMIND 5.0 — СТАТУС</b>",
+            "",
+            f"🟢 Активный сетап: <b>{active_coin}</b>",
+            (
+                f"Направление: "
+                f"<b>{state.get('active_direction')}</b>"
+            ),
+            (
+                f"Stage: "
+                f"<b>{state.get('active_stage')}</b>"
+            ),
+            (
+                f"Score: "
+                f"<b>{state.get('active_score')}/100</b>"
+            ),
+            "",
+            (
+                f"Entry: "
+                f"<b>{format_price(state.get('active_entry'))}</b>"
+            ),
+            (
+                f"SL: "
+                f"<b>{format_price(state.get('active_sl'))}</b>"
+            ),
+            (
+                f"TP: "
+                f"<b>{format_price(state.get('active_tp'))}</b>"
+            ),
+            (
+                f"RR: "
+                f"<b>{format_rr(state.get('active_rr'))}</b>"
+            ),
+            "",
+            (
+                f"Сделок сегодня: "
+                f"<b>{daily_trades}/2</b>"
+            ),
+            (
+                f"Daily stop: "
+                f"<b>{'YES' if daily_stop else 'NO'}</b>"
+            ),
+            "",
+            "BingX: <b>OFF</b>",
+        ])
+
+    else:
+
+        text = "\n".join([
+            "📊 <b>TRADEMIND 5.0 — СТАТУС</b>",
+            "",
+            "🟢 Активного сетапа нет.",
+            "",
+            (
+                f"Сделок сегодня: "
+                f"<b>{daily_trades}/2</b>"
+            ),
+            (
+                f"Daily stop: "
+                f"<b>{'YES' if daily_stop else 'NO'}</b>"
+            ),
+            "",
+            (
+                f"Сканирование: "
+                f"<b>{CHECK_INTERVAL} сек.</b>"
+            ),
+            "",
+            "BingX: <b>OFF</b>",
+        ])
+
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=back_keyboard(),
+    )
+
+
+async def subscribe_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     subscribers = load_subscribers()
 
+    chat_id = update.effective_chat.id
+
     if chat_id not in subscribers:
+
         subscribers.append(
             chat_id
         )
@@ -1945,160 +2082,12 @@ async def start(
             subscribers
         )
 
-    await update.message.reply_text(
-        "\n".join([
-            f"🤖 <b>TRADEMIND {BOT_VERSION}</b>",
-            "",
-            f"Bot: <b>{BOT_VERSION}</b>",
-            f"Strategy: <b>{STRATEGY_VERSION}</b>",
-            "",
-            "Мониторинг:",
-            "BTC • ETH • SOL • BNB • XRP",
-            "HYPE • DOGE • LINK • SUI",
-            "",
-            f"⏱ Сканирование: "
-            f"<b>{CHECK_INTERVAL} сек.</b>",
-            "",
-            "Стратегия:",
-            "1H → Major Liquidity → Sweep → 15M → 5M",
-            "",
-            "Правила:",
-            "💧 Только крупная ликвидность",
-            "🎯 Sweep → 15M → 5M",
-            "❌ Не входить в середине",
-            "❌ Нет подтверждения → нет входа",
-            "🎯 Только один TP",
-            "📐 RR = 1:2",
-            "⚠️ Ликвидность 1.5–2R снижает Score",
-            "",
-            f"{bingx_mode_text()}",
-        ]),
-        parse_mode="HTML",
-        reply_markup=main_keyboard(),
-    )
-
-
-# ============================================================
-# BASIC COMMANDS
-# ============================================================
-
-async def market_command(
-    update,
-    context,
-):
-    try:
-        results = await scan_all_coins_async()
-
-        await update.message.reply_text(
-            build_market_message(results),
-            parse_mode="HTML",
-            reply_markup=back_keyboard(),
-        )
-
-    except Exception as exc:
-        await update.message.reply_text(
-            f"❌ Ошибка рынка:\n{exc}",
-            reply_markup=back_keyboard(),
-        )
-
-
-async def levels_command(
-    update,
-    context,
-):
-    try:
-        results = await scan_all_coins_async()
-
-        await update.message.reply_text(
-            build_levels_message(results),
-            parse_mode="HTML",
-            reply_markup=back_keyboard(),
-        )
-
-    except Exception as exc:
-        await update.message.reply_text(
-            f"❌ Ошибка уровней:\n{exc}",
-            reply_markup=back_keyboard(),
-        )
-
-
-async def search_command(
-    update,
-    context,
-):
-    try:
-        results = await scan_all_coins_async()
-
-        await update.message.reply_text(
-            build_search_message(results),
-            parse_mode="HTML",
-            reply_markup=back_keyboard(),
-        )
-
-    except Exception as exc:
-        await update.message.reply_text(
-            f"❌ Ошибка поиска:\n{exc}",
-            reply_markup=back_keyboard(),
-        )
-
-
-async def sol_command(
-    update,
-    context,
-):
-    try:
-        result = await asyncio.to_thread(
-            build_analysis,
-            "SOLUSDT",
-        )
-
-        await update.message.reply_text(
-            build_sol_message(result),
-            parse_mode="HTML",
-            reply_markup=back_keyboard(),
-        )
-
-    except Exception as exc:
-        await update.message.reply_text(
-            f"❌ Ошибка SOL:\n{exc}",
-            reply_markup=back_keyboard(),
-        )
-
-
-async def chart_command(
-    update,
-    context,
-):
-    coin = "SOL"
-
-    if (
-        context.args
-        and context.args[0].upper() in COINS
-    ):
-        coin = context.args[0].upper()
-
-    await send_chart(
-        update.message,
-        coin,
-    )
-
-
-async def subscribe_command(
-    update,
-    context,
-):
-    subscribers = load_subscribers()
-
-    chat_id = update.effective_chat.id
-
-    if chat_id not in subscribers:
-        subscribers.append(chat_id)
-        save_subscribers(subscribers)
-
         text = (
             "🔔 <b>Уведомления включены.</b>"
         )
+
     else:
+
         text = (
             "🔔 Уведомления уже включены."
         )
@@ -2111,21 +2100,30 @@ async def subscribe_command(
 
 
 async def unsubscribe_command(
-    update,
-    context,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ):
+
     subscribers = load_subscribers()
 
     chat_id = update.effective_chat.id
 
     if chat_id in subscribers:
-        subscribers.remove(chat_id)
-        save_subscribers(subscribers)
+
+        subscribers.remove(
+            chat_id
+        )
+
+        save_subscribers(
+            subscribers
+        )
 
         text = (
             "🔕 <b>Уведомления выключены.</b>"
         )
+
     else:
+
         text = (
             "🔕 Уведомления уже выключены."
         )
@@ -2137,404 +2135,20 @@ async def unsubscribe_command(
     )
 
 
-# ============================================================
-# STATUS
-# ============================================================
-
-async def status_command(
-    update,
-    context,
-):
-    state = load_state()
-
-    lines = [
-        f"📊 <b>TRADEMIND {BOT_VERSION} — СТАТУС</b>",
-        "",
-        f"Bot version: <b>{BOT_VERSION}</b>",
-        f"Strategy version: <b>{STRATEGY_VERSION}</b>",
-        "",
-        f"BingX mode: "
-        f"<b>{bingx.mode()}</b>",
-        f"Сделок сегодня: "
-        f"<b>{state.get('daily_trades', 0)}/2</b>",
-        f"Daily stop: "
-        f"<b>{'YES' if state.get('daily_stop') else 'NO'}</b>",
-    ]
-
-    if state.get("active_coin"):
-        lines += [
-            "",
-            "🔥 <b>АКТИВНЫЙ SETUP</b>",
-            f"Монета: "
-            f"<b>{state.get('active_coin')}</b>",
-            f"Направление: "
-            f"<b>{state.get('active_direction')}</b>",
-            f"Stage: "
-            f"<b>{state.get('active_stage')}</b>",
-            f"Score: "
-            f"<b>{state.get('active_score')}/100</b>",
-            "",
-            f"Entry: "
-            f"<b>{format_price(state.get('active_entry'))}</b>",
-            f"SL: "
-            f"<b>{format_price(state.get('active_sl'))}</b>",
-            f"TP: "
-            f"<b>{format_price(state.get('active_tp'))}</b>",
-            f"RR: "
-            f"<b>{format_rr(state.get('active_rr'))}</b>",
-        ]
-    else:
-        lines += [
-            "",
-            "🟢 Активной сделки нет.",
-        ]
-
-    await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=back_keyboard(),
-    )
-
-
-# ============================================================
-# BINGX COMMANDS
-# ============================================================
-
-async def bingx_command(
-    update,
-    context,
-):
-    await update.message.reply_text(
-        build_bingx_message(),
-        parse_mode="HTML",
-        reply_markup=back_keyboard(),
-    )
-
-
-async def balance_command(
-    update,
-    context,
-):
-    try:
-        data = await asyncio.to_thread(
-            bingx.get_balance
-        )
-
-        if not data:
-            text = "❌ Баланс не получен."
-        else:
-            text = "\n".join([
-                "💰 <b>BingX Futures</b>",
-                "",
-                f"Balance: "
-                f"<b>{data.get('balance', 'N/A')}</b> USDT",
-                f"Equity: "
-                f"<b>{data.get('equity', 'N/A')}</b> USDT",
-                f"Available: "
-                f"<b>{data.get('availableMargin', 'N/A')}</b> USDT",
-                f"UPL: "
-                f"<b>{data.get('unrealizedProfit', 'N/A')}</b> USDT",
-            ])
-
-        await update.message.reply_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=back_keyboard(),
-        )
-
-    except Exception as exc:
-        await update.message.reply_text(
-            f"❌ BingX balance error:\n{exc}",
-            reply_markup=back_keyboard(),
-        )
-
-
-async def position_command(
-    update,
-    context,
-):
-    try:
-        positions = await asyncio.to_thread(
-            bingx.get_positions
-        )
-
-        active = []
-
-        for position in positions or []:
-            try:
-                amount = abs(
-                    float(
-                        position.get(
-                            "positionAmt",
-                            0,
-                        )
-                    )
-                )
-            except Exception:
-                amount = 0
-
-            if amount <= 0:
-                continue
-
-            active.append(position)
-
-        if not active:
-            text = (
-                "📭 <b>BingX</b>\n\n"
-                "Открытых позиций нет."
-            )
-        else:
-            lines = [
-                "📌 <b>BingX — ПОЗИЦИИ</b>",
-                "",
-            ]
-
-            for position in active:
-                lines += [
-                    f"💠 <b>{position.get('symbol')}</b>",
-                    f"Side: "
-                    f"<b>{position.get('positionSide')}</b>",
-                    f"Qty: "
-                    f"<b>{position.get('positionAmt')}</b>",
-                    f"Entry: "
-                    f"<b>{position.get('avgPrice')}</b>",
-                    f"PnL: "
-                    f"<b>{position.get('unrealizedProfit')}</b>",
-                    "",
-                ]
-
-            text = "\n".join(lines)
-
-        await update.message.reply_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=back_keyboard(),
-        )
-
-    except Exception as exc:
-        await update.message.reply_text(
-            f"❌ BingX position error:\n{exc}",
-            reply_markup=back_keyboard(),
-        )
-
-
-# ============================================================
-# EXECUTE
-# ============================================================
-
-async def execute_command(
-    update,
-    context,
-):
-    if bingx.mode() != "CONFIRM":
-        await update.message.reply_text(
-            "❌ /execute работает только при "
-            "<b>BINGX_MODE=CONFIRM</b>.",
-            parse_mode="HTML",
-            reply_markup=back_keyboard(),
-        )
-        return
-
-    state = load_state()
-
-    reset_daily_if_needed(state)
-
-    if state.get("daily_stop"):
-        await update.message.reply_text(
-            "🛑 Торговля на сегодня остановлена.",
-            reply_markup=back_keyboard(),
-        )
-        return
-
-    if state.get("daily_trades", 0) >= 2:
-        state["daily_stop"] = True
-        save_state(state)
-
-        await update.message.reply_text(
-            "🛑 Достигнут лимит "
-            "<b>2 сделки/день</b>.",
-            parse_mode="HTML",
-            reply_markup=back_keyboard(),
-        )
-        return
-
-    pending = load_pending()
-
-    if not pending:
-        await update.message.reply_text(
-            "📭 Pending setup отсутствует.",
-            reply_markup=back_keyboard(),
-        )
-        return
-
-    try:
-        data = await asyncio.to_thread(
-            bingx.execute_confirmed,
-            pending,
-        )
-
-        if not execution_success(data):
-            error = (
-                data.get("error")
-                or data.get("message")
-                or "BingX не подтвердил выполнение."
-            )
-
-            await update.message.reply_text(
-                "❌ <b>Сделка НЕ выполнена</b>\n\n"
-                f"Причина: {error}",
-                parse_mode="HTML",
-                reply_markup=back_keyboard(),
-            )
-
-            return
-
-        setup = pending
-
-        state.update({
-            "active_coin": setup.get("coin"),
-            "active_symbol": setup.get("symbol"),
-            "active_direction": setup.get("direction"),
-            "active_setup_key": setup_key(setup),
-            "active_entry": setup.get("entry"),
-            "active_sl": setup.get("sl"),
-            "active_tp": setup.get("tp"),
-            "active_rr": setup.get("rr"),
-            "active_tp_reason": setup.get("tp_reason"),
-            "active_sweep_extreme": setup.get("sweep_extreme"),
-            "active_score": setup.get("score"),
-            "active_stage": "READY",
-            "last_alert": datetime.utcnow().isoformat(),
-        })
-
-        state["daily_trades"] = (
-            int(
-                state.get(
-                    "daily_trades",
-                    0,
-                )
-            )
-            + 1
-        )
-
-        if state["daily_trades"] >= 2:
-            state["daily_stop"] = True
-
-        save_state(state)
-        clear_pending()
-
-        await update.message.reply_text(
-            "\n".join([
-                "🟢 <b>BingX order отправлен.</b>",
-                "",
-                f"Coin: <b>{setup.get('coin')}</b>",
-                f"Direction: <b>{setup.get('direction')}</b>",
-                "",
-                f"Entry: <b>{format_price(setup.get('entry'))}</b>",
-                f"SL: <b>{format_price(setup.get('sl'))}</b>",
-                f"TP: <b>{format_price(setup.get('tp'))}</b>",
-                f"RR: <b>{format_rr(setup.get('rr'))}</b>",
-                "",
-                f"Сделок сегодня: "
-                f"<b>{state['daily_trades']}/2</b>",
-            ]),
-            parse_mode="HTML",
-            reply_markup=back_keyboard(),
-        )
-
-    except Exception as exc:
-        await update.message.reply_text(
-            f"❌ BingX execute error:\n{exc}",
-            reply_markup=back_keyboard(),
-        )
-
-
-# ============================================================
-# CLOSE
-# ============================================================
-
-async def close_command(
-    update,
-    context,
-):
-    confirm = (
-        bool(context.args)
-        and context.args[0].upper() == "CONFIRM"
-    )
-
-    if not confirm:
-        await update.message.reply_text(
-            "⚠️ Команда закрывает "
-            "позицию рыночным ордером.\n\n"
-            "Для подтверждения:\n"
-            "<code>/close CONFIRM</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    try:
-        symbol = (
-            context.args[1]
-            if len(context.args) > 1
-            else None
-        )
-
-        data = await asyncio.to_thread(
-            bingx.close_position,
-            symbol,
-        )
-
-        state = load_state()
-
-        state["active_coin"] = None
-        state["active_symbol"] = None
-        state["active_direction"] = None
-        state["active_setup_key"] = None
-        state["active_entry"] = None
-        state["active_sl"] = None
-        state["active_tp"] = None
-        state["active_rr"] = None
-        state["active_tp_reason"] = None
-        state["active_sweep_extreme"] = None
-        state["active_score"] = None
-        state["active_stage"] = None
-
-        save_state(state)
-
-        await update.message.reply_text(
-            f"🟢 BingX close отправлен.\n"
-            f"<code>{data}</code>",
-            parse_mode="HTML",
-        )
-
-    except Exception as exc:
-        await update.message.reply_text(
-            f"❌ BingX close error:\n{exc}"
-        )
-
-
-# ============================================================
-# JOURNAL
-# ============================================================
-
 async def journal_command(
-    update,
-    context,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ):
+
     await update.message.reply_text(
         "\n".join([
-            f"📒 <b>TRADEMIND {BOT_VERSION} — ЖУРНАЛ</b>",
+            "📒 <b>TRADEMIND — ЖУРНАЛ</b>",
             "",
-            "Мониторинг сигналов подключён.",
+            "Журнал сетапов будет использовать",
+            "monitor_state.json.",
             "",
-            "Следующий этап:",
-            "• фактический fill",
-            "• TP/SL outcome",
-            "• PnL",
-            "• R",
-            "• Win Rate",
-            "• Total R",
-            "• остановка после SL",
+            "Следующий этап — автоматическая",
+            "фиксация результата Entry/SL/TP.",
         ]),
         parse_mode="HTML",
         reply_markup=back_keyboard(),
@@ -2542,648 +2156,328 @@ async def journal_command(
 
 
 # ============================================================
-# MONITOR
-# ============================================================
-
-async def monitor(application):
-    print(
-        f"TradeMind {BOT_VERSION} monitor started."
-    )
-
-    print(
-        f"Bot version: {BOT_VERSION}"
-    )
-
-    print(
-        f"Strategy version: {STRATEGY_VERSION}"
-    )
-
-    print(
-        f"Scan interval: {CHECK_INTERVAL}s"
-    )
-
-    print(
-        f"BingX mode: {bingx.mode()}"
-    )
-
-    while True:
-        started = (
-            asyncio.get_running_loop().time()
-        )
-
-        try:
-            state = load_state()
-
-            reset_daily_if_needed(state)
-
-            if state.get(
-                "daily_trades",
-                0,
-            ) >= 2:
-                state["daily_stop"] = True
-
-            results = await scan_all_coins_async()
-
-            active_coin = state.get(
-                "active_coin"
-            )
-
-            # ==================================================
-            # READY SETUP
-            # ==================================================
-
-            if (
-                not active_coin
-                and not state.get("daily_stop")
-            ):
-                ready = find_first_ready(results)
-
-                if ready:
-                    score, coin, result = ready
-
-                    setup = make_setup(
-                        coin,
-                        result,
-                    )
-
-                    current_key = setup_key(setup)
-
-                    if (
-                        current_key
-                        != state.get("last_signal_key")
-                    ):
-                        mode = bingx.mode()
-
-                        # ======================================
-                        # OFF
-                        # ======================================
-
-                        if mode == "OFF":
-                            state["last_signal_key"] = current_key
-                            state["last_alert"] = datetime.utcnow().isoformat()
-
-                            save_state(state)
-
-                            await broadcast(
-                                application,
-                                build_ready_message(
-                                    coin,
-                                    result,
-                                    mode=True,
-                                ),
-                            )
-
-                        # ======================================
-                        # CONFIRM
-                        # ======================================
-
-                        elif mode == "CONFIRM":
-                            try:
-                                execution = await asyncio.to_thread(
-                                    bingx.open_trade,
-                                    setup,
-                                )
-
-                            except Exception as exc:
-                                print(
-                                    "BINGX CONFIRM ERROR:",
-                                    exc,
-                                )
-
-                                execution = {
-                                    "ok": False,
-                                    "status": "error",
-                                    "error": str(exc),
-                                }
-
-                            if (
-                                execution.get("status")
-                                == "pending_confirmation"
-                            ):
-                                save_pending(setup)
-
-                                state["last_signal_key"] = current_key
-                                state["last_alert"] = datetime.utcnow().isoformat()
-
-                                save_state(state)
-
-                                text = build_ready_message(
-                                    coin,
-                                    result,
-                                )
-
-                                text += (
-                                    "\n\n"
-                                    "🟠 <b>CONFIRM</b>"
-                                    "\n"
-                                    "Setup сохранён."
-                                    "\n"
-                                    "Для исполнения:"
-                                    "\n"
-                                    "<code>/execute</code>"
-                                    "\n\n"
-                                    "❌ Автоматически сделка не открывается."
-                                )
-
-                                await broadcast(
-                                    application,
-                                    text,
-                                )
-
-                        # ======================================
-                        # PAPER / AUTO
-                        # ======================================
-
-                        else:
-                            try:
-                                execution = await asyncio.to_thread(
-                                    bingx.open_trade,
-                                    setup,
-                                )
-
-                            except Exception as exc:
-                                print(
-                                    "BINGX OPEN ERROR:",
-                                    exc,
-                                )
-
-                                execution = {
-                                    "ok": False,
-                                    "status": "error",
-                                    "error": str(exc),
-                                }
-
-                            status = execution.get("status")
-
-                            if status in {
-                                "simulated",
-                                "submitted",
-                            }:
-                                state.update({
-                                    "active_coin": coin,
-                                    "active_symbol": setup.get("symbol"),
-                                    "active_direction": setup.get("direction"),
-                                    "active_setup_key": current_key,
-                                    "active_entry": setup.get("entry"),
-                                    "active_sl": setup.get("sl"),
-                                    "active_tp": setup.get("tp"),
-                                    "active_rr": setup.get("rr"),
-                                    "active_tp_reason": setup.get("tp_reason"),
-                                    "active_sweep_extreme": setup.get("sweep_extreme"),
-                                    "active_score": score,
-                                    "active_stage": "READY",
-                                    "last_signal_key": current_key,
-                                    "last_alert": datetime.utcnow().isoformat(),
-                                })
-
-                                state["daily_trades"] = (
-                                    int(
-                                        state.get(
-                                            "daily_trades",
-                                            0,
-                                        )
-                                    )
-                                    + 1
-                                )
-
-                                if state["daily_trades"] >= 2:
-                                    state["daily_stop"] = True
-
-                                save_state(state)
-
-                                text = build_ready_message(
-                                    coin,
-                                    result,
-                                    mode=True,
-                                )
-
-                                await broadcast(
-                                    application,
-                                    text,
-                                )
-
-            # ==================================================
-            # EARLY STAGES
-            # ==================================================
-
-            for coin, result in results.items():
-                if not result:
-                    continue
-
-                if result.get("error"):
-                    continue
-
-                direction = result.get("direction")
-                stage = result.get("stage")
-                sweep = result.get("sweep")
-
-                coin_state = (
-                    state["coins"].setdefault(
-                        coin,
-                        {},
-                    )
-                )
-
-                # ----------------------------------------------
-                # SWEEP
-                # ----------------------------------------------
-
-                if sweep:
-                    sweep_price = (
-                        sweep.get("price")
-                        or sweep.get("level")
-                    )
-
-                    sweep_time = sweep.get("open_time")
-
-                    sweep_key = (
-                        f"{coin}_"
-                        f"{direction}_"
-                        f"{sweep_price}_"
-                        f"{sweep_time}"
-                    )
-
-                    if (
-                        coin_state.get("last_sweep")
-                        != sweep_key
-                    ):
-                        coin_state["last_sweep"] = sweep_key
-
-                        await broadcast(
-                            application,
-                            "\n".join([
-                                f"🔎 <b>TRADEMIND {BOT_VERSION} — SWEEP</b>",
-                                "",
-                                f"💠 {coin}",
-                                f"📐 {direction or '—'}",
-                                "",
-                                "💧 Крупная ликвидность снята.",
-                                "⏳ Ждём 15M confirmation.",
-                                "❌ <b>ВХОД ПОКА ЗАПРЕЩЁН</b>",
-                            ]),
-                        )
-
-                # ----------------------------------------------
-                # 15M CONFIRMATION
-                # ----------------------------------------------
-
-                if stage in {
-                    "CONFIRMED",
-                    "15M_CONFIRMED",
-                }:
-                    confirmation_time = (
-                        result.get("confirmation_15m_time")
-                        or result.get("confirmation_time")
-                    )
-
-                    confirmation_key = (
-                        f"{coin}_"
-                        f"{direction}_"
-                        f"{confirmation_time}"
-                    )
-
-                    if (
-                        coin_state.get("last_confirmation")
-                        != confirmation_key
-                    ):
-                        coin_state["last_confirmation"] = confirmation_key
-
-                        await broadcast(
-                            application,
-                            "\n".join([
-                                f"🟡 <b>TRADEMIND {BOT_VERSION} — 15M CONFIRMATION</b>",
-                                "",
-                                f"💠 {coin}",
-                                f"📐 {direction or '—'}",
-                                "",
-                                "✅ Sweep",
-                                "✅ 15M confirmation",
-                                "⏳ Ждём 5M trigger.",
-                                "❌ <b>ВХОД ПОКА ЗАПРЕЩЁН</b>",
-                            ]),
-                        )
-
-            save_state(state)
-
-        except Exception as exc:
-            print(
-                f"MONITOR ERROR: {exc}"
-            )
-
-        elapsed = (
-            asyncio.get_running_loop().time()
-            - started
-        )
-
-        await asyncio.sleep(
-            max(
-                1,
-                CHECK_INTERVAL - elapsed,
-            )
-        )
-
-
-# ============================================================
 # CALLBACKS
 # ============================================================
 
 async def callbacks(
-    update,
-    context,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ):
+
     query = update.callback_query
 
     await query.answer()
 
     data = query.data
 
-    try:
+    # --------------------------------------------------------
+    # START
+    # --------------------------------------------------------
 
-        # ------------------------------------------
-        # HOME
-        # ------------------------------------------
+    if data == "start":
 
-        if data == "start":
-            await query.edit_message_text(
-                "\n".join([
-                    f"🤖 <b>TRADEMIND {BOT_VERSION}</b>",
-                    "",
-                    f"Bot: <b>{BOT_VERSION}</b>",
-                    f"Strategy: <b>{STRATEGY_VERSION}</b>",
-                    "",
-                    "9 монет • сканирование "
-                    f"{CHECK_INTERVAL} секунд",
-                    "",
-                    "1H → Major Liquidity → Sweep → 15M → 5M",
-                    "",
-                    f"{bingx_mode_text()}",
-                ]),
-                parse_mode="HTML",
-                reply_markup=main_keyboard(),
-            )
-            return
-
-        # ------------------------------------------
-        # MARKET
-        # ------------------------------------------
-
-        if data == "market":
-            results = await scan_all_coins_async()
-
-            await query.edit_message_text(
-                build_market_message(results),
-                parse_mode="HTML",
-                reply_markup=back_keyboard(),
-            )
-            return
-
-        # ------------------------------------------
-        # LEVELS
-        # ------------------------------------------
-
-        if data == "levels":
-            results = await scan_all_coins_async()
-
-            await query.edit_message_text(
-                build_levels_message(results),
-                parse_mode="HTML",
-                reply_markup=back_keyboard(),
-            )
-            return
-
-        # ------------------------------------------
-        # SEARCH
-        # ------------------------------------------
-
-        if data == "search":
-            results = await scan_all_coins_async()
-
-            await query.edit_message_text(
-                build_search_message(results),
-                parse_mode="HTML",
-                reply_markup=back_keyboard(),
-            )
-            return
-
-        # ------------------------------------------
-        # CHART
-        # ------------------------------------------
-
-        if data == "chart":
-            await query.edit_message_text(
-                f"📈 <b>TRADEMIND {BOT_VERSION} — ГРАФИК</b>\n\n"
-                "Выбери монету:",
-                parse_mode="HTML",
-                reply_markup=chart_keyboard(),
-            )
-            return
-
-        if data.startswith("chart_"):
-            coin = data.split("_", 1)[1]
-
-            if coin not in COINS:
-                await query.answer(
-                    "Неизвестная монета",
-                    show_alert=True,
-                )
-                return
-
-            await send_chart(
-                query.message,
-                coin,
-            )
-
-            return
-
-        # ------------------------------------------
-        # SOL
-        # ------------------------------------------
-
-        if data == "sol":
-            try:
-                result = await asyncio.to_thread(
-                    build_analysis,
-                    "SOLUSDT",
-                )
-
-                await query.edit_message_text(
-                    build_sol_message(result),
-                    parse_mode="HTML",
-                    reply_markup=back_keyboard(),
-                )
-
-            except Exception as exc:
-                await query.edit_message_text(
-                    f"❌ Ошибка SOL:\n{exc}",
-                    reply_markup=back_keyboard(),
-                )
-
-            return
-
-        # ------------------------------------------
-        # STATUS
-        # ------------------------------------------
-
-        if data == "status":
-            state = load_state()
-
-            text = "\n".join([
-                f"📊 <b>TRADEMIND {BOT_VERSION} — STATUS</b>",
+        await query.edit_message_text(
+            "\n".join([
+                "🤖 <b>TRADEMIND 5.0</b>",
                 "",
-                f"Bot: <b>{BOT_VERSION}</b>",
-                f"Strategy: <b>{STRATEGY_VERSION}</b>",
+                "D1 → 1H → Liquidity",
+                "→ Sweep → 15M → 5M",
                 "",
-                f"Active: "
-                f"<b>{state.get('active_coin') or 'нет'}</b>",
-                f"Direction: "
-                f"<b>{state.get('active_direction') or '—'}</b>",
-                f"Stage: "
-                f"<b>{state.get('active_stage') or '—'}</b>",
-                f"Score: "
-                f"<b>{state.get('active_score') or '—'}</b>",
-                "",
-                f"BingX: "
-                f"<b>{bingx.mode()}</b>",
-                f"Daily trades: "
-                f"<b>{state.get('daily_trades', 0)}/2</b>",
-                f"Daily stop: "
-                f"<b>{'YES' if state.get('daily_stop') else 'NO'}</b>",
-            ])
-
-            if state.get("active_coin"):
-                text += "\n\n" + "\n".join([
-                    f"Entry: <b>{format_price(state.get('active_entry'))}</b>",
-                    f"SL: <b>{format_price(state.get('active_sl'))}</b>",
-                    f"TP: <b>{format_price(state.get('active_tp'))}</b>",
-                    f"RR: <b>{format_rr(state.get('active_rr'))}</b>",
-                ])
-
-            await query.edit_message_text(
-                text,
-                parse_mode="HTML",
-                reply_markup=back_keyboard(),
-            )
-
-            return
-
-        # ------------------------------------------
-        # BINGX
-        # ------------------------------------------
-
-        if data == "bingx":
-            await query.edit_message_text(
-                build_bingx_message(),
-                parse_mode="HTML",
-                reply_markup=back_keyboard(),
-            )
-            return
-
-        # ------------------------------------------
-        # SUBSCRIBE
-        # ------------------------------------------
-
-        if data == "subscribe":
-            subscribers = load_subscribers()
-            chat_id = query.message.chat_id
-
-            if chat_id not in subscribers:
-                subscribers.append(chat_id)
-                save_subscribers(subscribers)
-
-            await query.edit_message_text(
-                "🔔 <b>Уведомления включены.</b>",
-                parse_mode="HTML",
-                reply_markup=back_keyboard(),
-            )
-
-            return
-
-        # ------------------------------------------
-        # UNSUBSCRIBE
-        # ------------------------------------------
-
-        if data == "unsubscribe":
-            subscribers = load_subscribers()
-            chat_id = query.message.chat_id
-
-            if chat_id in subscribers:
-                subscribers.remove(chat_id)
-                save_subscribers(subscribers)
-
-            await query.edit_message_text(
-                "🔕 <b>Уведомления выключены.</b>",
-                parse_mode="HTML",
-                reply_markup=back_keyboard(),
-            )
-
-            return
-
-        # ------------------------------------------
-        # JOURNAL
-        # ------------------------------------------
-
-        if data == "journal":
-            await query.edit_message_text(
-                "\n".join([
-                    f"📒 <b>TRADEMIND {BOT_VERSION} — ЖУРНАЛ</b>",
-                    "",
-                    "Система журнала подключена.",
-                    "",
-                    "Следующий этап:",
-                    "PnL / R / Win Rate / Total R",
-                    "по фактическим TP/SL.",
-                ]),
-                parse_mode="HTML",
-                reply_markup=back_keyboard(),
-            )
-
-            return
-
-    except Exception as exc:
-        print(
-            f"CALLBACK ERROR: {exc}"
+                "BingX AUTO: <b>OFF</b>",
+            ]),
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
         )
 
+        return
+
+    # --------------------------------------------------------
+    # MARKET
+    # --------------------------------------------------------
+
+    if data == "market":
+
+        await query.edit_message_text(
+            "⏳ Сканирую рынок..."
+        )
+
+        results = (
+            await scan_all_coins_async()
+        )
+
+        await query.edit_message_text(
+            build_market_message(
+                results
+            ),
+            parse_mode="HTML",
+            reply_markup=back_keyboard(),
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # LEVELS
+    # --------------------------------------------------------
+
+    if data == "levels":
+
+        await query.edit_message_text(
+            "⏳ Получаю Major Liquidity..."
+        )
+
+        results = (
+            await scan_all_coins_async()
+        )
+
+        await query.edit_message_text(
+            build_levels_message(
+                results
+            ),
+            parse_mode="HTML",
+            reply_markup=back_keyboard(),
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # SEARCH
+    # --------------------------------------------------------
+
+    if data == "search":
+
+        await query.edit_message_text(
+            "🔎 Ищу сетап..."
+        )
+
+        results = (
+            await scan_all_coins_async()
+        )
+
+        await query.edit_message_text(
+            build_search_message(
+                results
+            ),
+            parse_mode="HTML",
+            reply_markup=back_keyboard(),
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # SOL
+    # --------------------------------------------------------
+
+    if data == "sol":
+
         try:
+
+            result = await asyncio.to_thread(
+                run_strategy,
+                "SOLUSDT",
+            )
+
             await query.edit_message_text(
-                f"❌ Ошибка:\n{exc}",
+                build_sol_message(
+                    result
+                ),
+                parse_mode="HTML",
                 reply_markup=back_keyboard(),
             )
-        except Exception:
-            pass
+
+        except Exception as exc:
+
+            await query.edit_message_text(
+                (
+                    "❌ <b>Ошибка SOL</b>\n\n"
+                    f"{exc}"
+                ),
+                parse_mode="HTML",
+                reply_markup=back_keyboard(),
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
+
+    if data == "status":
+
+        state = load_state()
+
+        text = "\n".join([
+            "📊 <b>TRADEMIND 5.0</b>",
+            "",
+            (
+                f"Active: "
+                f"<b>{state.get('active_coin') or 'нет'}</b>"
+            ),
+            (
+                f"Direction: "
+                f"<b>{state.get('active_direction') or '—'}</b>"
+            ),
+            (
+                f"Stage: "
+                f"<b>{state.get('active_stage') or '—'}</b>"
+            ),
+            (
+                f"Score: "
+                f"<b>{state.get('active_score') or '—'}</b>"
+            ),
+            "",
+            (
+                f"Сегодня: "
+                f"<b>{state.get('daily_trades', 0)}/2</b>"
+            ),
+            (
+                f"Daily stop: "
+                f"<b>{'YES' if state.get('daily_stop') else 'NO'}</b>"
+            ),
+            "",
+            "BingX: <b>OFF</b>",
+        ])
+
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=back_keyboard(),
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # SUBSCRIBE
+    # --------------------------------------------------------
+
+    if data == "subscribe":
+
+        subscribers = load_subscribers()
+
+        chat_id = query.message.chat_id
+
+        if chat_id not in subscribers:
+
+            subscribers.append(
+                chat_id
+            )
+
+            save_subscribers(
+                subscribers
+            )
+
+        await query.edit_message_text(
+            "🔔 <b>Уведомления включены.</b>",
+            parse_mode="HTML",
+            reply_markup=back_keyboard(),
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # UNSUBSCRIBE
+    # --------------------------------------------------------
+
+    if data == "unsubscribe":
+
+        subscribers = load_subscribers()
+
+        chat_id = query.message.chat_id
+
+        if chat_id in subscribers:
+
+            subscribers.remove(
+                chat_id
+            )
+
+            save_subscribers(
+                subscribers
+            )
+
+        await query.edit_message_text(
+            "🔕 <b>Уведомления выключены.</b>",
+            parse_mode="HTML",
+            reply_markup=back_keyboard(),
+        )
+
+        return
 
 
 # ============================================================
-# COMMANDS
+# TELEGRAM COMMANDS
 # ============================================================
 
-async def set_commands(application):
+async def set_commands(
+    application,
+):
+
     commands = [
-        BotCommand("start", "Главное меню"),
-        BotCommand("market", "Рынок 9 монет"),
-        BotCommand("levels", "Крупные уровни"),
-        BotCommand("search", "Поиск сетапа"),
-        BotCommand("chart", "График"),
-        BotCommand("status", "Статус"),
-        BotCommand("bingx", "BingX статус"),
-        BotCommand("balance", "BingX баланс"),
-        BotCommand("position", "BingX позиции"),
-        BotCommand("execute", "Исполнить pending"),
-        BotCommand("close", "Закрыть позицию"),
-        BotCommand("subscribe", "Включить уведомления"),
-        BotCommand("unsubscribe", "Выключить уведомления"),
-        BotCommand("sol", "Анализ SOL"),
-        BotCommand("journal", "Журнал"),
+        BotCommand(
+            "start",
+            "Главное меню",
+        ),
+
+        BotCommand(
+            "market",
+            "Рынок",
+        ),
+
+        BotCommand(
+            "levels",
+            "Major Liquidity",
+        ),
+
+        BotCommand(
+            "search",
+            "Поиск сетапа",
+        ),
+
+        BotCommand(
+            "sol",
+            "Анализ SOL",
+        ),
+
+        BotCommand(
+            "status",
+            "Статус",
+        ),
+
+        BotCommand(
+            "subscribe",
+            "Включить уведомления",
+        ),
+
+        BotCommand(
+            "unsubscribe",
+            "Выключить уведомления",
+        ),
+
+        BotCommand(
+            "journal",
+            "Журнал",
+        ),
     ]
 
-    await application.bot.set_my_commands(commands)
+    await application.bot.set_my_commands(
+        commands
+    )
 
 
-async def post_init(application):
-    await set_commands(application)
+# ============================================================
+# POST INIT
+# ============================================================
+
+async def post_init(
+    application,
+):
+
+    await set_commands(
+        application
+    )
 
     application.create_task(
-        monitor(application),
+        monitor(
+            application
+        ),
         name="trademind_monitor",
     )
 
@@ -3193,61 +2487,120 @@ async def post_init(application):
 # ============================================================
 
 def main():
+
     if not TOKEN:
+
         raise RuntimeError(
-            "BOT_TOKEN не найден."
+            "BOT_TOKEN не найден. "
+            "Добавь BOT_TOKEN в Environment Variables."
         )
 
-    print("=" * 60)
-    print(f"TradeMind Bot: {BOT_VERSION}")
-    print(f"TradeMind Strategy: {STRATEGY_VERSION}")
-    print("=" * 60)
+    print(
+        "Starting TradeMind 5.0..."
+    )
 
-    if STRATEGY_VERSION != BOT_VERSION:
-        print(
-            "WARNING: bot.py и strategy.py имеют разные версии!"
-        )
+    print(
+        f"Binance source: {BINANCE_BASE}"
+    )
+
+    print(
+        f"BingX mode: {BINGX_MODE}"
+    )
 
     application = (
-        Application
-        .builder()
+        Application.builder()
         .token(TOKEN)
         .post_init(post_init)
         .build()
     )
 
-    handlers = [
-        ("start", start),
-        ("market", market_command),
-        ("levels", levels_command),
-        ("search", search_command),
-        ("chart", chart_command),
-        ("status", status_command),
-        ("bingx", bingx_command),
-        ("balance", balance_command),
-        ("position", position_command),
-        ("execute", execute_command),
-        ("close", close_command),
-        ("subscribe", subscribe_command),
-        ("unsubscribe", unsubscribe_command),
-        ("sol", sol_command),
-        ("journal", journal_command),
-    ]
-
-    for command, handler in handlers:
-        application.add_handler(
-            CommandHandler(
-                command,
-                handler,
-            )
-        )
+    # --------------------------------------------------------
+    # COMMANDS
+    # --------------------------------------------------------
 
     application.add_handler(
-        CallbackQueryHandler(callbacks)
+        CommandHandler(
+            "start",
+            start,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "market",
+            market_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "levels",
+            levels_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "search",
+            search_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "sol",
+            sol_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "status",
+            status_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "subscribe",
+            subscribe_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "unsubscribe",
+            unsubscribe_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "journal",
+            journal_command,
+        )
+    )
+
+    # --------------------------------------------------------
+    # BUTTONS
+    # --------------------------------------------------------
+
+    application.add_handler(
+        CallbackQueryHandler(
+            callbacks
+        )
     )
 
     print(
-        f"TradeMind {BOT_VERSION} started."
+        "===================================="
+    )
+
+    print(
+        "TRADEMIND 5.0 STARTED"
+    )
+
+    print(
+        f"Coins: {', '.join(COINS.keys())}"
     )
 
     print(
@@ -3255,21 +2608,25 @@ def main():
     )
 
     print(
-        f"Parallel workers: {SCAN_WORKERS}"
+        "D1 + W1 + 1H + 15M + 5M: ENABLED"
     )
 
     print(
-        "Coins:",
-        ", ".join(COINS.keys()),
+        "BingX AUTO: OFF"
     )
 
     print(
-        "BingX mode:",
-        bingx.mode(),
+        "===================================="
     )
 
-    application.run_polling()
+    application.run_polling(
+        drop_pending_updates=True
+    )
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
