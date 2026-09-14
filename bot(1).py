@@ -2002,7 +2002,322 @@ async def monitor(
                 # MESSAGE
                 # ------------------------------------------------
 
-                message = (
+                                message = (
 
-                    "🚨 TRADEMIND 5.3 — "
+                    "🚨 TRADEMIND 5.3 — ГОТОВЫЙ СЕТАП\n\n"
+
+                    f"💠 {symbol}\n"
+
+                    f"📐 {direction_emoji(direction)} "
+                    f"{direction or '—'}\n"
+
+                    f"⭐ Score: "
+                    f"{setup.get('score', setup.get('total_score', 0))}/100\n\n"
+
+                    f"💰 Entry: "
+                    f"{fmt_price(setup.get('entry', setup.get('entry_price')))}\n"
+
+                    f"🛑 SL: "
+                    f"{fmt_price(setup.get('sl', setup.get('stop_loss')))}\n"
+
+                    f"🏁 TP: "
+                    f"{fmt_price(setup.get('tp', setup.get('take_profit')))}\n\n"
+
+                    f"⚖️ RR: "
+                    f"{setup.get('rr', '—')}\n\n"
+
+                    "🟢 МОЖНО ВХОДИТЬ"
+                )
+
+
+                # ------------------------------------------------
+                # SEND TO ALL SUBSCRIBERS
+                # ------------------------------------------------
+
+                for chat_id in list(subscribers):
+
+                    try:
+
+                        await application.bot.send_message(
+                            chat_id=chat_id,
+                            text=message
+                        )
+
+                    except Exception as e:
+
+                        logger.error(
+                            "Telegram send error %s: %s",
+                            chat_id,
+                            e
+                        )
+
+
+            await asyncio.sleep(
+                MONITOR_INTERVAL
+            )
+
+
+        except Exception as e:
+
+            logger.exception(
+                "Monitor error: %s",
+                e
+            )
+
+            await asyncio.sleep(
+                MONITOR_INTERVAL
+            )
+
+
+# ============================================================
+# POST INIT
+# ============================================================
+
+async def post_init(
+    application
+):
+
+    try:
+
+        await application.bot.set_my_commands([
+
+            BotCommand(
+                "start",
+                "Запустить TradeMind"
+            ),
+
+            BotCommand(
+                "help",
+                "Помощь"
+            ),
+
+            BotCommand(
+                "status",
+                "Статус бота"
+            ),
+
+            BotCommand(
+                "sol",
+                "Анализ SOL"
+            ),
+
+            BotCommand(
+                "eth",
+                "Анализ ETH"
+            ),
+
+            BotCommand(
+                "market",
+                "Рынок"
+            ),
+
+            BotCommand(
+                "search",
+                "Поиск сетапа"
+            ),
+
+            BotCommand(
+                "levels",
+                "Крупная ликвидность"
+            ),
+
+            BotCommand(
+                "chart",
+                "Цена"
+            ),
+
+            BotCommand(
+                "journal",
+                "Журнал"
+            ),
+
+            BotCommand(
+                "subscribe",
+                "Включить уведомления"
+            ),
+
+            BotCommand(
+                "unsubscribe",
+                "Выключить уведомления"
+            ),
+
+            BotCommand(
+                "bingx",
+                "Статус BingX"
+            ),
+
+            BotCommand(
+                "balance",
+                "Баланс BingX"
+            ),
+
+            BotCommand(
+                "position",
+                "Позиции BingX"
+            ),
+
+        ])
+
+    except Exception as e:
+
+        logger.exception(
+            "Bot commands error: %s",
+            e
+        )
+
+
+    # Запускаем мониторинг
+
+    application.create_task(
+        monitor(
+            application
+        )
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+
+
+    # --------------------------------------------------------
+    # COMMAND HANDLERS
+    # --------------------------------------------------------
+
+    application.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "help",
+            help_command
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "status",
+            status
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "sol",
+            sol
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "eth",
+            eth
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "market",
+            market_command
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "search",
+            search
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "levels",
+            levels
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "chart",
+            chart
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "subscribe",
+            subscribe
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "unsubscribe",
+            unsubscribe
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "journal",
+            journal
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "bingx",
+            bingx_status
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "balance",
+            balance
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "position",
+            position
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # RUN
+    # --------------------------------------------------------
+
+    logger.info(
+        "TradeMind %s starting...",
+        STRATEGY_VERSION
+    )
+
+    application.run_polling(
+        drop_pending_updates=True
+    )
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
                    
