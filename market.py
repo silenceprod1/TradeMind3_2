@@ -1,9 +1,9 @@
 """
-TradeMind 5.3
+TradeMind 5.4
 Market data layer.
 
 Источник структуры:
-Binance Spot SOLUSDT
+Binance Spot
 
 Таймфреймы:
 D1 -> W1 -> 1H -> 15M -> 5M
@@ -99,6 +99,19 @@ def get_klines(
 
             "close_time": x[6],
         })
+
+    # =====================================================
+    # IMPORTANT
+    # =====================================================
+    # Binance возвращает последнюю текущую незакрытую свечу.
+    #
+    # Для стратегии TradeMind она не должна участвовать
+    # в определении структуры D1 / W1 / 1H / 15M / 5M.
+    #
+    # Поэтому анализируем только полностью закрытые свечи.
+
+    if len(candles) > 1:
+        candles = candles[:-1]
 
     return candles
 
@@ -362,6 +375,10 @@ def find_major_liquidity(
         len(candles) - 2
     ):
 
+        # =================================================
+        # MAJOR HIGH
+        # =================================================
+
         if _local_swing_high(
             candles,
             i
@@ -377,6 +394,10 @@ def find_major_liquidity(
                     "side": "SHORT",
                     "type": "1H major swing high",
                 })
+
+        # =================================================
+        # MAJOR LOW
+        # =================================================
 
         if _local_swing_low(
             candles,
@@ -408,6 +429,7 @@ def find_major_liquidity(
 
         # Только действительно meaningful уровни.
         # Повторные касания имеют больший вес.
+
         touches = group["touches"]
 
         strength = min(
@@ -451,6 +473,7 @@ def find_major_liquidity(
 
     # Сначала самые сильные,
     # затем ближайшие к цене.
+
     result.sort(
         key=lambda x: (
             -x["touches"],
@@ -510,6 +533,13 @@ def detect_sweep(
             -3:
         ]
 
+        if not recent:
+            continue
+
+        # ================================================
+        # LONG
+        # ================================================
+
         if direction == "LONG":
 
             swept = any(
@@ -525,6 +555,10 @@ def detect_sweep(
                 > recent[-1]["open"]
             )
 
+        # ================================================
+        # SHORT
+        # ================================================
+
         else:
 
             swept = any(
@@ -539,6 +573,10 @@ def detect_sweep(
                 recent[-1]["close"]
                 < recent[-1]["open"]
             )
+
+        # ================================================
+        # SWEEP FOUND
+        # ================================================
 
         if swept and rejection:
 
