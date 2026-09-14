@@ -281,7 +281,7 @@ def find_first_ready():
 
 
 # ============================================================
-# FORMAT SETUP
+# FORMAT ANALYSIS / SETUP
 # ============================================================
 
 def format_setup(symbol, setup):
@@ -307,7 +307,7 @@ def format_setup(symbol, setup):
         setup.get("take_profit")
     )
 
-    rr = setup.get("rr", "—")
+    rr = setup.get("rr")
 
     sweep = setup.get("sweep")
 
@@ -326,34 +326,100 @@ def format_setup(symbol, setup):
         setup.get("fvg_inversion")
     )
 
-    text = (
-        "🚨 TRADEMIND 5.3 — ГОТОВЫЙ СЕТАП\n\n"
-        f"💠 {symbol}\n"
-        f"📐 {direction_emoji(direction)} {direction or '—'}\n"
-        f"⭐ Score: {score}/100\n"
-        f"📍 Stage: {stage_text(stage)}\n\n"
+    # ========================================================
+    # READY STATUS
+    # ========================================================
+
+    is_ready = (
+        stage == "READY"
+        and direction in ("LONG", "SHORT")
+        and score >= MIN_SCORE_READY
+        and entry is not None
+        and sl is not None
+        and tp is not None
     )
+
+    # ========================================================
+    # HEADER
+    # ========================================================
+
+    if is_ready:
+
+        text = (
+            "🚨 TRADEMIND 5.3 — ГОТОВЫЙ СЕТАП\n\n"
+            f"💠 {symbol}\n"
+            f"📐 {direction_emoji(direction)} "
+            f"{direction}\n"
+            f"⭐ Score: {score}/100\n"
+            f"📍 Stage: READY\n\n"
+        )
+
+    else:
+
+        text = (
+            "🔎 TRADEMIND 5.3 — АНАЛИЗ\n\n"
+            f"💠 {symbol}\n"
+            f"📐 {direction_emoji(direction)} "
+            f"{direction or '—'}\n"
+            f"⭐ Score: {score}/100\n"
+            f"📍 Stage: {stage_text(stage)}\n\n"
+        )
+
+    # ========================================================
+    # ANALYSIS DETAILS
+    # ========================================================
 
     if sweep is not None:
         text += f"💧 Sweep: {sweep}\n"
 
     if confirmation is not None:
-        text += f"✅ 15M confirmation: {confirmation}\n"
+
+        if confirmation is True:
+            text += "✅ 15M confirmation: True\n"
+        else:
+            text += "❌ 15M confirmation: False\n"
 
     if recovery is not None:
         text += f"↩️ Recovery: {recovery}\n"
 
     if fvg is not None:
-        text += f"📦 5M FVG inversion: {fvg}\n"
+
+        if fvg is True:
+            text += "✅ 5M FVG inversion: True\n"
+        else:
+            text += "❌ 5M FVG inversion: False\n"
+
+    # ========================================================
+    # ENTRY DATA
+    # ========================================================
 
     text += (
         "\n"
         f"💰 Entry: {fmt_price(entry)}\n"
         f"🛑 SL: {fmt_price(sl)}\n"
         f"🏁 TP: {fmt_price(tp)}\n"
-        f"⚖️ RR: {rr}\n\n"
-        "🟢 МОЖНО ВХОДИТЬ"
+        f"⚖️ RR: {rr if rr is not None else '—'}\n\n"
     )
+
+    # ========================================================
+    # FINAL STATUS
+    # ========================================================
+
+    if is_ready:
+
+        text += (
+            "🟢 МОЖНО ВХОДИТЬ\n"
+            "Все условия TradeMind выполнены."
+        )
+
+    else:
+
+        text += (
+            "⏳ ВХОДА НЕТ\n"
+            "Ждём полного подтверждения TradeMind.\n\n"
+            "D1 → 1H → крупная ликвидность → Sweep\n"
+            "→ 15M confirmation → 5M trigger"
+        )
 
     return text
 
@@ -375,7 +441,10 @@ def track_chat(update: Update):
 # /START
 # ============================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     track_chat(update)
 
@@ -406,7 +475,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /HELP
 # ============================================================
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     track_chat(update)
 
@@ -431,24 +503,30 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /STATUS
 # ============================================================
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     track_chat(update)
     reset_daily_state()
 
-    active_text = (
-        "🟢 Активной сделки нет."
-        if active_trade is None
-        else f"🔴 Активная сделка: {active_trade}"
-    )
+    if active_trade is None:
+        active_text = "🟢 Активной сделки нет."
+    else:
+        active_text = (
+            f"🔴 Активная сделка: {active_trade}"
+        )
 
     text = (
         "📊 TRADEMIND 5.3 — СТАТУС\n\n"
-        f"Bot version: 5.3\n"
+        "Bot version: 5.3\n"
         f"Strategy version: {STRATEGY_VERSION}\n"
         f"BingX mode: {BINGX_MODE}\n"
-        f"Сделок сегодня: {trades_today}/{MAX_TRADES_PER_DAY}\n"
-        f"Daily stop: {'YES' if daily_stop else 'NO'}\n\n"
+        f"Сделок сегодня: "
+        f"{trades_today}/{MAX_TRADES_PER_DAY}\n"
+        f"Daily stop: "
+        f"{'YES' if daily_stop else 'NO'}\n\n"
         f"{active_text}"
     )
 
@@ -459,7 +537,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /SOL
 # ============================================================
 
-async def sol(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def sol(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     track_chat(update)
 
@@ -486,7 +567,10 @@ async def sol(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /ETH
 # ============================================================
 
-async def eth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def eth(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     track_chat(update)
 
@@ -513,7 +597,10 @@ async def eth(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /MARKET
 # ============================================================
 
-async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def market(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     track_chat(update)
 
@@ -577,7 +664,10 @@ async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /SEARCH
 # ============================================================
 
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def search(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     track_chat(update)
 
@@ -594,7 +684,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(
                 "❌ Готового сетапа сейчас нет.\n\n"
-                "Нет подтверждения → нет входа."
+                "Нет полного подтверждения → нет входа."
             )
 
             return
@@ -616,7 +706,10 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /LEVELS
 # ============================================================
 
-async def levels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def levels(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     track_chat(update)
 
@@ -694,7 +787,9 @@ async def levels(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ""
         ]
 
-        lines.append("🔴 ВЫШЕ ЦЕНЫ — SHORT SWEEP")
+        lines.append(
+            "🔴 ВЫШЕ ЦЕНЫ — SHORT SWEEP"
+        )
 
         if highs:
 
@@ -707,8 +802,10 @@ async def levels(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{i}. 🔴 "
                     f"{fmt_price(level['price'])}\n"
                     f"   SHORT | "
-                    f"touches: {level.get('touches', '—')} | "
-                    f"strength: {level.get('strength', '—')}"
+                    f"touches: "
+                    f"{level.get('touches', '—')} | "
+                    f"strength: "
+                    f"{level.get('strength', '—')}"
                 )
 
         else:
@@ -718,6 +815,7 @@ async def levels(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         lines.append("")
+
         lines.append(
             "🟢 НИЖЕ ЦЕНЫ — LONG SWEEP"
         )
@@ -733,8 +831,10 @@ async def levels(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{i}. 🟢 "
                     f"{fmt_price(level['price'])}\n"
                     f"   LONG | "
-                    f"touches: {level.get('touches', '—')} | "
-                    f"strength: {level.get('strength', '—')}"
+                    f"touches: "
+                    f"{level.get('touches', '—')} | "
+                    f"strength: "
+                    f"{level.get('strength', '—')}"
                 )
 
         else:
@@ -813,8 +913,10 @@ async def journal(
 
     await update.message.reply_text(
         "📒 TRADEMIND — ЖУРНАЛ\n\n"
-        f"Сделок сегодня: {trades_today}/{MAX_TRADES_PER_DAY}\n"
-        f"Daily stop: {'YES' if daily_stop else 'NO'}\n\n"
+        f"Сделок сегодня: "
+        f"{trades_today}/{MAX_TRADES_PER_DAY}\n"
+        f"Daily stop: "
+        f"{'YES' if daily_stop else 'NO'}\n\n"
         "Автоматический журнал сделок "
         "будет использоваться при подключении "
         "исполнения BingX."
@@ -879,7 +981,8 @@ async def balance(
         else:
 
             await update.message.reply_text(
-                "⚠️ get_balance не найден в модуле BingX."
+                "⚠️ get_balance не найден "
+                "в модуле BingX."
             )
 
     except Exception as e:
@@ -923,7 +1026,8 @@ async def position(
         else:
 
             await update.message.reply_text(
-                "⚠️ get_position не найден в модуле BingX."
+                "⚠️ get_position не найден "
+                "в модуле BingX."
             )
 
     except Exception as e:
@@ -999,7 +1103,44 @@ async def monitor(application):
 
             score = get_score(setup)
 
-            if score < MIN_SCORE_READY:
+            stage = setup.get("stage")
+
+            entry = setup.get(
+                "entry",
+                setup.get("entry_price")
+            )
+
+            sl = setup.get(
+                "sl",
+                setup.get("stop_loss")
+            )
+
+            tp = setup.get(
+                "tp",
+                setup.get("take_profit")
+            )
+
+            # =================================================
+            # FINAL SAFETY CHECK
+            # =================================================
+
+            if not (
+                stage == "READY"
+                and direction in ("LONG", "SHORT")
+                and score >= MIN_SCORE_READY
+                and entry is not None
+                and sl is not None
+                and tp is not None
+            ):
+
+                logger.warning(
+                    "Signal rejected by final safety check: "
+                    "%s | stage=%s | score=%s | direction=%s",
+                    symbol,
+                    stage,
+                    score,
+                    direction,
+                )
 
                 await asyncio.sleep(
                     MONITOR_INTERVAL
@@ -1041,23 +1182,24 @@ async def monitor(application):
 
             message = (
 
-                "🚨 TRADEMIND 5.3 — ГОТОВЫЙ СЕТАП\n\n"
+                "🚨 TRADEMIND 5.3 — "
+                "ГОТОВЫЙ СЕТАП\n\n"
 
                 f"💠 {symbol}\n"
 
                 f"📐 {direction_emoji(direction)} "
-                f"{direction or '—'}\n"
+                f"{direction}\n"
 
                 f"⭐ Score: {score}/100\n\n"
 
                 f"💰 Entry: "
-                f"{fmt_price(setup.get('entry', setup.get('entry_price')))}\n"
+                f"{fmt_price(entry)}\n"
 
                 f"🛑 SL: "
-                f"{fmt_price(setup.get('sl', setup.get('stop_loss')))}\n"
+                f"{fmt_price(sl)}\n"
 
                 f"🏁 TP: "
-                f"{fmt_price(setup.get('tp', setup.get('take_profit')))}\n\n"
+                f"{fmt_price(tp)}\n\n"
 
                 f"⚖️ RR: "
                 f"{setup.get('rr', '—')}\n\n"
@@ -1082,9 +1224,9 @@ async def monitor(application):
                         e
                     )
 
-            # ====================================================
+            # =================================================
             # BINGX EXECUTION
-            # ====================================================
+            # =================================================
 
             if (
                 BINGX_MODE == "ON"
@@ -1112,12 +1254,14 @@ async def monitor(application):
                         trades_today += 1
 
                         if trades_today >= MAX_TRADES_PER_DAY:
+
                             daily_stop = True
 
                     else:
 
                         logger.warning(
-                            "bingx.open_trade not found."
+                            "bingx.open_trade "
+                            "not found."
                         )
 
                 except Exception as e:
@@ -1245,9 +1389,9 @@ def main():
         .build()
     )
 
-    # --------------------------------------------------------
-    # COMMANDS
-    # --------------------------------------------------------
+    # ========================================================
+    # COMMAND HANDLERS
+    # ========================================================
 
     application.add_handler(
         CommandHandler(
@@ -1347,9 +1491,9 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # START
-    # --------------------------------------------------------
+    # ========================================================
 
     logger.info(
         "TradeMind 5.3 starting..."
