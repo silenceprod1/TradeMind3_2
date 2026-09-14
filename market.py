@@ -1,5 +1,5 @@
 """
-TradeMind 5.4
+TradeMind 5.6
 Market data layer.
 
 Источник структуры:
@@ -7,6 +7,11 @@ Binance Spot
 
 Таймфреймы:
 D1 -> W1 -> 1H -> 15M -> 5M
+
+Ликвидность:
+только крупные 1H swing HIGH / LOW.
+HIGH и LOW обрабатываются отдельно.
+Текущая незакрытая свеча не используется.
 """
 
 import requests
@@ -56,9 +61,7 @@ def get_price(symbol=SYMBOL):
         }
     )
 
-    return float(
-        data["price"]
-    )
+    return float(data["price"])
 
 
 # =========================================================
@@ -86,29 +89,17 @@ def get_klines(
 
         candles.append({
             "open_time": x[0],
-
             "open": float(x[1]),
-
             "high": float(x[2]),
-
             "low": float(x[3]),
-
             "close": float(x[4]),
-
             "volume": float(x[5]),
-
             "close_time": x[6],
         })
 
     # =====================================================
-    # IMPORTANT
+    # УБИРАЕМ НЕЗАКРЫТУЮ СВЕЧУ
     # =====================================================
-    # Binance возвращает последнюю текущую незакрытую свечу.
-    #
-    # Для стратегии TradeMind она не должна участвовать
-    # в определении структуры D1 / W1 / 1H / 15M / 5M.
-    #
-    # Поэтому анализируем только полностью закрытые свечи.
 
     if len(candles) > 1:
         candles = candles[:-1]
@@ -124,9 +115,7 @@ def get_market_data(
     symbol=SYMBOL
 ):
 
-    price = get_price(
-        symbol
-    )
+    price = get_price(symbol)
 
     candles_d1 = get_klines(
         symbol,
@@ -165,31 +154,35 @@ def get_market_data(
         "price": price,
 
         "candles_d1": candles_d1,
-
         "candles_w1": candles_w1,
-
         "candles_1h": candles_1h,
-
         "candles_15m": candles_15m,
-
         "candles_5m": candles_5m,
 
         # Совместимость со старым кодом
         "d1": candles_d1,
-
         "w1": candles_w1,
-
         "1h": candles_1h,
-
         "15m": candles_15m,
-
         "5m": candles_5m,
     }
 
 
 # =========================================================
-# MAJOR LIQUIDITY
+# HELPERS
 # =========================================================
+
+def _distance_pct(a, b):
+
+    if not b:
+        return 999.0
+
+    return (
+        abs(a - b)
+        / abs(b)
+        * 100
+    )
+
 
 def _local_swing_high(
     candles,
@@ -265,20 +258,14 @@ def _local_swing_low(
     )
 
 
-def _distance_pct(
-    a,
-    b
-):
-
-    if not b:
-        return 999
-
-    return (
-        abs(a - b)
-        / b
-        * 100
-    )
-
+# =========================================================
+# LEVEL CLUSTERING
+# =========================================================
+#
+# ВАЖНО:
+# HIGH и LOW кластеризуются ОТДЕЛЬНО.
+# Нельзя объединять HIGH и LOW в один уровень.
+# =========================================================
 
 def _cluster_levels(
     levels,
@@ -306,11 +293,33 @@ def _cluster_levels(
                     level["index"]
                 ],
                 "side": level["side"],
+                "type": level["type"],
             })
 
             continue
 
         previous = groups[-1]
+
+        # =================================================
+        # НИКОГДА НЕ СМЕШИВАЕМ HIGH И LOW
+        # =================================================
+
+        if (
+            previous["side"]
+            != level["side"]
+        ):
+
+            groups.append({
+                "level": level["level"],
+                "touches": 1,
+                "indices": [
+                    level["index"]
+                ],
+                "side": level["side"],
+                "type": level["type"],
+            })
+
+            continue
 
         distance = _distance_pct(
             level["level"],
@@ -319,9 +328,7 @@ def _cluster_levels(
 
         if distance <= cluster_pct:
 
-            touches = previous[
-                "touches"
-            ]
+            touches = previous["touches"]
 
             previous["level"] = (
                 (
@@ -335,9 +342,7 @@ def _cluster_levels(
 
             previous["touches"] += 1
 
-            previous[
-                "indices"
-            ].append(
+            previous["indices"].append(
                 level["index"]
             )
 
@@ -350,10 +355,15 @@ def _cluster_levels(
                     level["index"]
                 ],
                 "side": level["side"],
+                "type": level["type"],
             })
 
     return groups
 
+
+# =========================================================
+# MAJOR LIQUIDITY
+# =========================================================
 
 def find_major_liquidity(
     candles_1h,
@@ -364,11 +374,14 @@ def find_major_liquidity(
     if not candles_1h:
         return []
 
-    candles = candles_1h[
-        -200:
-    ]
+    candles = candles_1h[-200:]
 
-    raw = []
+    raw_highs = []
+    raw_lows = []
+
+    # =====================================================
+    # СОБИРАЕМ HIGH И LOW ОТДЕЛЬНО
+    # =====================================================
 
     for i in range(
         2,
@@ -376,7 +389,7 @@ def find_major_liquidity(
     ):
 
         # =================================================
-        # MAJOR HIGH
+        # SWING HIGH
         # =================================================
 
         if _local_swing_high(
@@ -386,17 +399,20 @@ def find_major_liquidity(
 
             level = candles[i]["high"]
 
+            # Только ликвидность ВЫШЕ текущей цены.
+            # Она интересна для потенциального SHORT sweep.
+
             if level > current_price:
 
-                raw.append({
+                raw_highs.append({
                     "level": level,
                     "index": i,
                     "side": "SHORT",
-                    "type": "1H major swing high",
+                    "type": "HIGH",
                 })
 
         # =================================================
-        # MAJOR LOW
+        # SWING LOW
         # =================================================
 
         if _local_swing_low(
@@ -406,36 +422,64 @@ def find_major_liquidity(
 
             level = candles[i]["low"]
 
+            # Только ликвидность НИЖЕ текущей цены.
+            # Она интересна для потенциального LONG sweep.
+
             if level < current_price:
 
-                raw.append({
+                raw_lows.append({
                     "level": level,
                     "index": i,
                     "side": "LONG",
-                    "type": "1H major swing low",
+                    "type": "LOW",
                 })
 
-    if not raw:
-        return []
+    # =====================================================
+    # КЛАСТЕРИЗУЕМ РАЗДЕЛЬНО
+    # =====================================================
 
-    clusters = _cluster_levels(
-        raw,
+    high_clusters = _cluster_levels(
+        raw_highs,
         cluster_pct=0.35
     )
 
+    low_clusters = _cluster_levels(
+        raw_lows,
+        cluster_pct=0.35
+    )
+
+    clusters = (
+        high_clusters
+        + low_clusters
+    )
+
+    if not clusters:
+        return []
+
     result = []
+
+    # =====================================================
+    # ФИЛЬТР КРУПНОЙ ЛИКВИДНОСТИ
+    # =====================================================
+    #
+    # Минимум 2 касания.
+    #
+    # Один случайный локальный high/low
+    # не считаем major liquidity.
+    # =====================================================
 
     for group in clusters:
 
-        # Только действительно meaningful уровни.
-        # Повторные касания имеют больший вес.
-
         touches = group["touches"]
+
+        if touches < 2:
+            continue
 
         strength = min(
             1.0,
             0.50
-            + 0.15 * max(
+            + 0.15
+            * max(
                 0,
                 touches - 1
             )
@@ -453,16 +497,13 @@ def find_major_liquidity(
 
             "side": group["side"],
 
-            "type": (
-                "HIGH"
-                if group["side"] == "SHORT"
-                else "LOW"
-            ),
+            "type": group["type"],
 
             "liquidity_type": (
                 "1H major swing high"
-                if group["side"] == "SHORT"
-                else "1H major swing low"
+                if group["type"] == "HIGH"
+                else
+                "1H major swing low"
             ),
 
             "strength": round(
@@ -471,8 +512,16 @@ def find_major_liquidity(
             ),
         })
 
-    # Сначала самые сильные,
-    # затем ближайшие к цене.
+    if not result:
+        return []
+
+    # =====================================================
+    # СОРТИРОВКА
+    # =====================================================
+    #
+    # Сначала сила уровня,
+    # затем расстояние от текущей цены.
+    # =====================================================
 
     result.sort(
         key=lambda x: (
@@ -484,10 +533,12 @@ def find_major_liquidity(
         )
     )
 
-    return result[
-        :max_levels
-    ]
+    return result[:max_levels]
 
+
+# =========================================================
+# PUBLIC LIQUIDITY FUNCTION
+# =========================================================
 
 def get_major_liquidity(
     candles_1h,
@@ -529,18 +580,18 @@ def detect_sweep(
 
         price = level["level"]
 
-        recent = candles_1h[
-            -3:
-        ]
+        recent = candles_1h[-3:]
 
         if not recent:
             continue
 
-        # ================================================
+        # =================================================
         # LONG
-        # ================================================
+        # =================================================
 
         if direction == "LONG":
+
+            # Цена должна снять ликвидность снизу.
 
             swept = any(
                 candle["low"] < price
@@ -555,11 +606,13 @@ def detect_sweep(
                 > recent[-1]["open"]
             )
 
-        # ================================================
+        # =================================================
         # SHORT
-        # ================================================
+        # =================================================
 
         else:
+
+            # Цена должна снять ликвидность сверху.
 
             swept = any(
                 candle["high"] > price
@@ -574,9 +627,9 @@ def detect_sweep(
                 < recent[-1]["open"]
             )
 
-        # ================================================
+        # =================================================
         # SWEEP FOUND
-        # ================================================
+        # =================================================
 
         if swept and rejection:
 
@@ -597,11 +650,15 @@ def detect_sweep(
                     * level["touches"]
                 ),
 
+                "touches": level["touches"],
+
                 "liquidity_type": (
                     level[
                         "liquidity_type"
                     ]
                 ),
+
+                "type": level["type"],
             }
 
     return None
