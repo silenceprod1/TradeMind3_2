@@ -1,121 +1,52 @@
-"""
-TradeMind 4.4.3 strategy engine.
+"""TradeMind 4.4.4 strategy engine.
 
-1H context
-    ↓
-Major Liquidity
-    ↓
-Fresh 5M Major Liquidity Sweep
-    ↓
-15M Confirmation AFTER Sweep
-    ↓
-FIRST 3 REAL 5M CANDLES AFTER 15M CONFIRMATION
-    ↓
-5M Trigger
-    ↓
-Entry MUST remain close to Sweep
-    ↓
-SL behind actual Sweep extreme
-    ↓
-ONE TP at EXACTLY 1:2
+1H context -> major liquidity -> sweep -> 15M confirmation
+-> FIRST 3 REAL 5M candles -> Entry / SL / one TP exactly 1:2.
 
-TradeMind 4.4.3 FIXES:
-- 5M trigger is allowed ONLY inside the first 3 real 5M candles
-  after the confirmed 15M candle.
-- We do NOT filter candles first and then count them.
-- Previous candle for trigger validation is the ACTUAL previous 5M candle.
-- Late trigger = NO TRADE.
-- Old sweep = NO TRADE when timestamp is available.
-- Entry too far from sweep = NO TRADE.
-- TP is ALWAYS calculated from actual Entry/SL risk.
-- Exactly ONE TP.
-- If exact 1:2 TP hits major opposing liquidity, setup is rejected.
+Compatibility:
+- analyze(..., current_price=...)
+- analyze(..., price=...)
+Both are accepted so older scanner code does not crash.
 """
 
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timezone
 
-
-# ============================================================
-# VERSION
-# ============================================================
-
-STRATEGY_VERSION = "4.4.3"
-
-
-# ============================================================
-# CORE SETTINGS
-# ============================================================
+STRATEGY_VERSION = "4.4.4"
 
 RR_TARGET = 2.0
-
-MIN_SCORE_READY = 80
-
-# Entry / trigger must stay close to sweep.
 MAX_ENTRY_DISTANCE_PCT = 0.50
-
-# Sweep freshness:
-# maximum age = 6 x 5M candles = 30 minutes.
-MAX_SWEEP_AGE_CANDLES = 6
-
-# CRITICAL:
-# trigger allowed only in FIRST 3 REAL 5M candles
-# after 15M confirmation.
-MAX_TRIGGER_CANDLES_AFTER_CONFIRMATION = 3
-
-# SL buffer behind actual sweep extreme.
 SL_BUFFER_PCT = 0.10
+MIN_SCORE_READY = 80
+MAX_5M_CANDLES_AFTER_CONFIRM = 3
+MAX_SWEEP_AGE_5M = 6
 
-
-# ============================================================
-# RESULT OBJECT
-# ============================================================
 
 @dataclass
 class Setup:
     status: str = "WAIT"
     stage: str = "WAIT"
-
     direction: Optional[str] = None
     score: int = 0
     reason: str = ""
-
     zone_low: Optional[float] = None
     zone_high: Optional[float] = None
-
     entry: Optional[float] = None
     sl: Optional[float] = None
     tp: Optional[float] = None
-
     rr: float = RR_TARGET
     one_tp: bool = True
-
     liquidity_type: Optional[str] = None
-
     confirmation_15m: Optional[str] = None
     confirmation: Optional[str] = None
-
     order_flow: Optional[str] = None
-
     sweep_extreme: Optional[float] = None
 
-    sweep_time: Optional[Any] = None
-    confirmation_15m_time: Optional[Any] = None
-    trigger_5m_time: Optional[Any] = None
-
-    trigger_age_5m: Optional[int] = None
-    sweep_age_5m: Optional[int] = None
-
-    entry_distance_from_sweep_pct: Optional[float] = None
-
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        d["strategy_version"] = STRATEGY_VERSION
+        return d
 
-
-# ============================================================
-# BASIC HELPERS
-# ============================================================
 
 def f(x):
     try:
@@ -128,9 +59,37 @@ def val(c, key, idx=None):
     if isinstance(c, dict):
         return f(c.get(key, c.get(key[0], None)))
 
-    if idx is not None and isinstance(c, (list, tuple)):
-        if len(c) > idx:
-            return f(c[idx])
+    if idx is not None and isinstance(c, (list, tuple)) and len(c) > idx:
+        return f(c[idx])
+
+    return None
+
+
+def timestamp(c):
+    """Return candle open timestamp in milliseconds when available."""
+    if isinstance(c, dict):
+        for key in (
+            "timestamp",
+            "time",
+            "open_time",
+            "openTime",
+            "ts",
+        ):
+            value = c.get(key)
+
+            if value is not None:
+                try:
+                    return int(float(value))
+                except (TypeError, ValueError):
+                    pass
+
+        return None
+
+    if isinstance(c, (list, tuple)) and len(c) > 0:
+        try:
+            return int(float(c[0]))
+        except (TypeError, ValueError):
+            return None
 
     return None
 
@@ -154,125 +113,6 @@ def cl(c):
 def last(c, n):
     return c[-n:] if len(c) >= n else c
 
-
-# ============================================================
-# TIMESTAMP HELPERS
-# ============================================================
-
-def candle_time(c):
-    """
-    Robust timestamp extraction.
-
-    Supports common dict keys:
-    timestamp, time, open_time, openTime, ts, t
-
-    Also supports Binance-style list:
-    [open_time, open, high, low, close, ...]
-    """
-
-    if c is None:
-        return None
-
-    raw = None
-
-    if isinstance(c, dict):
-        for key in (
-            "timestamp",
-            "time",
-            "open_time",
-            "openTime",
-            "ts",
-            "t",
-        ):
-            if key in c:
-                raw = c.get(key)
-                break
-
-    elif isinstance(c, (list, tuple)):
-        if len(c) > 0:
-            raw = c[0]
-
-    if raw is None:
-        return None
-
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = None
-
-    if value is not None:
-        # milliseconds
-        if value > 10_000_000_000:
-            return value / 1000.0
-
-        # seconds
-        return value
-
-    if isinstance(raw, datetime):
-        if raw.tzinfo is None:
-            raw = raw.replace(tzinfo=timezone.utc)
-
-        return raw.timestamp()
-
-    if isinstance(raw, str):
-        text = raw.strip()
-
-        try:
-            dt = datetime.fromisoformat(
-                text.replace("Z", "+00:00")
-            )
-
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-
-            return dt.timestamp()
-
-        except Exception:
-            return None
-
-    return None
-
-
-def sweep_timestamp(sweep):
-    if not isinstance(sweep, dict):
-        return None
-
-    for key in (
-        "timestamp",
-        "time",
-        "open_time",
-        "openTime",
-        "ts",
-        "t",
-        "sweep_time",
-        "sweep_timestamp",
-    ):
-        if key in sweep:
-            value = candle_time({key: sweep.get(key)})
-            if value is not None:
-                return value
-
-    return None
-
-
-def timestamp_index(candles):
-    """
-    Return indexes with valid timestamps.
-    """
-    result = []
-
-    for i, c in enumerate(candles):
-        t = candle_time(c)
-
-        if t is not None:
-            result.append((i, t))
-
-    return result
-
-
-# ============================================================
-# CONTEXT
-# ============================================================
 
 def context_1h(candles):
     d = last(candles, 24)
@@ -315,208 +155,163 @@ def context_15m(candles):
     if any(x is None for x in hs + ls):
         return "neutral"
 
-    m = len(d) // 2
+    mid = len(d) // 2
 
     if (
-        max(hs[m:]) > max(hs[:m])
-        and min(ls[m:]) > min(ls[:m])
+        max(hs[mid:]) > max(hs[:mid])
+        and min(ls[mid:]) > min(ls[:mid])
     ):
         return "bullish"
 
     if (
-        max(hs[m:]) < max(hs[:m])
-        and min(ls[m:]) < min(ls[:m])
+        max(hs[mid:]) < max(hs[:mid])
+        and min(ls[mid:]) < min(ls[:mid])
     ):
         return "bearish"
 
     return "neutral"
 
 
-# ============================================================
-# 15M CONFIRMATION
-# ============================================================
-
-def confirm_15m(
-    candles,
-    direction,
-    sweep_level,
-    sweep_time=None,
-):
+def confirm_15m(candles, direction, sweep_level):
     """
-    Find the FIRST valid 15M confirmation AFTER the sweep.
-
+    Mandatory 15M confirmation after sweep.
     Returns:
-        ok,
-        confirmation_text,
-        confirmation_candle,
-        confirmation_index
+        ok, reason, confirmation_timestamp
     """
 
-    if not candles or sweep_level is None:
-        return False, None, None, None
+    d = last(candles, 6)
 
-    candidates = []
+    if len(d) < 4 or sweep_level is None:
+        return False, None, None
 
-    for i, candle in enumerate(candles):
+    oo = [o(x) for x in d]
+    hh = [h(x) for x in d]
+    ll = [l(x) for x in d]
+    cc = [cl(x) for x in d]
 
-        t = candle_time(candle)
+    if any(x is None for x in oo + hh + ll + cc):
+        return False, None, None
 
-        # If both timestamps exist, confirmation MUST be after sweep.
-        if sweep_time is not None and t is not None:
-            if t <= sweep_time:
-                continue
+    O = oo[-1]
+    H = hh[-1]
+    L = ll[-1]
+    C = cc[-1]
 
-        candidates.append((i, candle))
+    prev_high = max(hh[:-1])
+    prev_low = min(ll[:-1])
 
-    if not candidates:
-        return False, None, None, None
+    rng = max(H - L, 1e-9)
+    body = abs(C - O)
 
-    # We only need the latest 8 candidates.
-    candidates = candidates[-8:]
+    conf_ts = timestamp(d[-1])
 
-    for i, candle in candidates:
+    if direction == "SHORT":
 
-        O = o(candle)
-        H = h(candle)
-        L = l(candle)
-        C = cl(candle)
+        bearish_reclaim = (
+            C < sweep_level
+            and C < O
+        )
 
-        if None in (O, H, L, C):
-            continue
+        bearish_break = (
+            C < prev_low
+            and C < O
+            and body / rng >= 0.35
+        )
 
-        rng = max(H - L, 1e-9)
-        body = abs(C - O)
+        rejection = (
+            H > sweep_level
+            and C < sweep_level
+            and C < H - rng * 0.55
+        )
 
-        # Previous actual 15M candle.
-        if i <= 0:
-            continue
-
-        prev = candles[i - 1]
-
-        prev_high = h(prev)
-        prev_low = l(prev)
-
-        if prev_high is None or prev_low is None:
-            continue
-
-        if direction == "SHORT":
-
-            bearish_break = (
-                C < prev_low
-                and C < O
-                and body / rng >= 0.35
+        if bearish_break:
+            return (
+                True,
+                "15M bearish structure break after upside sweep",
+                conf_ts,
             )
 
-            bearish_reclaim = (
-                C < sweep_level
-                and C < O
+        if bearish_reclaim and rejection:
+            return (
+                True,
+                "15M bearish rejection/reclaim after upside sweep",
+                conf_ts,
             )
 
-            rejection = (
-                H > sweep_level
-                and C < sweep_level
-                and C < H - rng * 0.55
+        if bearish_reclaim:
+            return (
+                True,
+                "15M close back below swept liquidity",
+                conf_ts,
             )
 
-            if bearish_break:
-                return (
-                    True,
-                    "15M bearish structure break after upside sweep",
-                    candle,
-                    i,
-                )
+    else:
 
-            if bearish_reclaim and rejection:
-                return (
-                    True,
-                    "15M bearish rejection/reclaim after upside sweep",
-                    candle,
-                    i,
-                )
+        bullish_reclaim = (
+            C > sweep_level
+            and C > O
+        )
 
-            if bearish_reclaim:
-                return (
-                    True,
-                    "15M close back below swept liquidity",
-                    candle,
-                    i,
-                )
+        bullish_break = (
+            C > prev_high
+            and C > O
+            and body / rng >= 0.35
+        )
 
-        else:
+        rejection = (
+            L < sweep_level
+            and C > sweep_level
+            and C > L + rng * 0.55
+        )
 
-            bullish_break = (
-                C > prev_high
-                and C > O
-                and body / rng >= 0.35
+        if bullish_break:
+            return (
+                True,
+                "15M bullish structure break after downside sweep",
+                conf_ts,
             )
 
-            bullish_reclaim = (
-                C > sweep_level
-                and C > O
+        if bullish_reclaim and rejection:
+            return (
+                True,
+                "15M bullish rejection/reclaim after downside sweep",
+                conf_ts,
             )
 
-            rejection = (
-                L < sweep_level
-                and C > sweep_level
-                and C > L + rng * 0.55
+        if bullish_reclaim:
+            return (
+                True,
+                "15M close back above swept liquidity",
+                conf_ts,
             )
 
-            if bullish_break:
-                return (
-                    True,
-                    "15M bullish structure break after downside sweep",
-                    candle,
-                    i,
-                )
-
-            if bullish_reclaim and rejection:
-                return (
-                    True,
-                    "15M bullish rejection/reclaim after downside sweep",
-                    candle,
-                    i,
-                )
-
-            if bullish_reclaim:
-                return (
-                    True,
-                    "15M close back above swept liquidity",
-                    candle,
-                    i,
-                )
-
-    return False, None, None, None
+    return False, None, None
 
 
-# ============================================================
-# 5M TRIGGER
-# ============================================================
-
-def trigger_on_candle(candles, index, direction, sweep_level):
+def trigger_on_candle(c, previous_candle, direction):
     """
-    Validate ONE exact 5M candle.
+    Evaluate ONE specific 5M candle.
 
-    IMPORTANT:
-    Previous candle = actual previous 5M candle,
-    not previous FILTERED candidate.
+    Important:
+    We do not filter candidate candles first.
+    This prevents a late trigger from being treated as an early trigger.
     """
 
-    if index <= 0 or index >= len(candles):
+    if previous_candle is None:
         return False, None
 
-    current = candles[index]
-    previous = candles[index - 1]
+    O = o(c)
+    H = h(c)
+    L = l(c)
+    C = cl(c)
 
-    O = o(current)
-    H = h(current)
-    L = l(current)
-    C = cl(current)
+    pH = h(previous_candle)
+    pL = l(previous_candle)
 
-    pH = h(previous)
-    pL = l(previous)
-    pC = cl(previous)
-
-    if None in (O, H, L, C, pH, pL, pC):
+    if any(
+        x is None
+        for x in (O, H, L, C, pH, pL)
+    ):
         return False, None
 
     rng = max(H - L, 1e-9)
@@ -524,49 +319,47 @@ def trigger_on_candle(candles, index, direction, sweep_level):
 
     if direction == "LONG":
 
-        displacement = (
+        if (
             C > O
-            and C > pC
             and C > pH
-            and C > sweep_level
             and body / rng >= 0.45
-        )
+        ):
+            return (
+                True,
+                "5M bullish displacement / micro-structure break",
+            )
 
-        rejection = (
+        if (
             C > O
             and L < pL
-            and C > sweep_level
             and C > L + rng * 0.55
-        )
-
-        if displacement:
-            return True, "5M bullish displacement / micro-structure break"
-
-        if rejection:
-            return True, "5M bullish rejection after downside sweep"
+        ):
+            return (
+                True,
+                "5M bullish rejection after downside sweep",
+            )
 
     else:
 
-        displacement = (
+        if (
             C < O
-            and C < pC
             and C < pL
-            and C < sweep_level
             and body / rng >= 0.45
-        )
+        ):
+            return (
+                True,
+                "5M bearish displacement / micro-structure break",
+            )
 
-        rejection = (
+        if (
             C < O
             and H > pH
-            and C < sweep_level
             and C < H - rng * 0.55
-        )
-
-        if displacement:
-            return True, "5M bearish displacement / micro-structure break"
-
-        if rejection:
-            return True, "5M bearish rejection after upside sweep"
+        ):
+            return (
+                True,
+                "5M bearish rejection after upside sweep",
+            )
 
     return False, None
 
@@ -574,154 +367,112 @@ def trigger_on_candle(candles, index, direction, sweep_level):
 def confirm_5m_after_15m(
     candles_5m,
     direction,
-    sweep_level,
-    confirmation_time,
+    confirmation_ts,
 ):
     """
-    CRITICAL 4.4.3 FIX.
+    Only the first 3 REAL 5M candles after
+    the 15M confirmation.
 
-    We identify the FIRST REAL 5M candle after the 15M
-    confirmation candle.
-
-    Then we inspect ONLY:
-        candle #1
-        candle #2
-        candle #3
-
-    No filtering before counting.
-
-    Therefore:
-        4th candle = NO TRADE
-        5th candle = NO TRADE
-        10th candle = NO TRADE
-
-    This prevents late/chasing entries.
+    No late trigger.
     """
 
-    if not candles_5m:
-        return False, None, None, None, None
+    if not candles_5m or confirmation_ts is None:
+        return False, None
 
-    # --------------------------------------------------------
-    # Timestamp mode
-    # --------------------------------------------------------
+    after = []
 
-    if confirmation_time is not None:
+    for candle in candles_5m:
 
-        after = []
+        ts = timestamp(candle)
 
-        for i, candle in enumerate(candles_5m):
+        if ts is not None and ts > confirmation_ts:
+            after.append(candle)
 
-            t = candle_time(candle)
+    if len(after) < 1:
+        return False, None
 
-            if t is None:
-                continue
+    # First 3 actual candles.
+    after = after[:MAX_5M_CANDLES_AFTER_CONFIRM]
 
-            if t > confirmation_time:
-                after.append((i, candle, t))
+    all_ts = [
+        timestamp(c)
+        for c in candles_5m
+    ]
 
-        # Sort chronologically.
-        after.sort(key=lambda x: x[2])
+    for candle in after:
 
-        # ONLY FIRST 3 REAL CANDLES.
-        first_three = after[:MAX_TRIGGER_CANDLES_AFTER_CONFIRMATION]
+        ts = timestamp(candle)
 
-        for age, (i, candle, t) in enumerate(first_three, start=1):
+        try:
+            idx = all_ts.index(ts)
+        except ValueError:
+            continue
 
-            # Entry/trigger must remain close to sweep.
-            close_price = cl(candle)
+        if idx <= 0:
+            continue
 
-            if close_price is None:
-                continue
+        previous = candles_5m[idx - 1]
 
-            distance_pct = (
-                abs(close_price - sweep_level)
-                / max(abs(sweep_level), 1e-9)
-                * 100
-            )
+        ok, reason = trigger_on_candle(
+            candle,
+            previous,
+            direction,
+        )
 
-            if distance_pct > MAX_ENTRY_DISTANCE_PCT:
-                # Do NOT skip to a later candle and pretend it is candle #1.
-                # It remains candle #1/#2/#3 and therefore the window stays strict.
-                continue
+        if ok:
+            return True, reason
 
-            ok, reason = trigger_on_candle(
-                candles_5m,
-                i,
-                direction,
-                sweep_level,
-            )
+    return False, None
 
-            if ok:
-                return True, reason, candle, i, age
-
-        return False, None, None, None, None
-
-    # --------------------------------------------------------
-    # SAFE FALLBACK
-    # --------------------------------------------------------
-    #
-    # If timestamp information is unavailable we do NOT want
-    # to accept an unknown-age trigger.
-    #
-    # Instead of generating a potentially late trade, reject.
-    #
-
-    return (
-        False,
-        "Нет timestamp 15M/5M → возраст trigger невозможно проверить.",
-        None,
-        None,
-        None,
-    )
-
-
-# ============================================================
-# ORDER FLOW
-# ============================================================
 
 def flow_check(flow, direction):
 
     if not flow:
         return None, None
 
-    a = str(flow.get("absorption", "")).lower()
+    absorption = str(
+        flow.get("absorption", "")
+    ).lower()
 
-    d = f(flow.get("delta"))
-    cv = f(flow.get("cvd_change"))
+    delta = f(flow.get("delta"))
+    cvd = f(flow.get("cvd_change"))
 
     if direction == "LONG":
 
-        if a in {"buyers", "buyer", "buy"}:
+        if absorption in {
+            "buyers",
+            "buyer",
+            "buy",
+        }:
             return True, "buyer absorption"
 
-        if d is not None and d > 0:
+        if delta is not None and delta > 0:
             return True, "positive delta"
 
-        if cv is not None and cv > 0:
+        if cvd is not None and cvd > 0:
             return True, "rising CVD"
 
     else:
 
-        if a in {"sellers", "seller", "sell"}:
+        if absorption in {
+            "sellers",
+            "seller",
+            "sell",
+        }:
             return True, "seller absorption"
 
-        if d is not None and d < 0:
+        if delta is not None and delta < 0:
             return True, "negative delta"
 
-        if cv is not None and cv < 0:
+        if cvd is not None and cvd < 0:
             return True, "falling CVD"
 
     return False, "order flow does not support direction"
 
 
-# ============================================================
-# TRADE CALCULATION
-# ============================================================
-
 def trade(direction, entry, sl):
     """
-    ONE TP.
-    EXACTLY 1:2.
+    Exactly one TP at RR 1:2.
     """
 
     entry = f(entry)
@@ -753,23 +504,27 @@ def trade(direction, entry, sl):
     )
 
 
-# ============================================================
-# SWEEP EXTREME
-# ============================================================
-
-def _sweep_extreme(candles_5m, direction, level):
+def _sweep_extreme(
+    candles_5m,
+    direction,
+    level,
+):
 
     if not candles_5m or level is None:
         return None
 
-    recent = last(candles_5m, 12)
+    recent = last(
+        candles_5m,
+        12,
+    )
 
     if direction == "SHORT":
 
         swept = [
             h(x)
             for x in recent
-            if h(x) is not None and h(x) > level
+            if h(x) is not None
+            and h(x) > level
         ]
 
         return max(swept) if swept else level
@@ -777,39 +532,33 @@ def _sweep_extreme(candles_5m, direction, level):
     swept = [
         l(x)
         for x in recent
-        if l(x) is not None and l(x) < level
+        if l(x) is not None
+        and l(x) < level
     ]
 
     return min(swept) if swept else level
 
-
-# ============================================================
-# OPPOSITE MAJOR LIQUIDITY
-# ============================================================
 
 def _nearest_opposite_level(
     major_levels,
     direction,
     entry,
 ):
-    """
-    Find nearest untouched major liquidity on TP side.
-    """
 
     if not major_levels or entry is None:
         return None
 
     candidates = []
 
-    for z in major_levels:
+    for zone in major_levels:
 
-        if not isinstance(z, dict):
+        if not isinstance(zone, dict):
             continue
 
         level = f(
-            z.get(
+            zone.get(
                 "price",
-                z.get("level")
+                zone.get("level"),
             )
         )
 
@@ -817,18 +566,22 @@ def _nearest_opposite_level(
             continue
 
         side = str(
-            z.get("side", "")
+            zone.get("side", "")
         ).upper()
 
-        if direction == "LONG":
+        if (
+            direction == "LONG"
+            and level > entry
+            and side != "LONG"
+        ):
+            candidates.append(level)
 
-            if level > entry and side != "LONG":
-                candidates.append(level)
-
-        else:
-
-            if level < entry and side != "SHORT":
-                candidates.append(level)
+        elif (
+            direction == "SHORT"
+            and level < entry
+            and side != "SHORT"
+        ):
+            candidates.append(level)
 
     if not candidates:
         return None
@@ -839,56 +592,69 @@ def _nearest_opposite_level(
     return max(candidates)
 
 
-# ============================================================
-# SWEEP FRESHNESS
-# ============================================================
+def _sweep_timestamp(sweep):
 
-def sweep_age_in_5m_candles(
-    candles_5m,
-    sweep_time,
-):
-    """
-    Determine how many 5M candles old the sweep is.
-
-    Returns None if timestamps are unavailable.
-    """
-
-    if sweep_time is None:
+    if not sweep:
         return None
 
-    indexed = timestamp_index(candles_5m)
+    keys = (
+        "timestamp",
+        "time",
+        "sweep_timestamp",
+        "sweep_time",
+        "ts",
+        "open_time",
+        "openTime",
+    )
 
-    if not indexed:
-        return None
+    for key in keys:
 
-    after = [
-        (i, t)
-        for i, t in indexed
-        if t > sweep_time
-    ]
+        if key not in sweep:
+            continue
 
-    # If there are no candles after sweep, current data is stale.
-    if not after:
-        return None
+        value = sweep.get(key)
 
-    return len(after)
+        if value is None:
+            continue
 
+        try:
+            return int(float(value))
+        except (
+            TypeError,
+            ValueError,
+        ):
+            pass
 
-# ============================================================
-# MAIN ANALYSIS
-# ============================================================
+    return None
+
 
 def analyze(
     candles_1h: List[Any],
     candles_15m: List[Any],
     candles_5m: List[Any],
-    current_price: float,
+    current_price: float = None,
     major_levels=None,
-    order_flow: Optional[Dict[str, Any]] = None,
-    sweep: Optional[Dict[str, Any]] = None,
+    order_flow: Optional[
+        Dict[str, Any]
+    ] = None,
+    sweep: Optional[
+        Dict[str, Any]
+    ] = None,
+
+    # IMPORTANT:
+    # Old bot scanner uses price=...
+    # We keep this parameter for compatibility.
+    price: float = None,
 ):
 
-    p = f(current_price)
+    # Support BOTH:
+    # current_price=
+    # price=
+
+    if current_price is not None:
+        p = f(current_price)
+    else:
+        p = f(price)
 
     r = Setup()
 
@@ -898,39 +664,53 @@ def analyze(
         or not candles_15m
         or not candles_5m
     ):
-        r.reason = "Недостаточно рыночных данных."
+        r.reason = (
+            "Недостаточно рыночных данных."
+        )
         return r.to_dict()
 
-    # --------------------------------------------------------
-    # CONTEXT
-    # --------------------------------------------------------
+    ctx1h = context_1h(
+        candles_1h
+    )
 
-    ctx1h = context_1h(candles_1h)
-    ctx15 = context_15m(candles_15m)
+    ctx15 = context_15m(
+        candles_15m
+    )
 
-    # --------------------------------------------------------
-    # SWEEP REQUIRED
-    # --------------------------------------------------------
+    # ==========================================
+    # MAJOR LIQUIDITY + SWEEP
+    # ==========================================
 
-    if not sweep or not sweep.get("swept"):
+    if (
+        not sweep
+        or not sweep.get("swept")
+    ):
 
-        r.score = 25 if ctx15 == "neutral" else 35
+        r.score = (
+            25
+            if ctx15 == "neutral"
+            else 35
+        )
 
         r.reason = (
-            "Нет подтвержденного sweep крупной ликвидности. "
+            "Нет подтвержденного sweep "
+            "крупной ликвидности. "
             "В середине диапазона не входим."
         )
 
         return r.to_dict()
 
     direction = str(
-        sweep.get("direction", "")
+        sweep.get(
+            "direction",
+            "",
+        )
     ).upper()
 
     level = f(
         sweep.get(
             "level",
-            sweep.get("price")
+            sweep.get("price"),
         )
     )
 
@@ -938,11 +718,17 @@ def analyze(
         sweep.get("strength")
     )
 
-    if direction not in {"LONG", "SHORT"} or level is None:
+    if (
+        direction not in {
+            "LONG",
+            "SHORT",
+        }
+        or level is None
+    ):
 
         r.reason = (
-            "Sweep не содержит корректного "
-            "направления/уровня."
+            "Sweep не содержит "
+            "корректного направления/уровня."
         )
 
         return r.to_dict()
@@ -951,71 +737,26 @@ def analyze(
 
     r.liquidity_type = sweep.get(
         "liquidity_type",
-        "major liquidity"
+        "major liquidity",
     )
 
-    # --------------------------------------------------------
-    # SWEEP STRENGTH
-    # --------------------------------------------------------
-
-    if strength is not None and strength < 0.60:
+    if (
+        strength is not None
+        and strength < 0.60
+    ):
 
         r.score = 40
 
         r.reason = (
-            "Sweep есть, но он недостаточно сильный."
+            "Sweep есть, "
+            "но он недостаточно сильный."
         )
 
         return r.to_dict()
 
-    # --------------------------------------------------------
-    # SWEEP TIME
-    # --------------------------------------------------------
-
-    sw_time = sweep_timestamp(sweep)
-
-    r.sweep_time = sw_time
-
-    # --------------------------------------------------------
-    # SWEEP AGE
-    # --------------------------------------------------------
-
-    if sw_time is not None:
-
-        age = sweep_age_in_5m_candles(
-            candles_5m,
-            sw_time,
-        )
-
-        r.sweep_age_5m = age
-
-        if age is None:
-
-            r.score = 35
-
-            r.reason = (
-                "Невозможно подтвердить свежесть sweep "
-                "по timestamp → вход запрещён."
-            )
-
-            return r.to_dict()
-
-        if age > MAX_SWEEP_AGE_CANDLES:
-
-            r.score = 35
-            r.stage = "SWEPT"
-
-            r.reason = (
-                f"Sweep слишком старый: {age} x 5M. "
-                f"Максимум {MAX_SWEEP_AGE_CANDLES} x 5M. "
-                "Не догоняем."
-            )
-
-            return r.to_dict()
-
-    # --------------------------------------------------------
-    # ANTI-CHASE
-    # --------------------------------------------------------
+    # ==========================================
+    # ANTI-CHASING
+    # ==========================================
 
     distance_pct = (
         abs(p - level)
@@ -1023,36 +764,80 @@ def analyze(
         * 100
     )
 
-    r.entry_distance_from_sweep_pct = distance_pct
-
-    if distance_pct > MAX_ENTRY_DISTANCE_PCT:
+    if (
+        distance_pct
+        > MAX_ENTRY_DISTANCE_PCT
+    ):
 
         r.score = 35
         r.stage = "SWEPT"
 
         r.reason = (
-            f"После sweep цена ушла на "
-            f"{distance_pct:.2f}% — больше лимита "
+            f"После sweep цена ушла "
+            f"на {distance_pct:.2f}% — "
+            f"больше лимита "
             f"{MAX_ENTRY_DISTANCE_PCT:.2f}%. "
-            "Не догоняем."
+            f"Не догоняем."
         )
 
         return r.to_dict()
 
-    # --------------------------------------------------------
+    # ==========================================
+    # SWEEP FRESHNESS
+    # ==========================================
+
+    sweep_ts = _sweep_timestamp(
+        sweep
+    )
+
+    latest_5m_ts = timestamp(
+        candles_5m[-1]
+    )
+
+    if (
+        sweep_ts is not None
+        and latest_5m_ts is not None
+    ):
+
+        age_5m = max(
+            0,
+            (
+                latest_5m_ts
+                - sweep_ts
+            )
+            // (
+                5 * 60 * 1000
+            ),
+        )
+
+        if (
+            age_5m
+            > MAX_SWEEP_AGE_5M
+        ):
+
+            r.score = 40
+            r.stage = "SWEPT"
+
+            r.reason = (
+                "Sweep слишком старый — "
+                "сетап протух, "
+                "не догоняем."
+            )
+
+            return r.to_dict()
+
+    # ==========================================
     # 15M CONFIRMATION
-    # --------------------------------------------------------
+    # ==========================================
 
     (
         ok15,
         conf15,
-        conf15_candle,
-        conf15_index,
+        conf_ts,
     ) = confirm_15m(
         candles_15m,
         direction,
         level,
-        sw_time,
     )
 
     r.confirmation_15m = conf15
@@ -1063,106 +848,47 @@ def analyze(
         r.stage = "SWEPT"
 
         r.reason = (
-            "Sweep есть, но 15M confirmation "
-            "после sweep отсутствует → вход запрещён."
+            "Sweep есть, "
+            "но 15M confirmation "
+            "отсутствует → вход запрещен."
         )
 
         return r.to_dict()
 
-    conf15_time = candle_time(
-        conf15_candle
-    )
-
-    r.confirmation_15m_time = conf15_time
-
     r.stage = "15M_CONFIRMED"
 
-    # --------------------------------------------------------
-    # 5M TRIGGER — STRICT FIRST 3 CANDLES
-    # --------------------------------------------------------
+    # ==========================================
+    # STRICT 5M TRIGGER
+    # FIRST 3 REAL CANDLES
+    # ==========================================
 
     (
         ok5,
         conf5,
-        trigger_candle,
-        trigger_index,
-        trigger_age,
     ) = confirm_5m_after_15m(
         candles_5m,
         direction,
-        level,
-        conf15_time,
+        conf_ts,
     )
 
     r.confirmation = conf5
 
-    r.trigger_5m_time = (
-        candle_time(trigger_candle)
-        if trigger_candle is not None
-        else None
-    )
-
-    r.trigger_age_5m = trigger_age
-
     if not ok5:
 
         r.score = 65
-        r.stage = "15M_CONFIRMED"
-
-        if conf5 and "timestamp" in conf5.lower():
-
-            r.reason = (
-                "15M confirmation есть, но невозможно "
-                "проверить строгий 3-свечный 5M trigger "
-                "→ вход запрещён."
-            )
-
-        else:
-
-            r.reason = (
-                "15M confirmation есть, но "
-                "5M trigger не появился в первых "
-                f"{MAX_TRIGGER_CANDLES_AFTER_CONFIRMATION} "
-                "реальных 5M свечах → NO TRADE."
-            )
-
-        return r.to_dict()
-
-    # --------------------------------------------------------
-    # TRIGGER DISTANCE
-    # --------------------------------------------------------
-
-    trigger_close = cl(trigger_candle)
-
-    if trigger_close is None:
-
-        r.score = 60
 
         r.reason = (
-            "Некорректный 5M trigger → вход запрещён."
+            "15M подтверждение есть, "
+            "но в первых 3 реальных "
+            "5M свечах после confirmation "
+            "нет trigger → вход запрещен."
         )
 
         return r.to_dict()
 
-    trigger_distance_pct = (
-        abs(trigger_close - level)
-        / max(abs(level), 1e-9)
-        * 100
-    )
-
-    if trigger_distance_pct > MAX_ENTRY_DISTANCE_PCT:
-
-        r.score = 60
-        r.reason = (
-            f"5M trigger слишком далеко от sweep: "
-            f"{trigger_distance_pct:.2f}% → NO TRADE."
-        )
-
-        return r.to_dict()
-
-    # --------------------------------------------------------
+    # ==========================================
     # ORDER FLOW
-    # --------------------------------------------------------
+    # ==========================================
 
     fok, ft = flow_check(
         order_flow,
@@ -1170,7 +896,9 @@ def analyze(
     )
 
     r.order_flow = (
-        ft if ft else "нет данных"
+        ft
+        if ft
+        else "нет данных"
     )
 
     if fok is False:
@@ -1178,20 +906,23 @@ def analyze(
         r.score = 68
 
         r.reason = (
-            "5M trigger есть, но order flow "
+            "5M trigger есть, "
+            "но order flow "
             "не поддерживает направление."
         )
 
         return r.to_dict()
 
-    # --------------------------------------------------------
-    # SWEEP EXTREME
-    # --------------------------------------------------------
+    # ==========================================
+    # SL FROM SWEEP EXTREME
+    # ==========================================
 
     extreme = f(
         sweep.get(
             "extreme",
-            sweep.get("sweep_extreme")
+            sweep.get(
+                "sweep_extreme"
+            ),
         )
     )
 
@@ -1208,31 +939,35 @@ def analyze(
 
     r.sweep_extreme = extreme
 
-    # --------------------------------------------------------
-    # SL BEHIND ACTUAL SWEEP
-    # --------------------------------------------------------
-
     if direction == "SHORT":
 
-        sl = extreme * (
-            1 + SL_BUFFER_PCT / 100
+        sl = (
+            extreme
+            * (
+                1
+                + SL_BUFFER_PCT
+                / 100
+            )
         )
 
     else:
 
-        sl = extreme * (
-            1 - SL_BUFFER_PCT / 100
+        sl = (
+            extreme
+            * (
+                1
+                - SL_BUFFER_PCT
+                / 100
+            )
         )
 
-    # --------------------------------------------------------
-    # ENTRY / EXACT 2R TP
-    # --------------------------------------------------------
-
-    entry = p
+    # ==========================================
+    # EXACT 1:2
+    # ==========================================
 
     entry, sl, tp = trade(
         direction,
-        entry,
+        p,
         sl,
     )
 
@@ -1245,126 +980,115 @@ def analyze(
         r.score = 60
 
         r.reason = (
-            "Невалидная геометрия Entry/SL "
-            "→ вход запрещен."
+            "Невалидная геометрия "
+            "Entry/SL → вход запрещен."
         )
 
         return r.to_dict()
 
-    # --------------------------------------------------------
-    # FINAL ENTRY DISTANCE CHECK
-    # --------------------------------------------------------
-
-    final_entry_distance = (
-        abs(entry - level)
-        / max(abs(level), 1e-9)
-        * 100
-    )
-
-    r.entry_distance_from_sweep_pct = (
-        final_entry_distance
-    )
-
-    if final_entry_distance > MAX_ENTRY_DISTANCE_PCT:
-
-        r.score = 60
-
-        r.reason = (
-            f"Entry слишком далеко от sweep: "
-            f"{final_entry_distance:.2f}% "
-            f"> {MAX_ENTRY_DISTANCE_PCT:.2f}% → NO TRADE."
-        )
-
-        return r.to_dict()
-
-    # --------------------------------------------------------
+    # ==========================================
     # OPPOSING MAJOR LIQUIDITY
-    # --------------------------------------------------------
+    # ==========================================
 
-    opposite = _nearest_opposite_level(
-        major_levels or [],
-        direction,
-        entry,
+    opposite = (
+        _nearest_opposite_level(
+            major_levels or [],
+            direction,
+            entry,
+        )
     )
 
     if opposite is not None:
 
-        if direction == "LONG" and tp >= opposite:
+        if (
+            direction == "LONG"
+            and tp >= opposite
+        ):
 
             r.score = 70
 
             r.reason = (
-                "1:2 TP упирается в крупную "
-                "встречную ликвидность → NO TRADE."
+                "1:2 TP упирается "
+                "в крупную встречную "
+                "ликвидность → NO TRADE."
             )
 
             return r.to_dict()
 
-        if direction == "SHORT" and tp <= opposite:
+        if (
+            direction == "SHORT"
+            and tp <= opposite
+        ):
 
             r.score = 70
 
             r.reason = (
-                "1:2 TP проходит встречную "
-                "крупную ликвидность → NO TRADE."
+                "1:2 TP проходит "
+                "встречную крупную "
+                "ликвидность → NO TRADE."
             )
 
             return r.to_dict()
 
-    # --------------------------------------------------------
+    # ==========================================
     # SCORE
-    # --------------------------------------------------------
+    # ==========================================
 
     score = 80
 
-    # 1H context
     if (
         direction == "LONG"
         and ctx1h == "bullish"
     ):
+
         score += 7
 
     elif (
         direction == "SHORT"
         and ctx1h == "bearish"
     ):
+
         score += 7
 
     elif ctx1h != "neutral":
 
         score -= 4
 
-    # 15M context
-    if ctx15 == direction.lower():
+    if (
+        ctx15
+        == direction.lower()
+    ):
+
         score += 5
 
-    # Order flow
     if fok is True:
         score += 8
 
-    score = min(score, 100)
-
-    # --------------------------------------------------------
-    # FINAL SCORE GATE
-    # --------------------------------------------------------
+    score = min(
+        score,
+        100,
+    )
 
     if score < MIN_SCORE_READY:
 
         r.score = score
+        r.stage = "WAIT"
+
         r.reason = (
-            f"Score {score}/100 ниже минимального "
-            f"{MIN_SCORE_READY} → NO TRADE."
+            f"Score {score} ниже "
+            f"минимального "
+            f"{MIN_SCORE_READY} "
+            f"→ NO TRADE."
         )
 
         return r.to_dict()
 
-    # --------------------------------------------------------
+    # ==========================================
     # READY
-    # --------------------------------------------------------
+    # ==========================================
 
     r.status = "READY"
     r.stage = "READY"
-
     r.score = score
 
     r.entry = entry
@@ -1375,39 +1099,35 @@ def analyze(
     r.one_tp = True
 
     r.reason = (
-        "TradeMind 4.4.3 READY: "
-        "fresh major sweep → "
+        "1H context → "
+        "major liquidity → "
+        "sweep → "
         "15M confirmation → "
-        "5M trigger ONLY in first 3 candles → "
-        "trigger near sweep → "
-        "entry near sweep → "
-        "SL behind sweep extreme → "
-        "strict 1:2 TP."
+        "first 3 real 5M candles → "
+        "Entry/SL/TP 1:2."
     )
 
     return r.to_dict()
 
 
-# ============================================================
-# SOL WRAPPER
-# ============================================================
-
 def analyze_sol(
     candles_1h,
     candles_15m,
     candles_5m,
-    current_price,
+    current_price=None,
     order_flow=None,
     sweep=None,
     major_levels=None,
+    price=None,
 ):
 
     return analyze(
         candles_1h,
         candles_15m,
         candles_5m,
-        current_price,
+        current_price=current_price,
         major_levels=major_levels,
         order_flow=order_flow,
         sweep=sweep,
+        price=price,
     )
