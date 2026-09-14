@@ -31,7 +31,7 @@ import bingx
 
 
 # ============================================================
-# TRADEMIND 4.2
+# TRADEMIND 4.3
 # ============================================================
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -150,10 +150,7 @@ def load_state():
 
 
 def save_state(state):
-    save_json(
-        STATE_FILE,
-        state,
-    )
+    save_json(STATE_FILE, state)
 
 
 def reset_daily_if_needed(state):
@@ -313,7 +310,7 @@ def format_rr(rr):
 
 
 # ============================================================
-# STAGES — TRADEMIND 4.2
+# STAGES — TRADEMIND 4.3
 # ============================================================
 
 def stage_icon(stage):
@@ -335,7 +332,7 @@ def stage_icon(stage):
 
 def stage_text(stage):
     return {
-        "READY": "ГОТОВ",
+        "READY": "ГОТОВ — МОЖНО ВХОДИТЬ",
         "CONFIRMED": "15M подтверждение",
         "15M_CONFIRMED": "15M подтверждение",
         "WAIT_5M_TRIGGER": "Ждём 5M trigger",
@@ -367,9 +364,7 @@ def format_levels(levels, price):
 
     for level in levels:
         try:
-            level_price = float(
-                level.get("price")
-            )
+            level_price = float(level.get("price"))
         except Exception:
             continue
 
@@ -558,12 +553,65 @@ def find_first_ready(results):
 
 
 # ============================================================
+# READY MESSAGE
+# ============================================================
+
+def build_ready_message(coin, result, mode=None):
+    score = result.get("score", 0)
+    raw_score = result.get("raw_score")
+
+    lines = [
+        "🚨 <b>TRADEMIND 4.3 — ГОТОВЫЙ СЕТАП</b>",
+        "",
+        f"💠 Монета: <b>{coin}</b>",
+        f"📐 Направление: <b>{result.get('direction')}</b>",
+        f"⭐ Score: <b>{score}/100</b>",
+    ]
+
+    if raw_score is not None and raw_score != score:
+        lines.append(
+            f"Raw Score: {raw_score}/100"
+        )
+
+    lines += [
+        "",
+        "🟢 <b>МОЖНО ВХОДИТЬ</b>",
+        "",
+        f"Entry: <b>{format_price(result.get('entry'))}</b>",
+        f"SL: <b>{format_price(result.get('sl'))}</b>",
+        f"TP: <b>{format_price(result.get('tp'))}</b>",
+        f"RR: <b>{format_rr(result.get('rr'))}</b>",
+        "",
+        "✅ Major Liquidity",
+        "✅ Sweep",
+        "✅ 15M confirmation",
+        "✅ 5M trigger",
+        "🎯 Один TP",
+        "📐 RR = 1:2",
+    ]
+
+    if result.get("liquidity_warning"):
+        lines += [
+            "",
+            f"⚠️ {result.get('liquidity_warning')}",
+        ]
+
+    if mode:
+        lines += [
+            "",
+            bingx_mode_text(),
+        ]
+
+    return "\n".join(lines)
+
+
+# ============================================================
 # MARKET MESSAGE
 # ============================================================
 
 def build_market_message(results):
     lines = [
-        "📊 <b>TRADEMIND 4.2 — РЫНОК</b>",
+        "📊 <b>TRADEMIND 4.3 — РЫНОК</b>",
         "",
     ]
 
@@ -633,7 +681,7 @@ def build_market_message(results):
 
 def build_levels_message(results):
     lines = [
-        "💧 <b>TRADEMIND 4.2 — "
+        "💧 <b>TRADEMIND 4.3 — "
         "КЛЮЧЕВЫЕ УРОВНИ</b>",
         "",
         "Используем только крупную "
@@ -677,39 +725,20 @@ def build_levels_message(results):
 # ============================================================
 
 def build_search_message(results):
-    ready = find_first_ready(
-        results
-    )
+    ready = find_first_ready(results)
 
     if ready:
         score, coin, result = ready
 
-        return "\n".join([
-            "🟢 <b>НАЙДЕН СЕТАП</b>",
-            "",
-            f"Монета: <b>{coin}</b>",
-            f"Направление: "
-            f"<b>{result.get('direction')}</b>",
-            f"Score: <b>{score}/100</b>",
-            "",
-            f"Entry: "
-            f"<b>{format_price(result.get('entry'))}</b>",
-            f"SL: "
-            f"<b>{format_price(result.get('sl'))}</b>",
-            f"TP: "
-            f"<b>{format_price(result.get('tp'))}</b>",
-            f"RR: "
-            f"<b>{format_rr(result.get('rr'))}</b>",
-            "",
-            "🔥 Полное подтверждение получено.",
-            "🎯 Один TP.",
-            "📐 RR = 1:2.",
-        ])
+        return build_ready_message(
+            coin,
+            result,
+        )
 
     lines = [
         "🔎 <b>ПОИСК СЕТАПА</b>",
         "",
-        "❌ Готового входа сейчас нет.",
+        "❌ <b>ГОТОВОГО ВХОДА СЕЙЧАС НЕТ</b>",
         "",
     ]
 
@@ -778,7 +807,7 @@ def build_sol_message(result):
     )
 
     lines = [
-        "📈 <b>TRADEMIND 4.2 — SOL</b>",
+        "📈 <b>TRADEMIND 4.3 — SOL</b>",
         "",
         f"💰 Цена: "
         f"<b>{format_price(result.get('price'))}</b>",
@@ -816,22 +845,14 @@ def build_sol_message(result):
     if stage in {
         "CONFIRMED",
         "15M_CONFIRMED",
+        "WAIT_5M_TRIGGER",
     }:
         lines += [
             "",
             "✅ Sweep",
             "✅ 15M confirmation",
             "⏳ Ждём 5M trigger",
-            "❌ Вход запрещён",
-        ]
-
-    elif stage == "WAIT_5M_TRIGGER":
-        lines += [
-            "",
-            "✅ Sweep",
-            "✅ 15M confirmation",
-            "⏳ Ждём 5M trigger",
-            "❌ Вход запрещён",
+            "❌ <b>ВХОД ЗАПРЕЩЁН</b>",
         ]
 
     elif stage == "SWEPT":
@@ -839,7 +860,7 @@ def build_sol_message(result):
             "",
             "💧 Sweep обнаружен",
             "⏳ Ждём 15M confirmation",
-            "❌ Вход запрещён",
+            "❌ <b>ВХОД ЗАПРЕЩЁН</b>",
         ]
 
     elif stage == "WAIT_SWEEP":
@@ -853,6 +874,9 @@ def build_sol_message(result):
         lines += [
             "",
             "🎯 <b>СЕТАП ГОТОВ</b>",
+            "",
+            "🟢 <b>МОЖНО ВХОДИТЬ</b>",
+            "",
             f"Entry: "
             f"<b>{format_price(result.get('entry'))}</b>",
             f"SL: "
@@ -862,7 +886,6 @@ def build_sol_message(result):
             f"RR: "
             f"<b>{format_rr(result.get('rr'))}</b>",
             "",
-            "🟢 <b>МОЖНО ВХОДИТЬ</b>",
             "🎯 Один TP.",
             "📐 RR = 1:2.",
         ]
@@ -912,6 +935,9 @@ def make_setup(coin, result):
         ),
         "score": result.get(
             "score"
+        ),
+        "raw_score": result.get(
+            "raw_score"
         ),
         "stage": result.get(
             "stage"
@@ -983,7 +1009,7 @@ def build_bingx_message():
         }
 
     return "\n".join([
-        "🟠 <b>TRADEMIND 4.2 — BINGX</b>",
+        "🟠 <b>TRADEMIND 4.3 — BINGX</b>",
         "",
         f"Режим: "
         f"<b>{bingx_mode_text()}</b>",
@@ -1712,7 +1738,7 @@ def build_chart_caption(
     )
 
     lines = [
-        f"📈 <b>TRADEMIND 4.2 — {coin}</b>",
+        f"📈 <b>TRADEMIND 4.3 — {coin}</b>",
         "",
         f"💰 Цена: "
         f"<b>{format_price(result.get('price'))}</b>",
@@ -1741,6 +1767,10 @@ def build_chart_caption(
     if stage == "READY":
         lines += [
             "",
+            "🚨 <b>ГОТОВЫЙ СЕТАП</b>",
+            "",
+            "🟢 <b>МОЖНО ВХОДИТЬ</b>",
+            "",
             f"Entry: "
             f"<b>{format_price(result.get('entry'))}</b>",
             f"SL: "
@@ -1750,7 +1780,6 @@ def build_chart_caption(
             f"RR: "
             f"<b>{format_rr(result.get('rr'))}</b>",
             "",
-            "🟢 <b>МОЖНО ВХОДИТЬ</b>",
             "🎯 Один TP.",
             "📐 RR = 1:2.",
         ]
@@ -1765,7 +1794,7 @@ def build_chart_caption(
             "✅ Sweep",
             "✅ 15M confirmation",
             "⏳ Ждём 5M trigger",
-            "❌ Вход запрещён",
+            "❌ <b>ВХОД ЗАПРЕЩЁН</b>",
         ]
 
     elif stage == "SWEPT":
@@ -1773,7 +1802,7 @@ def build_chart_caption(
             "",
             "💧 Sweep обнаружен",
             "⏳ Ждём 15M confirmation",
-            "❌ Вход запрещён",
+            "❌ <b>ВХОД ЗАПРЕЩЁН</b>",
         ]
 
     else:
@@ -1898,7 +1927,7 @@ async def start(
 
     await update.message.reply_text(
         "\n".join([
-            "🤖 <b>TRADEMIND 4.2</b>",
+            "🤖 <b>TRADEMIND 4.3</b>",
             "",
             "Мониторинг:",
             "BTC • ETH • SOL • BNB • XRP",
@@ -1917,6 +1946,7 @@ async def start(
             "❌ Нет подтверждения → нет входа",
             "🎯 Только один TP",
             "📐 RR = 1:2",
+            "⚠️ Ликвидность 1.5–2R снижает Score",
             "",
             f"{bingx_mode_text()}",
         ]),
@@ -2095,7 +2125,7 @@ async def status_command(
     state = load_state()
 
     lines = [
-        "📊 <b>TRADEMIND 4.2 — СТАТУС</b>",
+        "📊 <b>TRADEMIND 4.3 — СТАТУС</b>",
         "",
         f"BingX mode: "
         f"<b>{bingx.mode()}</b>",
@@ -2467,7 +2497,7 @@ async def journal_command(
 ):
     await update.message.reply_text(
         "\n".join([
-            "📒 <b>TRADEMIND 4.2 — ЖУРНАЛ</b>",
+            "📒 <b>TRADEMIND 4.3 — ЖУРНАЛ</b>",
             "",
             "Мониторинг сигналов подключён.",
             "",
@@ -2491,7 +2521,7 @@ async def journal_command(
 
 async def monitor(application):
     print(
-        "TradeMind 4.2 monitor started."
+        "TradeMind 4.3 monitor started."
     )
 
     print(
@@ -2560,34 +2590,13 @@ async def monitor(application):
 
                             save_state(state)
 
-                            text = "\n".join([
-                                "🚨 <b>TRADEMIND 4.2 — СЕТАП</b>",
-                                "",
-                                f"💠 Монета: <b>{coin}</b>",
-                                f"📐 Направление: <b>{setup.get('direction')}</b>",
-                                f"⭐ Score: <b>{score}/100</b>",
-                                "",
-                                f"Entry: <b>{format_price(setup.get('entry'))}</b>",
-                                f"SL: <b>{format_price(setup.get('sl'))}</b>",
-                                f"TP: <b>{format_price(setup.get('tp'))}</b>",
-                                f"RR: <b>{format_rr(setup.get('rr'))}</b>",
-                                "",
-                                "⚪ <b>OFF</b> — только сигнал, сделка НЕ открыта.",
-                                "",
-                                "1H → Major Liquidity → Sweep → 15M → 5M",
-                                "🎯 Один TP.",
-                                "📐 RR = 1:2.",
-                            ])
-
-                            if setup.get("liquidity_warning"):
-                                text += (
-                                    "\n⚠️ "
-                                    f"{setup.get('liquidity_warning')}"
-                                )
-
                             await broadcast(
                                 application,
-                                text,
+                                build_ready_message(
+                                    coin,
+                                    result,
+                                    mode=True,
+                                ),
                             )
 
                         # ======================================
@@ -2624,32 +2633,23 @@ async def monitor(application):
 
                                 save_state(state)
 
-                                text = "\n".join([
-                                    "🚨 <b>TRADEMIND 4.2 — СЕТАП</b>",
-                                    "",
-                                    f"💠 Монета: <b>{coin}</b>",
-                                    f"📐 Направление: <b>{setup.get('direction')}</b>",
-                                    f"⭐ Score: <b>{score}/100</b>",
-                                    "",
-                                    f"Entry: <b>{format_price(setup.get('entry'))}</b>",
-                                    f"SL: <b>{format_price(setup.get('sl'))}</b>",
-                                    f"TP: <b>{format_price(setup.get('tp'))}</b>",
-                                    f"RR: <b>{format_rr(setup.get('rr'))}</b>",
-                                    "",
-                                    "🟠 <b>CONFIRM</b>",
-                                    "",
-                                    "Setup сохранён.",
-                                    "Для исполнения:",
-                                    "<code>/execute</code>",
-                                    "",
-                                    "❌ Автоматически сделка не открывается.",
-                                ])
+                                text = build_ready_message(
+                                    coin,
+                                    result,
+                                )
 
-                                if setup.get("liquidity_warning"):
-                                    text += (
-                                        "\n⚠️ "
-                                        f"{setup.get('liquidity_warning')}"
-                                    )
+                                text += (
+                                    "\n\n"
+                                    "🟠 <b>CONFIRM</b>"
+                                    "\n"
+                                    "Setup сохранён."
+                                    "\n"
+                                    "Для исполнения:"
+                                    "\n"
+                                    "<code>/execute</code>"
+                                    "\n\n"
+                                    "❌ Автоматически сделка не открывается."
+                                )
 
                                 await broadcast(
                                     application,
@@ -2717,20 +2717,11 @@ async def monitor(application):
 
                                 save_state(state)
 
-                                text = "\n".join([
-                                    "🚨 <b>TRADEMIND 4.2 — СЕТАП</b>",
-                                    "",
-                                    f"💠 Монета: <b>{coin}</b>",
-                                    f"📐 Направление: <b>{setup.get('direction')}</b>",
-                                    f"⭐ Score: <b>{score}/100</b>",
-                                    "",
-                                    f"Entry: <b>{format_price(setup.get('entry'))}</b>",
-                                    f"SL: <b>{format_price(setup.get('sl'))}</b>",
-                                    f"TP: <b>{format_price(setup.get('tp'))}</b>",
-                                    f"RR: <b>{format_rr(setup.get('rr'))}</b>",
-                                    "",
-                                    bingx_mode_text(),
-                                ])
+                                text = build_ready_message(
+                                    coin,
+                                    result,
+                                    mode=True,
+                                )
 
                                 await broadcast(
                                     application,
@@ -2787,14 +2778,14 @@ async def monitor(application):
                         await broadcast(
                             application,
                             "\n".join([
-                                "🔎 <b>TRADEMIND 4.2 — SWEEP</b>",
+                                "🔎 <b>TRADEMIND 4.3 — SWEEP</b>",
                                 "",
                                 f"💠 {coin}",
                                 f"📐 {direction or '—'}",
                                 "",
                                 "💧 Крупная ликвидность снята.",
                                 "⏳ Ждём 15M confirmation.",
-                                "❌ Вход пока запрещён.",
+                                "❌ <b>ВХОД ПОКА ЗАПРЕЩЁН</b>",
                             ]),
                         )
 
@@ -2826,7 +2817,7 @@ async def monitor(application):
                         await broadcast(
                             application,
                             "\n".join([
-                                "🟡 <b>TRADEMIND 4.2 — 15M CONFIRMATION</b>",
+                                "🟡 <b>TRADEMIND 4.3 — 15M CONFIRMATION</b>",
                                 "",
                                 f"💠 {coin}",
                                 f"📐 {direction or '—'}",
@@ -2834,7 +2825,7 @@ async def monitor(application):
                                 "✅ Sweep",
                                 "✅ 15M confirmation",
                                 "⏳ Ждём 5M trigger.",
-                                "❌ Вход пока запрещён.",
+                                "❌ <b>ВХОД ПОКА ЗАПРЕЩЁН</b>",
                             ]),
                         )
 
@@ -2881,7 +2872,7 @@ async def callbacks(
         if data == "start":
             await query.edit_message_text(
                 "\n".join([
-                    "🤖 <b>TRADEMIND 4.2</b>",
+                    "🤖 <b>TRADEMIND 4.3</b>",
                     "",
                     "9 монет • сканирование "
                     f"{CHECK_INTERVAL} секунд",
@@ -2943,7 +2934,7 @@ async def callbacks(
 
         if data == "chart":
             await query.edit_message_text(
-                "📈 <b>TRADEMIND 4.2 — ГРАФИК</b>\n\n"
+                "📈 <b>TRADEMIND 4.3 — ГРАФИК</b>\n\n"
                 "Выбери монету:",
                 parse_mode="HTML",
                 reply_markup=chart_keyboard(),
@@ -3000,7 +2991,7 @@ async def callbacks(
             state = load_state()
 
             text = "\n".join([
-                "📊 <b>TRADEMIND 4.2 — STATUS</b>",
+                "📊 <b>TRADEMIND 4.3 — STATUS</b>",
                 "",
                 f"Active: "
                 f"<b>{state.get('active_coin') or 'нет'}</b>",
@@ -3094,7 +3085,7 @@ async def callbacks(
         if data == "journal":
             await query.edit_message_text(
                 "\n".join([
-                    "📒 <b>TRADEMIND 4.2 — ЖУРНАЛ</b>",
+                    "📒 <b>TRADEMIND 4.3 — ЖУРНАЛ</b>",
                     "",
                     "Система журнала подключена.",
                     "",
@@ -3206,7 +3197,7 @@ def main():
     )
 
     print(
-        "TradeMind 4.2 started."
+        "TradeMind 4.3 started."
     )
 
     print(
