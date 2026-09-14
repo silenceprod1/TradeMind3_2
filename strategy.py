@@ -1,13 +1,19 @@
 """
-TradeMind 5.5
+TradeMind 5.6
 
-D1 -> W1 fallback -> 1H synchronization
--> Major Liquidity -> Fresh Sweep
--> 15M confirmation AFTER sweep
+D1 trend
+-> W1 fallback
+-> 1H synchronization
+-> Major Liquidity
+-> Fresh Sweep
+-> NEW 15M confirmation
 -> 5M V/L reversal
 -> >=1/3 recovery
--> 5M FVG inversion AFTER reversal
--> Entry -> SL behind sweep -> Structural TP.
+-> FIRST valid 5M trigger
+-> NEW 5M FVG inversion
+-> Entry
+-> SL behind sweep
+-> Structural TP from correction origin
 
 No exchange/network code.
 """
@@ -16,7 +22,7 @@ from dataclasses import dataclass, asdict
 from typing import Any, Optional
 
 
-STRATEGY_VERSION = "5.5"
+STRATEGY_VERSION = "5.6"
 
 MIN_SCORE_READY = 80
 
@@ -90,12 +96,12 @@ def _time(c):
 
 
 def _pct(a, b):
-    if not b:
+    if b is None or float(b) == 0:
         return 999
 
     return abs(
         float(a) - float(b)
-    ) / float(b) * 100
+    ) / abs(float(b)) * 100
 
 
 def _body_ratio(c):
@@ -117,20 +123,22 @@ def _bull(c):
     o = _v(c, "open")
     cl = _v(c, "close")
 
-    if o is None or cl is None:
-        return False
-
-    return cl > o
+    return (
+        o is not None
+        and cl is not None
+        and cl > o
+    )
 
 
 def _bear(c):
     o = _v(c, "open")
     cl = _v(c, "close")
 
-    if o is None or cl is None:
-        return False
-
-    return cl < o
+    return (
+        o is not None
+        and cl is not None
+        and cl < o
+    )
 
 
 def _time_after(a, b):
@@ -139,6 +147,16 @@ def _time_after(a, b):
 
     try:
         return float(a) > float(b)
+    except Exception:
+        return False
+
+
+def _time_at_or_after(a, b):
+    if a is None or b is None:
+        return False
+
+    try:
+        return float(a) >= float(b)
     except Exception:
         return False
 
@@ -155,6 +173,9 @@ def _swings(candles, radius=SWING_RADIUS):
         return out
 
     n = len(candles)
+
+    if n < radius * 2 + 1:
+        return out
 
     for i in range(
         radius,
@@ -200,9 +221,7 @@ def _swings(candles, radius=SWING_RADIUS):
             x is not None
             for x in highs
         ):
-
             if h == max(highs):
-
                 out.append({
                     "type": "HIGH",
                     "price": h,
@@ -216,9 +235,7 @@ def _swings(candles, radius=SWING_RADIUS):
             x is not None
             for x in lows
         ):
-
             if l == min(lows):
-
                 out.append({
                     "type": "LOW",
                     "price": l,
@@ -228,11 +245,15 @@ def _swings(candles, radius=SWING_RADIUS):
                     ),
                 })
 
+    out.sort(
+        key=lambda x: x["index"]
+    )
+
     return out
 
 
 # ============================================================
-# MARKET STRUCTURE — 5.5
+# MARKET STRUCTURE 5.6
 # ============================================================
 
 def market_structure(candles):
@@ -256,13 +277,11 @@ def market_structure(candles):
         if x["type"] == "LOW"
     ]
 
-    # Нужно достаточно подтверждённых свингов.
-    if len(highs) < 3 or len(lows) < 3:
+    if len(highs) < 2 or len(lows) < 2:
         return "neutral"
 
-    # Берём последние 3 подтверждённых High / Low.
-    recent_highs = highs[-3:]
-    recent_lows = lows[-3:]
+    recent_highs = highs[-4:]
+    recent_lows = lows[-4:]
 
     high_prices = [
         x["price"]
@@ -314,34 +333,60 @@ def market_structure(candles):
         < low_prices[i - 1]
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # BULLISH
-    # ========================================================
+    # --------------------------------------------------------
 
-    bullish_structure = (
-        higher_highs >= 2
-        and
-        higher_lows >= 1
-        and
-        lower_highs == 0
-    )
+    bullish_score = 0
 
-    if bullish_structure:
+    if higher_highs >= 2:
+        bullish_score += 2
+    elif higher_highs >= 1:
+        bullish_score += 1
+
+    if higher_lows >= 2:
+        bullish_score += 2
+    elif higher_lows >= 1:
+        bullish_score += 1
+
+    if lower_highs == 0:
+        bullish_score += 1
+
+    # --------------------------------------------------------
+    # BEARISH
+    # --------------------------------------------------------
+
+    bearish_score = 0
+
+    if lower_highs >= 2:
+        bearish_score += 2
+    elif lower_highs >= 1:
+        bearish_score += 1
+
+    if lower_lows >= 2:
+        bearish_score += 2
+    elif lower_lows >= 1:
+        bearish_score += 1
+
+    if higher_lows == 0:
+        bearish_score += 1
+
+    # --------------------------------------------------------
+    # FINAL STRUCTURE
+    # --------------------------------------------------------
+
+    if (
+        bullish_score >= 4
+        and
+        bullish_score > bearish_score
+    ):
         return "bullish"
 
-    # ========================================================
-    # BEARISH
-    # ========================================================
-
-    bearish_structure = (
-        lower_highs >= 2
+    if (
+        bearish_score >= 4
         and
-        lower_lows >= 1
-        and
-        higher_lows == 0
-    )
-
-    if bearish_structure:
+        bearish_score > bullish_score
+    ):
         return "bearish"
 
     return "neutral"
@@ -391,10 +436,13 @@ def _cluster_levels(raw):
 
         for g in groups:
 
-            if _pct(
-                x["price"],
-                g["price"]
-            ) <= LEVEL_CLUSTER_PCT:
+            if (
+                _pct(
+                    x["price"],
+                    g["price"]
+                )
+                <= LEVEL_CLUSTER_PCT
+            ):
 
                 g["members"].append(x)
 
@@ -435,16 +483,20 @@ def _cluster_levels(raw):
 
         if _CURRENT_CANDLES:
 
+            distance_from_end = (
+                len(_CURRENT_CANDLES)
+                - 1
+                - last_idx
+            )
+
             recency = max(
                 0,
                 1 -
                 (
-                    len(_CURRENT_CANDLES)
-                    - 1
-                    - last_idx
+                    distance_from_end
+                    /
+                    LIQUIDITY_LOOKBACK
                 )
-                /
-                LIQUIDITY_LOOKBACK
             )
 
         else:
@@ -701,30 +753,64 @@ def imbalance_context(
 
 
 # ============================================================
-# 5M FVG INVERSION
+# 5M FVG INVERSION 5.6
 # ============================================================
 
 def fvg_inversion_5m(
     candles_5m,
     direction,
-    after_time=None
+    after_time=None,
+    after_index=None
 ):
 
     if not candles_5m:
         return False, None
 
+    # Work only with recent candles.
+    start = max(
+        0,
+        len(candles_5m) - 24
+    )
+
     fvgs = find_imbalances(
-        candles_5m[-20:]
+        candles_5m[start:]
     )
 
     if not fvgs:
         return False, None
 
-    recent_candles = candles_5m[-12:]
+    # Convert local FVG index to absolute index.
+    for f in fvgs:
+        f["index"] += start
 
-    if direction == "LONG":
+    recent_candles = candles_5m[
+        max(
+            0,
+            len(candles_5m) - 15
+        ):
+    ]
 
-        for f in reversed(fvgs):
+    for f in reversed(fvgs):
+
+        # FVG itself must appear after reversal.
+        if (
+            after_index is not None
+            and
+            f["index"] <= after_index
+        ):
+            continue
+
+        if (
+            after_time is not None
+            and
+            not _time_after(
+                f["time"],
+                after_time
+            )
+        ):
+            continue
+
+        if direction == "LONG":
 
             if f["type"] != "BEARISH":
                 continue
@@ -748,6 +834,13 @@ def fvg_inversion_5m(
                     "close"
                 )
 
+                c_index = (
+                    candles_5m.index(c)
+                )
+
+                if c_index <= f["index"]:
+                    continue
+
                 if (
                     cl is not None
                     and
@@ -758,9 +851,7 @@ def fvg_inversion_5m(
 
                     return True, f
 
-    else:
-
-        for f in reversed(fvgs):
+        else:
 
             if f["type"] != "BULLISH":
                 continue
@@ -783,6 +874,13 @@ def fvg_inversion_5m(
                     c,
                     "close"
                 )
+
+                c_index = (
+                    candles_5m.index(c)
+                )
+
+                if c_index <= f["index"]:
+                    continue
 
                 if (
                     cl is not None
@@ -840,9 +938,9 @@ def detect_fresh_sweep(
 
             p = level["price"]
 
-            # =================================================
+            # ------------------------------------------------
             # LONG SWEEP
-            # =================================================
+            # ------------------------------------------------
 
             if level["type"] == "LOW":
 
@@ -908,9 +1006,9 @@ def detect_fresh_sweep(
                             ),
                     }
 
-            # =================================================
+            # ------------------------------------------------
             # SHORT SWEEP
-            # =================================================
+            # ------------------------------------------------
 
             if level["type"] == "HIGH":
 
@@ -1020,9 +1118,9 @@ def _confirm_15m(
         ):
             continue
 
-        # =====================================================
+        # ----------------------------------------------------
         # LONG
-        # =====================================================
+        # ----------------------------------------------------
 
         if direction == "LONG":
 
@@ -1036,9 +1134,9 @@ def _confirm_15m(
 
                 return True, c_time
 
-        # =====================================================
+        # ----------------------------------------------------
         # SHORT
-        # =====================================================
+        # ----------------------------------------------------
 
         else:
 
@@ -1056,7 +1154,7 @@ def _confirm_15m(
 
 
 # ============================================================
-# 5M V / L REVERSAL
+# 5M V / L REVERSAL 5.6
 # ============================================================
 
 def _reversal_5m(
@@ -1081,10 +1179,16 @@ def _reversal_5m(
     if sweep_index >= len(candles) - 1:
         return None
 
+    end_index = min(
+        len(candles),
+        sweep_index
+        + 1
+        + MAX_REVERSAL_CANDLES
+    )
+
     after = candles[
         sweep_index + 1:
-        sweep_index + 1
-        + MAX_REVERSAL_CANDLES
+        end_index
     ]
 
     if not after:
@@ -1105,84 +1209,93 @@ def _reversal_5m(
         if manipulation <= 0:
             return None
 
-        recovery_values = []
+        best_recovery = 0
+        best_index = None
 
-        for c in after:
+        for offset, c in enumerate(after):
 
             cl = _v(
                 c,
                 "close"
             )
 
-            if cl is not None:
+            if cl is None:
+                continue
 
-                recovery_values.append(
-                    cl - extreme
+            recovery = cl - extreme
+
+            ratio = (
+                recovery
+                /
+                manipulation
+            )
+
+            if (
+                ratio >= MIN_RECOVERY_RATIO
+                and
+                cl > level
+                and
+                _bull(c)
+                and
+                _body_ratio(c)
+                >= MIN_REVERSAL_BODY_RATIO
+            ):
+
+                best_recovery = recovery
+                best_index = (
+                    sweep_index
+                    + 1
+                    + offset
                 )
 
-        if not recovery_values:
-            return None
+                return {
 
-        recovery = max(
-            recovery_values
-        )
+                    "ok": True,
 
-        ratio = (
-            recovery
-            /
-            manipulation
-        )
+                    "recovery_ratio":
+                        ratio,
 
-        trigger = after[-1]
+                    "candle_time":
+                        _time(c),
 
-        last_close = _v(
-            trigger,
-            "close"
-        )
+                    "manipulation":
+                        manipulation,
 
-        ok = (
-            ratio >= MIN_RECOVERY_RATIO
-            and
-            last_close is not None
-            and
-            last_close > level
-            and
-            _bull(trigger)
-        )
+                    "recovery":
+                        recovery,
+
+                    "trigger_index":
+                        best_index,
+
+                    "candles_after_sweep":
+                        offset + 1,
+                }
+
+        return None
 
     # ========================================================
     # SHORT
     # ========================================================
 
-    else:
+    manipulation = (
+        extreme - level
+    )
 
-        manipulation = (
-            extreme - level
+    if manipulation <= 0:
+        return None
+
+    for offset, c in enumerate(after):
+
+        cl = _v(
+            c,
+            "close"
         )
 
-        if manipulation <= 0:
-            return None
+        if cl is None:
+            continue
 
-        recovery_values = []
-
-        for c in after:
-
-            cl = _v(
-                c,
-                "close"
-            )
-
-            if cl is not None:
-
-                recovery_values.append(
-                    extreme - cl
-                )
-
-        if not recovery_values:
-            return None
-
-        recovery = max(
-            recovery_values
+        recovery = (
+            extreme - cl
         )
 
         ratio = (
@@ -1191,65 +1304,59 @@ def _reversal_5m(
             manipulation
         )
 
-        trigger = after[-1]
-
-        last_close = _v(
-            trigger,
-            "close"
-        )
-
-        ok = (
+        if (
             ratio >= MIN_RECOVERY_RATIO
             and
-            last_close is not None
+            cl < level
             and
-            last_close < level
+            _bear(c)
             and
-            _bear(trigger)
-        )
+            _body_ratio(c)
+            >= MIN_REVERSAL_BODY_RATIO
+        ):
 
-    if not ok:
-        return None
+            trigger_index = (
+                sweep_index
+                + 1
+                + offset
+            )
 
-    if (
-        _body_ratio(trigger)
-        <
-        MIN_REVERSAL_BODY_RATIO
-    ):
-        return None
+            return {
 
-    return {
+                "ok": True,
 
-        "ok": True,
+                "recovery_ratio":
+                    ratio,
 
-        "recovery_ratio": ratio,
+                "candle_time":
+                    _time(c),
 
-        "candle_time":
-            _time(trigger),
+                "manipulation":
+                    manipulation,
 
-        "manipulation":
-            manipulation,
+                "recovery":
+                    recovery,
 
-        "recovery":
-            recovery,
+                "trigger_index":
+                    trigger_index,
 
-        "trigger_index":
-            candles.index(trigger),
+                "candles_after_sweep":
+                    offset + 1,
+            }
 
-        "candles_after_sweep":
-            len(after),
-    }
+    return None
 
 
 # ============================================================
-# STRUCTURAL TARGET
+# STRUCTURAL TARGET 5.6
 # ============================================================
 
 def structural_target(
     candles_1h,
     direction,
     entry,
-    sweep_index=None
+    sweep_index=None,
+    sweep_time=None
 ):
 
     if not candles_1h:
@@ -1261,9 +1368,80 @@ def structural_target(
 
     swings = _swings(candles)
 
-    # ========================================================
-    # LONG
-    # ========================================================
+    if not swings:
+        return None
+
+    # --------------------------------------------------------
+    # Map 5M sweep to 1H time when possible.
+    # --------------------------------------------------------
+
+    correction_origin = None
+
+    if sweep_time is not None:
+
+        try:
+
+            previous_swings = [
+                x
+                for x in swings
+                if (
+                    x["time"] is not None
+                    and
+                    float(x["time"])
+                    < float(sweep_time)
+                )
+            ]
+
+        except Exception:
+
+            previous_swings = []
+
+        if direction == "LONG":
+
+            # We want the latest HIGH before
+            # the downside correction/sweep.
+            candidates = [
+                x
+                for x in previous_swings
+                if (
+                    x["type"] == "HIGH"
+                    and
+                    x["price"] > entry
+                )
+            ]
+
+            if candidates:
+                correction_origin = candidates[-1]
+
+        else:
+
+            # We want the latest LOW before
+            # the upside correction/sweep.
+            candidates = [
+                x
+                for x in previous_swings
+                if (
+                    x["type"] == "LOW"
+                    and
+                    x["price"] < entry
+                )
+            ]
+
+            if candidates:
+                correction_origin = candidates[-1]
+
+    # --------------------------------------------------------
+    # If time mapping is unavailable,
+    # use structural swings before the current move.
+    # --------------------------------------------------------
+
+    if correction_origin is not None:
+
+        return correction_origin["price"]
+
+    # --------------------------------------------------------
+    # LONG fallback
+    # --------------------------------------------------------
 
     if direction == "LONG":
 
@@ -1280,20 +1458,11 @@ def structural_target(
         if not highs:
             return None
 
-        valid = [
-            x
-            for x in highs
-            if x["price"] > entry
-        ]
-
-        if valid:
-            return valid[-1]["price"]
-
         return highs[-1]["price"]
 
-    # ========================================================
-    # SHORT
-    # ========================================================
+    # --------------------------------------------------------
+    # SHORT fallback
+    # --------------------------------------------------------
 
     lows = [
         x
@@ -1307,15 +1476,6 @@ def structural_target(
 
     if not lows:
         return None
-
-    valid = [
-        x
-        for x in lows
-        if x["price"] < entry
-    ]
-
-    if valid:
-        return valid[-1]["price"]
 
     return lows[-1]["price"]
 
@@ -1748,6 +1908,10 @@ def analyze(
             after_time=
                 rev.get(
                     "candle_time"
+                ),
+            after_index=
+                rev.get(
+                    "trigger_index"
                 )
         )
     )
@@ -1880,6 +2044,10 @@ def analyze(
         sweep_index=
             sweep.get(
                 "index_5m"
+            ),
+        sweep_time=
+            sweep.get(
+                "open_time"
             )
     )
 
@@ -2184,7 +2352,7 @@ def analyze(
             score=score,
 
             reason=(
-                "Full TradeMind 5.5 "
+                "Full TradeMind 5.6 "
                 "confirmation."
             ),
 
@@ -2200,7 +2368,8 @@ def analyze(
 
             tp_reason=(
                 "Structural target: "
-                "local swing high/low."
+                "local swing from "
+                "correction origin."
             ),
 
             liquidity_type=
