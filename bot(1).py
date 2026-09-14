@@ -35,12 +35,23 @@ from strategy import analyze
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-CHECK_INTERVAL = 30
+# Сканирование каждые 15 секунд
+CHECK_INTERVAL = 15
+
+# =========================================================
+# 9 МОНЕТ
+# =========================================================
 
 COINS = {
     "BTC": "BTCUSDT",
     "ETH": "ETHUSDT",
     "SOL": "SOLUSDT",
+    "BNB": "BNBUSDT",
+    "XRP": "XRPUSDT",
+    "HYPE": "HYPEUSDT",
+    "DOGE": "DOGEUSDT",
+    "LINK": "LINKUSDT",
+    "SUI": "SUIUSDT",
 }
 
 SUBSCRIBERS_FILE = "subscribers.json"
@@ -72,6 +83,7 @@ def save_json(filename, data):
                 ensure_ascii=False,
                 indent=2
             )
+
     except Exception as e:
         print(f"JSON SAVE ERROR: {e}")
 
@@ -205,6 +217,34 @@ def chart_keyboard():
         ],
         [
             InlineKeyboardButton(
+                "🟡 BNB",
+                callback_data="chart_BNB"
+            ),
+            InlineKeyboardButton(
+                "💠 XRP",
+                callback_data="chart_XRP"
+            ),
+            InlineKeyboardButton(
+                "🔥 HYPE",
+                callback_data="chart_HYPE"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🐶 DOGE",
+                callback_data="chart_DOGE"
+            ),
+            InlineKeyboardButton(
+                "🔗 LINK",
+                callback_data="chart_LINK"
+            ),
+            InlineKeyboardButton(
+                "💧 SUI",
+                callback_data="chart_SUI"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
                 "⬅️ Главное меню",
                 callback_data="start"
             ),
@@ -226,6 +266,34 @@ def chart_coin_keyboard(coin):
             InlineKeyboardButton(
                 "◎ SOL",
                 callback_data="chart_SOL"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🟡 BNB",
+                callback_data="chart_BNB"
+            ),
+            InlineKeyboardButton(
+                "💠 XRP",
+                callback_data="chart_XRP"
+            ),
+            InlineKeyboardButton(
+                "🔥 HYPE",
+                callback_data="chart_HYPE"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🐶 DOGE",
+                callback_data="chart_DOGE"
+            ),
+            InlineKeyboardButton(
+                "🔗 LINK",
+                callback_data="chart_LINK"
+            ),
+            InlineKeyboardButton(
+                "💧 SUI",
+                callback_data="chart_SUI"
             ),
         ],
         [
@@ -282,6 +350,7 @@ def format_rr(rr):
 
     try:
         return f"1:{float(rr):.2f}"
+
     except Exception:
         return "N/A"
 
@@ -303,6 +372,7 @@ def format_levels(levels, price):
             level_price = float(
                 level.get("price")
             )
+
         except Exception:
             continue
 
@@ -317,6 +387,7 @@ def format_levels(levels, price):
                 / price
                 * 100
             )
+
         else:
             distance = 0
 
@@ -425,8 +496,7 @@ def build_analysis(symbol):
     )
 
     # -----------------------------------------------------
-    # ВАЖНО:
-    # major_levels передаются прямо в strategy.analyze()
+    # Анализ
     # -----------------------------------------------------
 
     result = analyze(
@@ -511,7 +581,6 @@ def find_first_ready(results):
 
 # =========================================================
 # SIMPLE PNG ENGINE
-# Без matplotlib / Pillow
 # =========================================================
 
 def png_chunk(chunk_type, data):
@@ -584,6 +653,7 @@ def make_png(width, height, pixels):
 
 
 def new_canvas(width, height, color):
+
     row = bytearray(
         color * width
     )
@@ -926,6 +996,7 @@ def render_chart_png(
                     level.get("price")
                 )
             )
+
         except Exception:
             pass
 
@@ -942,6 +1013,7 @@ def render_chart_png(
                 all_values.append(
                     float(value)
                 )
+
             except Exception:
                 pass
 
@@ -973,6 +1045,8 @@ def render_chart_png(
             + ratio * chart_height
         )
 
+    # GRID
+
     for i in range(1, 8):
 
         y = (
@@ -994,9 +1068,7 @@ def render_chart_png(
             1
         )
 
-    # -----------------------------------------------------
     # MAJOR LIQUIDITY
-    # -----------------------------------------------------
 
     for level in levels:
 
@@ -1034,9 +1106,7 @@ def render_chart_png(
             2
         )
 
-    # -----------------------------------------------------
     # CANDLES
-    # -----------------------------------------------------
 
     count = len(
         valid_candles
@@ -1122,9 +1192,7 @@ def render_chart_png(
             color
         )
 
-    # -----------------------------------------------------
     # CURRENT PRICE
-    # -----------------------------------------------------
 
     if price is not None:
 
@@ -1147,9 +1215,7 @@ def render_chart_png(
         except Exception:
             pass
 
-    # -----------------------------------------------------
     # SWEEP
-    # -----------------------------------------------------
 
     if sweep:
 
@@ -1181,9 +1247,7 @@ def render_chart_png(
         except Exception:
             pass
 
-    # -----------------------------------------------------
     # ENTRY / SL / TP
-    # -----------------------------------------------------
 
     setup_lines = [
         (
@@ -1410,6 +1474,7 @@ def build_chart_caption(
         ])
 
         if tp_reason:
+
             lines.append(
                 f"🎯 TP: {tp_reason}"
             )
@@ -1490,11 +1555,7 @@ def build_market_message(results):
         ""
     ]
 
-    for coin in [
-        "BTC",
-        "ETH",
-        "SOL"
-    ]:
+    for coin in COINS:
 
         result = results.get(
             coin
@@ -1567,11 +1628,7 @@ def build_levels_message(results):
         ""
     ]
 
-    for coin in [
-        "BTC",
-        "ETH",
-        "SOL"
-    ]:
+    for coin in COINS:
 
         result = results.get(
             coin
@@ -1774,11 +1831,7 @@ def build_search_message(results):
         ""
     ])
 
-    for coin in [
-        "BTC",
-        "ETH",
-        "SOL"
-    ]:
+    for coin in COINS:
 
         result = results.get(
             coin
@@ -1831,16 +1884,23 @@ async def start(
 ):
 
     text = (
-        "🤖 <b>TRADEMIND 3.8</b>\n\n"
+        "🤖 <b>TRADEMIND 3.9</b>\n\n"
         "Мониторинг:\n"
         "• BTC\n"
         "• ETH\n"
-        "• SOL\n\n"
+        "• SOL\n"
+        "• BNB\n"
+        "• XRP\n"
+        "• HYPE\n"
+        "• DOGE\n"
+        "• LINK\n"
+        "• SUI\n\n"
+        "Сканирование: <b>каждые 15 секунд</b>\n\n"
         "Стратегия:\n"
         "1H → Major Liquidity → Sweep → 15M → 5M\n\n"
         "TP:\n"
-        "• до 2R — перед ближайшей встречной ликвидностью\n"
-        "• дальше 2R — 2R\n\n"
+        "• ближайшая встречная ликвидность ограничивает TP\n"
+        "• если ликвидность дальше 2R — TP = 2R\n\n"
         "Вход только после полного подтверждения."
     )
 
@@ -1974,7 +2034,9 @@ async def subscribe_command(
 
         text = (
             "🔔 <b>Уведомления включены.</b>\n\n"
-            "Отслеживаю BTC, ETH и SOL."
+            "Отслеживаю 9 монет:\n"
+            "BTC • ETH • SOL • BNB • XRP\n"
+            "HYPE • DOGE • LINK • SUI"
         )
 
     else:
@@ -2065,7 +2127,9 @@ async def status_command(
             "📊 <b>TRADEMIND — СТАТУС</b>\n\n"
             "🟢 Активного входа нет.\n\n"
             "Мониторинг:\n"
-            "BTC • ETH • SOL"
+            "BTC • ETH • SOL • BNB • XRP\n"
+            "HYPE • DOGE • LINK • SUI\n\n"
+            "Интервал: <b>15 секунд</b>"
         )
 
     await update.message.reply_text(
@@ -2089,6 +2153,8 @@ async def journal_command(
         "Автоматический журнал сделок "
         "подключим следующим этапом.\n\n"
         "Будем записывать:\n"
+        "• Coin\n"
+        "• Direction\n"
         "• Entry\n"
         "• SL\n"
         "• TP\n"
@@ -2149,161 +2215,178 @@ async def monitor(
         "TradeMind monitor started."
     )
 
+    print(
+        f"Scan interval: {CHECK_INTERVAL} seconds"
+    )
+
+    print(
+        "Coins:",
+        ", ".join(COINS.keys())
+    )
+
     while True:
+
+        cycle_start = asyncio.get_running_loop().time()
 
         try:
 
             state = load_state()
 
             # -------------------------------------------------
-            # АКТИВНЫЙ СЕТАП
+            # ВСЕГДА СКАНИРУЕМ ВСЕ 9 МОНЕТ
             # -------------------------------------------------
 
-            if state.get("active_coin"):
-
-                await asyncio.sleep(
-                    CHECK_INTERVAL
-                )
-
-                continue
-
             results = scan_all_coins()
+
+            active_coin = state.get(
+                "active_coin"
+            )
 
             # -------------------------------------------------
             # READY
             # -------------------------------------------------
+            #
+            # Если уже есть активная сделка/сетап,
+            # новый READY не открываем.
+            #
+            # Но остальные монеты всё равно продолжают
+            # сканироваться каждые 15 секунд.
+            # -------------------------------------------------
 
-            ready = find_first_ready(
-                results
-            )
+            if not active_coin:
 
-            if ready:
-
-                score, coin, result = ready
-
-                direction = result.get(
-                    "direction"
+                ready = find_first_ready(
+                    results
                 )
 
-                entry = result.get(
-                    "entry"
-                )
+                if ready:
 
-                sl = result.get(
-                    "sl"
-                )
+                    score, coin, result = ready
 
-                tp = result.get(
-                    "tp"
-                )
-
-                rr = result.get(
-                    "rr"
-                )
-
-                tp_reason = result.get(
-                    "tp_reason"
-                )
-
-                sweep_extreme = result.get(
-                    "sweep_extreme"
-                )
-
-                setup_key = (
-                    f"{coin}_"
-                    f"{direction}_"
-                    f"{entry}_"
-                    f"{sl}_"
-                    f"{tp}"
-                )
-
-                if (
-                    state.get(
-                        "active_setup_key"
-                    )
-                    != setup_key
-                ):
-
-                    state.update({
-
-                        "active_coin":
-                            coin,
-
-                        "active_symbol":
-                            result.get(
-                                "symbol"
-                            ),
-
-                        "active_direction":
-                            direction,
-
-                        "active_setup_key":
-                            setup_key,
-
-                        "active_entry":
-                            entry,
-
-                        "active_sl":
-                            sl,
-
-                        "active_tp":
-                            tp,
-
-                        "active_rr":
-                            rr,
-
-                        "active_tp_reason":
-                            tp_reason,
-
-                        "active_sweep_extreme":
-                            sweep_extreme,
-
-                        "active_score":
-                            score,
-
-                        "active_stage":
-                            "READY",
-
-                        "last_alert":
-                            datetime.utcnow().isoformat()
-                    })
-
-                    save_state(
-                        state
+                    direction = result.get(
+                        "direction"
                     )
 
-                    text = (
-                        "🚨 <b>TRADEMIND — МОЖНО ВХОДИТЬ</b>\n\n"
-                        f"💠 Монета: <b>{coin}</b>\n"
-                        f"📐 Направление: <b>{direction}</b>\n"
-                        f"⭐ Score: <b>{score}/100</b>\n\n"
-                        f"Entry: <b>{format_price(entry)}</b>\n"
-                        f"SL: <b>{format_price(sl)}</b>\n"
-                        f"TP: <b>{format_price(tp)}</b>\n"
-                        f"RR: <b>{format_rr(rr)}</b>\n"
+                    entry = result.get(
+                        "entry"
                     )
 
-                    if tp_reason:
+                    sl = result.get(
+                        "sl"
+                    )
 
-                        text += (
-                            f"\n🎯 {tp_reason}\n"
+                    tp = result.get(
+                        "tp"
+                    )
+
+                    rr = result.get(
+                        "rr"
+                    )
+
+                    tp_reason = result.get(
+                        "tp_reason"
+                    )
+
+                    sweep_extreme = result.get(
+                        "sweep_extreme"
+                    )
+
+                    setup_key = (
+                        f"{coin}_"
+                        f"{direction}_"
+                        f"{entry}_"
+                        f"{sl}_"
+                        f"{tp}"
+                    )
+
+                    if (
+                        state.get(
+                            "active_setup_key"
+                        )
+                        != setup_key
+                    ):
+
+                        state.update({
+
+                            "active_coin":
+                                coin,
+
+                            "active_symbol":
+                                result.get(
+                                    "symbol"
+                                ),
+
+                            "active_direction":
+                                direction,
+
+                            "active_setup_key":
+                                setup_key,
+
+                            "active_entry":
+                                entry,
+
+                            "active_sl":
+                                sl,
+
+                            "active_tp":
+                                tp,
+
+                            "active_rr":
+                                rr,
+
+                            "active_tp_reason":
+                                tp_reason,
+
+                            "active_sweep_extreme":
+                                sweep_extreme,
+
+                            "active_score":
+                                score,
+
+                            "active_stage":
+                                "READY",
+
+                            "last_alert":
+                                datetime.utcnow().isoformat()
+                        })
+
+                        save_state(
+                            state
                         )
 
-                    text += (
-                        "\n🔥 Полное подтверждение:\n"
-                        "1H → Sweep → 15M → 5M"
-                    )
+                        text = (
+                            "🚨 <b>TRADEMIND — МОЖНО ВХОДИТЬ</b>\n\n"
+                            f"💠 Монета: <b>{coin}</b>\n"
+                            f"📐 Направление: <b>{direction}</b>\n"
+                            f"⭐ Score: <b>{score}/100</b>\n\n"
+                            f"Entry: <b>{format_price(entry)}</b>\n"
+                            f"SL: <b>{format_price(sl)}</b>\n"
+                            f"TP: <b>{format_price(tp)}</b>\n"
+                            f"RR: <b>{format_rr(rr)}</b>\n"
+                        )
 
-                    await broadcast(
-                        application,
-                        text
-                    )
+                        if sweep_extreme is not None:
 
-                await asyncio.sleep(
-                    CHECK_INTERVAL
-                )
+                            text += (
+                                f"💧 Sweep extreme: "
+                                f"<b>{format_price(sweep_extreme)}</b>\n"
+                            )
 
-                continue
+                        if tp_reason:
+
+                            text += (
+                                f"\n🎯 {tp_reason}\n"
+                            )
+
+                        text += (
+                            "\n🔥 Полное подтверждение:\n"
+                            "1H → Sweep → 15M → 5M"
+                        )
+
+                        await broadcast(
+                            application,
+                            text
+                        )
 
             # -------------------------------------------------
             # SWEEP + 15M CONFIRMATION
@@ -2436,8 +2519,22 @@ async def monitor(
                 f"MONITOR ERROR: {e}"
             )
 
+        # -----------------------------------------------------
+        # РОВНО ПРИМЕРНО КАЖДЫЕ 15 СЕКУНД
+        # -----------------------------------------------------
+
+        elapsed = (
+            asyncio.get_running_loop().time()
+            - cycle_start
+        )
+
+        sleep_time = max(
+            1,
+            CHECK_INTERVAL - elapsed
+        )
+
         await asyncio.sleep(
-            CHECK_INTERVAL
+            sleep_time
         )
 
 
@@ -2463,7 +2560,11 @@ async def callbacks(
     if data == "start":
 
         await query.edit_message_text(
-            "🤖 <b>TRADEMIND 3.8</b>\n\n"
+            "🤖 <b>TRADEMIND 3.9</b>\n\n"
+            "Мониторинг 9 монет:\n"
+            "BTC • ETH • SOL • BNB • XRP\n"
+            "HYPE • DOGE • LINK • SUI\n\n"
+            "Сканирование: <b>каждые 15 секунд</b>\n\n"
             "Выбери действие:",
             parse_mode="HTML",
             reply_markup=main_keyboard()
@@ -2625,7 +2726,9 @@ async def callbacks(
                 f"TP: "
                 f"<b>{format_price(state.get('active_tp'))}</b>\n"
                 f"RR: "
-                f"<b>{format_rr(state.get('active_rr'))}</b>"
+                f"<b>{format_rr(state.get('active_rr'))}</b>\n\n"
+                f"🔄 Сканирование: "
+                f"<b>каждые {CHECK_INTERVAL} сек.</b>"
             )
 
         else:
@@ -2633,7 +2736,10 @@ async def callbacks(
             text = (
                 "📊 <b>СТАТУС</b>\n\n"
                 "🟢 Активного сетапа нет.\n\n"
-                "BTC • ETH • SOL"
+                "Мониторинг:\n"
+                "BTC • ETH • SOL • BNB • XRP\n"
+                "HYPE • DOGE • LINK • SUI\n\n"
+                f"🔄 Интервал: <b>{CHECK_INTERVAL} секунд</b>"
             )
 
         await query.edit_message_text(
@@ -2665,7 +2771,8 @@ async def callbacks(
             )
 
             text = (
-                "🔔 <b>Уведомления включены.</b>"
+                "🔔 <b>Уведомления включены.</b>\n\n"
+                "Отслеживаются 9 монет."
             )
 
         else:
@@ -2754,7 +2861,7 @@ async def set_commands(
 
         BotCommand(
             "market",
-            "Рынок BTC ETH SOL"
+            "Рынок 9 монет"
         ),
 
         BotCommand(
@@ -2918,7 +3025,16 @@ def main():
     )
 
     print(
-        "TradeMind 3.8 started."
+        "TradeMind 3.9 started."
+    )
+
+    print(
+        f"Scan interval: {CHECK_INTERVAL} seconds"
+    )
+
+    print(
+        "Coins:",
+        ", ".join(COINS.keys())
     )
 
     application.run_polling()
