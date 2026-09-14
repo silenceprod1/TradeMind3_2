@@ -1,26 +1,52 @@
-# bingx.py
-# TradeMind — BingX integration v1.0
-#
-# Режимы:
-# OFF     — BingX не используется
-# PAPER   — имитация сделки без реального ордера
-# CONFIRM — подготовка сделки, реальный ордер только после подтверждения
-# AUTO    — автоматическое открытие сделки
-#
-# Переменные окружения:
-# BINGX_MODE=OFF
-# BINGX_API_KEY=...
-# BINGX_SECRET_KEY=...
-# BINGX_ENV=prod-live
-# BINGX_LEVERAGE=5
-# BINGX_RISK_USDT=10
-# BINGX_WORKING_TYPE=MARK_PRICE
+"""
+TradeMind 4.1 — BingX Futures integration
 
+РЕЖИМЫ:
+
+    BINGX_MODE=OFF
+        Только анализ/сигналы.
+        Реальные ордера НЕ отправляются.
+
+    BINGX_MODE=PAPER
+        Виртуальные сделки.
+        Реальные ордера НЕ отправляются.
+
+    BINGX_MODE=CONFIRM
+        Сетап сохраняется.
+        Реальный ордер отправляется только после /execute.
+
+    BINGX_MODE=AUTO
+        Реальные сделки.
+        ВКЛЮЧАТЬ ТОЛЬКО ПОСЛЕ ОТДЕЛЬНОЙ ПРОВЕРКИ.
+
+TradeMind:
+    1H context
+    -> Major Liquidity
+    -> 5M Liquidity Sweep
+    -> 15M Confirmation
+    -> 5M Trigger
+    -> Entry
+    -> SL
+    -> TP = 2R
+
+Риск:
+    BINGX_RISK_USDT
+    По умолчанию $5.
+
+Важно:
+    Leverage не меняет риск по SL.
+    Риск считается:
+        quantity = risk_usdt / abs(entry - sl)
+
+Никогда не выдавай API-ключу право на withdrawals.
+"""
+
+import hashlib
+import hmac
+import json
 import os
 import time
-import hmac
-import hashlib
-import logging
+from decimal import Decimal, ROUND_DOWN
 from urllib.parse import urlencode
 
 import requests
@@ -30,254 +56,305 @@ import requests
 # CONFIG
 # ============================================================
 
-BASE_URL = "https://open-api.bingx.com"
+PRIMARY = "https://open-api.bingx.com"
+FALLBACK = "https://open-api.bingx.pro"
+
+ENV = os.getenv("BINGX_ENV", "prod-live").strip()
+
+MODE = os.getenv("BINGX_MODE", "OFF").strip().upper()
 
 API_KEY = os.getenv("BINGX_API_KEY", "").strip()
 SECRET_KEY = os.getenv("BINGX_SECRET_KEY", "").strip()
 
-MODE = os.getenv("BINGX_MODE", "OFF").strip().upper()
+LEVERAGE = int(os.getenv("BINGX_LEVERAGE", "5"))
 
-ENVIRONMENT = os.getenv("BINGX_ENV", "prod-live").strip()
-
-try:
-    LEVERAGE = int(os.getenv("BINGX_LEVERAGE", "5"))
-except Exception:
-    LEVERAGE = 5
-
-try:
-    RISK_USDT = float(os.getenv("BINGX_RISK_USDT", "10"))
-except Exception:
-    RISK_USDT = 10.0
+RISK_USDT = float(
+    os.getenv("BINGX_RISK_USDT", "5")
+)
 
 WORKING_TYPE = os.getenv(
     "BINGX_WORKING_TYPE",
-    "MARK_PRICE"
+    "MARK_PRICE",
 ).strip().upper()
 
 RECV_WINDOW = 5000
+TIMEOUT = 10
 
-REQUEST_TIMEOUT = 10
+# Безопасность:
+# AUTO не должен случайно включиться из-за неправильного значения.
+ALLOWED_MODES = {
+    "OFF",
+    "PAPER",
+    "CONFIRM",
+    "AUTO",
+}
+
+if MODE not in ALLOWED_MODES:
+    MODE = "OFF"
+
+
+if ENV == "prod-vst":
+    BASE_URLS = [
+        "https://open-api-vst.bingx.com",
+        "https://open-api-vst.bingx.pro",
+    ]
+else:
+    BASE_URLS = [
+        PRIMARY,
+        FALLBACK,
+    ]
 
 
 # ============================================================
-# LOGGING
+# ERRORS
 # ============================================================
 
-logger = logging.getLogger("TradeMind.BingX")
-
-
-# ============================================================
-# SESSION
-# ============================================================
-
-session = requests.Session()
-
-session.headers.update({
-    "User-Agent": "TradeMind/1.0",
-    "Content-Type": "application/json",
-})
+class BingXError(Exception):
+    pass
 
 
 # ============================================================
-# HELPERS
+# BASIC STATUS
 # ============================================================
 
-def mode():
-    """
-    Current BingX mode.
-    """
-    return MODE
+def enabled():
+    return bool(API_KEY and SECRET_KEY)
 
 
 def is_enabled():
-    return MODE in {
-        "PAPER",
-        "CONFIRM",
-        "AUTO",
-    }
+    return enabled()
 
 
 def is_live():
-    return MODE == "AUTO"
+    return MODE == "AUTO" and enabled()
+
+
+def mode():
+    return MODE
 
 
 def config_status():
-    """
-    Human-readable BingX configuration status.
-    """
-
-    key_ok = bool(API_KEY)
-    secret_ok = bool(SECRET_KEY)
-
     return {
         "mode": MODE,
-        "api_key": key_ok,
-        "secret_key": secret_ok,
-        "environment": ENVIRONMENT,
+        "env": ENV,
+        "configured": enabled(),
         "leverage": LEVERAGE,
         "risk_usdt": RISK_USDT,
         "working_type": WORKING_TYPE,
-        "ready": (
-            MODE == "OFF"
-            or (
-                key_ok
-                and secret_ok
-            )
-        ),
     }
 
 
-def _timestamp():
-    return int(time.time() * 1000)
+# ============================================================
+# VALIDATION
+# ============================================================
+
+def _validate_params(params):
+    forbidden = "&=?#\r\n"
+
+    for key, value in params.items():
+        if any(
+            ch in str(value)
+            for ch in forbidden
+        ):
+            raise BingXError(
+                f'Invalid character in parameter "{key}"'
+            )
 
 
-def _sign(params):
-    """
-    BingX HMAC SHA256 signature.
-    """
+def _validate_positive_number(
+    name,
+    value,
+):
+    try:
+        number = float(value)
+    except Exception as exc:
+        raise BingXError(
+            f"{name} должен быть числом."
+        ) from exc
 
-    query_string = urlencode(
+    if number <= 0:
+        raise BingXError(
+            f"{name} должен быть > 0."
+        )
+
+    return number
+
+
+# ============================================================
+# HTTP / SIGNATURE
+# ============================================================
+
+def _signed_request(
+    method,
+    path,
+    params=None,
+):
+    if not enabled():
+        raise BingXError(
+            "BingX API не настроен: "
+            "BINGX_API_KEY/BINGX_SECRET_KEY."
+        )
+
+    params = dict(params or {})
+
+    params["timestamp"] = int(
+        time.time() * 1000
+    )
+
+    params.setdefault(
+        "recvWindow",
+        RECV_WINDOW,
+    )
+
+    _validate_params(params)
+
+    query = urlencode(
         sorted(params.items()),
-        doseq=True
+        doseq=False,
+        safe="",
     )
 
     signature = hmac.new(
-        SECRET_KEY.encode("utf-8"),
-        query_string.encode("utf-8"),
-        hashlib.sha256
+        SECRET_KEY.encode(),
+        query.encode(),
+        hashlib.sha256,
     ).hexdigest()
 
-    return signature
+    signed = (
+        f"{query}&signature={signature}"
+    )
+
+    last_error = None
+
+    for base in BASE_URLS:
+        try:
+            url = (
+                f"{base}{path}?{signed}"
+            )
+
+            headers = {
+                "X-BX-APIKEY": API_KEY,
+                "X-SOURCE-KEY": "BX-AI-SKILL",
+            }
+
+            method_upper = method.upper()
+
+            if method_upper == "GET":
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    timeout=TIMEOUT,
+                )
+
+            elif method_upper == "POST":
+                headers["Content-Type"] = (
+                    "application/x-www-form-urlencoded"
+                )
+
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    timeout=TIMEOUT,
+                )
+
+            elif method_upper == "DELETE":
+                response = requests.delete(
+                    url,
+                    headers=headers,
+                    timeout=TIMEOUT,
+                )
+
+            else:
+                raise BingXError(
+                    f"Unsupported method: {method}"
+                )
+
+            response.raise_for_status()
+
+            payload = response.json()
+
+            if payload.get("code") != 0:
+                raise BingXError(
+                    f"BingX error "
+                    f"{payload.get('code')}: "
+                    f"{payload.get('msg', 'unknown error')}"
+                )
+
+            return payload.get("data")
+
+        except BingXError:
+            raise
+
+        except (
+            requests.Timeout,
+            requests.ConnectionError,
+        ) as exc:
+            last_error = exc
+            continue
+
+        except requests.RequestException as exc:
+            raise BingXError(
+                str(exc)
+            ) from exc
+
+        except ValueError as exc:
+            raise BingXError(
+                f"Invalid BingX JSON: {exc}"
+            ) from exc
+
+    raise BingXError(
+        f"BingX network error: {last_error}"
+    )
 
 
-def _headers():
-    return {
-        "X-BX-APIKEY": API_KEY,
-        "Content-Type": "application/json",
-    }
+def _public_request(
+    path,
+    params=None,
+):
+    last_error = None
 
+    for base in BASE_URLS:
+        try:
+            response = requests.get(
+                f"{base}{path}",
+                params=params or {},
+                headers={
+                    "X-SOURCE-KEY": "BX-AI-SKILL"
+                },
+                timeout=TIMEOUT,
+            )
 
-def _public_get(path, params=None):
-    """
-    Public GET request.
-    """
+            response.raise_for_status()
 
-    url = BASE_URL + path
+            payload = response.json()
 
-    try:
-        response = session.get(
-            url,
-            params=params or {},
-            timeout=REQUEST_TIMEOUT
-        )
+            if payload.get("code") != 0:
+                raise BingXError(
+                    f"BingX error "
+                    f"{payload.get('code')}: "
+                    f"{payload.get('msg', 'unknown error')}"
+                )
 
-        response.raise_for_status()
+            return payload.get("data")
 
-        return response.json()
+        except BingXError:
+            raise
 
-    except Exception as exc:
-        logger.exception(
-            "BingX public request failed: %s",
-            exc
-        )
+        except (
+            requests.Timeout,
+            requests.ConnectionError,
+        ) as exc:
+            last_error = exc
+            continue
 
-        return {
-            "code": -1,
-            "msg": str(exc),
-            "data": None,
-        }
+        except requests.RequestException as exc:
+            raise BingXError(
+                str(exc)
+            ) from exc
 
-
-def _signed_get(path, params=None):
-    """
-    Signed GET request.
-    """
-
-    if not API_KEY or not SECRET_KEY:
-        return {
-            "code": -1,
-            "msg": "BingX API keys are not configured",
-            "data": None,
-        }
-
-    params = dict(params or {})
-
-    params["timestamp"] = _timestamp()
-    params["recvWindow"] = RECV_WINDOW
-
-    params["signature"] = _sign(params)
-
-    url = BASE_URL + path
-
-    try:
-        response = session.get(
-            url,
-            params=params,
-            headers=_headers(),
-            timeout=REQUEST_TIMEOUT
-        )
-
-        response.raise_for_status()
-
-        return response.json()
-
-    except Exception as exc:
-        logger.exception(
-            "BingX signed GET failed: %s",
-            exc
-        )
-
-        return {
-            "code": -1,
-            "msg": str(exc),
-            "data": None,
-        }
-
-
-def _signed_post(path, params=None):
-    """
-    Signed POST request.
-    """
-
-    if not API_KEY or not SECRET_KEY:
-        return {
-            "code": -1,
-            "msg": "BingX API keys are not configured",
-            "data": None,
-        }
-
-    params = dict(params or {})
-
-    params["timestamp"] = _timestamp()
-    params["recvWindow"] = RECV_WINDOW
-
-    params["signature"] = _sign(params)
-
-    url = BASE_URL + path
-
-    try:
-        response = session.post(
-            url,
-            params=params,
-            headers=_headers(),
-            timeout=REQUEST_TIMEOUT
-        )
-
-        response.raise_for_status()
-
-        return response.json()
-
-    except Exception as exc:
-        logger.exception(
-            "BingX signed POST failed: %s",
-            exc
-        )
-
-        return {
-            "code": -1,
-            "msg": str(exc),
-            "data": None,
-        }
+    raise BingXError(
+        f"BingX network error: {last_error}"
+    )
 
 
 # ============================================================
@@ -285,190 +362,307 @@ def _signed_post(path, params=None):
 # ============================================================
 
 def normalize_symbol(symbol):
-    """
-    Converts:
-        SOL
-        SOLUSDT
-        SOL-USDT
-        SOL/USDT
-    into:
-        SOL-USDT
-    """
+    symbol = str(
+        symbol
+    ).upper().strip()
 
-    if not symbol:
-        return ""
-
-    symbol = str(symbol).upper().strip()
-
-    symbol = symbol.replace("/", "-")
-    symbol = symbol.replace("_", "-")
-
-    if symbol.endswith("USDT") and "-" not in symbol:
-        symbol = symbol[:-4] + "-USDT"
-
-    if symbol.endswith("-USDT"):
+    if "-" in symbol:
         return symbol
 
-    return symbol
-
-
-# ============================================================
-# MARKET DATA
-# ============================================================
-
-def get_ticker(symbol):
-    """
-    Get BingX perpetual ticker.
-    """
-
-    symbol = normalize_symbol(symbol)
-
-    return _public_get(
-        "/openApi/swap/v2/quote/ticker",
-        {
-            "symbol": symbol,
-        }
-    )
-
-
-def get_contracts():
-    """
-    Get perpetual contract information.
-    """
-
-    return _public_get(
-        "/openApi/swap/v2/quote/contracts"
-    )
-
-
-def get_contract(symbol):
-    """
-    Find contract metadata.
-    """
-
-    symbol = normalize_symbol(symbol)
-
-    result = get_contracts()
-
-    if result.get("code") != 0:
-        return None
-
-    data = result.get("data") or []
-
-    if isinstance(data, dict):
-        data = [data]
-
-    for contract in data:
-        contract_symbol = normalize_symbol(
-            contract.get("symbol", "")
+    if symbol.endswith("USDT"):
+        return (
+            f"{symbol[:-4]}-USDT"
         )
 
-        if contract_symbol == symbol:
-            return contract
+    raise BingXError(
+        f"Неподдерживаемый символ: {symbol}"
+    )
+
+
+# ============================================================
+# BALANCE
+# ============================================================
+
+def get_balance():
+    data = _signed_request(
+        "GET",
+        "/openApi/swap/v3/user/balance",
+    )
+
+    if isinstance(data, list):
+        for item in data:
+            if item.get("asset") == "USDT":
+                return item
+
+    if isinstance(data, dict):
+
+        if data.get("asset") == "USDT":
+            return data
+
+        balance = data.get(
+            "balance"
+        )
+
+        if isinstance(balance, list):
+            for item in balance:
+                if item.get("asset") == "USDT":
+                    return item
+
+    return data
+
+
+# ============================================================
+# POSITIONS
+# ============================================================
+
+def get_positions(symbol=None):
+    params = {}
+
+    if symbol:
+        params["symbol"] = normalize_symbol(
+            symbol
+        )
+
+    data = _signed_request(
+        "GET",
+        "/openApi/swap/v2/user/positions",
+        params,
+    )
+
+    if not data:
+        return []
+
+    if isinstance(data, dict):
+
+        if isinstance(
+            data.get("positions"),
+            list,
+        ):
+            return data["positions"]
+
+        return [data]
+
+    return data
+
+
+def get_position(
+    symbol,
+    direction=None,
+):
+    wanted_symbol = normalize_symbol(
+        symbol
+    )
+
+    wanted_direction = (
+        direction.upper()
+        if direction
+        else None
+    )
+
+    for position in get_positions(
+        symbol
+    ):
+
+        if position.get(
+            "symbol"
+        ) != wanted_symbol:
+            continue
+
+        side = str(
+            position.get(
+                "positionSide",
+                "",
+            )
+        ).upper()
+
+        try:
+            amount = abs(
+                float(
+                    position.get(
+                        "positionAmt",
+                        0,
+                    )
+                )
+            )
+        except Exception:
+            amount = 0
+
+        if amount <= 0:
+            continue
+
+        if (
+            wanted_direction
+            and side != wanted_direction
+        ):
+            continue
+
+        return position
 
     return None
 
 
-# ============================================================
-# ACCOUNT
-# ============================================================
-
-def get_balance():
-    """
-    Get USDT futures balance.
-    """
-
-    result = _signed_get(
-        "/openApi/swap/v2/user/balance"
-    )
-
-    if result.get("code") != 0:
-        return result
-
-    data = result.get("data")
-
-    return {
-        "code": result.get("code"),
-        "msg": result.get("msg"),
-        "data": data,
-    }
-
-
-def get_positions(symbol=None):
-    """
-    Get current futures positions.
-    """
-
-    params = {}
-
-    if symbol:
-        params["symbol"] = normalize_symbol(symbol)
-
-    return _signed_get(
-        "/openApi/swap/v2/user/positions",
-        params
+def has_open_position(
+    symbol,
+    direction=None,
+):
+    return (
+        get_position(
+            symbol,
+            direction,
+        )
+        is not None
     )
 
 
 # ============================================================
-# HEDGE MODE
+# POSITION MODE
 # ============================================================
 
 def get_position_mode():
-    """
-    Check position mode.
-    """
-
-    return _signed_get(
-        "/openApi/swap/v1/position/side/dual"
+    data = _signed_request(
+        "GET",
+        "/openApi/swap/v1/positionSide/dual",
     )
 
+    if isinstance(data, dict):
+        return bool(
+            data.get(
+                "dualSidePosition"
+            )
+        )
 
-def set_position_mode(dual_side=True):
-    """
-    Set hedge mode.
-
-    dual_side=True:
-        Hedge Mode
-
-    dual_side=False:
-        One-way Mode
-    """
-
-    return _signed_post(
-        "/openApi/swap/v1/position/side/dual",
-        {
-            "dualSidePosition": str(
-                bool(dual_side)
-            ).lower()
-        }
-    )
+    return False
 
 
 # ============================================================
 # LEVERAGE
 # ============================================================
 
-def set_leverage(symbol, leverage=None):
-    """
-    Set leverage for a contract.
-    """
-
-    symbol = normalize_symbol(symbol)
-
-    leverage = leverage or LEVERAGE
-
-    try:
-        leverage = int(leverage)
-    except Exception:
-        leverage = LEVERAGE
-
-    return _signed_post(
+def get_leverage(symbol):
+    return _signed_request(
+        "GET",
         "/openApi/swap/v2/trade/leverage",
         {
-            "symbol": symbol,
-            "leverage": leverage,
-        }
+            "symbol": normalize_symbol(
+                symbol
+            )
+        },
+    )
+
+
+def set_leverage(
+    symbol,
+    direction,
+    leverage=None,
+):
+    direction = direction.upper()
+
+    if direction not in {
+        "LONG",
+        "SHORT",
+    }:
+        raise BingXError(
+            "Direction must be LONG or SHORT."
+        )
+
+    value = int(
+        leverage
+        if leverage is not None
+        else LEVERAGE
+    )
+
+    if value < 1:
+        raise BingXError(
+            "Leverage must be >= 1."
+        )
+
+    return _signed_request(
+        "POST",
+        "/openApi/swap/v2/trade/leverage",
+        {
+            "symbol": normalize_symbol(
+                symbol
+            ),
+            "side": direction,
+            "leverage": value,
+        },
+    )
+
+
+# ============================================================
+# CONTRACT INFO
+# ============================================================
+
+def get_contract(symbol):
+    symbol = normalize_symbol(
+        symbol
+    )
+
+    data = _public_request(
+        "/openApi/swap/v2/quote/contracts",
+        {
+            "symbol": symbol
+        },
+    )
+
+    if isinstance(data, dict):
+        return data
+
+    if isinstance(data, list):
+        for item in data:
+            if item.get(
+                "symbol"
+            ) == symbol:
+                return item
+
+    return None
+
+
+# ============================================================
+# DECIMAL HELPERS
+# ============================================================
+
+def _dec(
+    value,
+    default="0",
+):
+    try:
+        return Decimal(
+            str(value)
+        )
+    except Exception:
+        return Decimal(default)
+
+
+def _floor_step(
+    value,
+    step,
+):
+    value = _dec(value)
+    step = _dec(step)
+
+    if step <= 0:
+        return value
+
+    units = (
+        value / step
+    ).to_integral_value(
+        rounding=ROUND_DOWN
+    )
+
+    return units * step
+
+
+def _fmt(value):
+    text = format(
+        _dec(value),
+        "f",
+    )
+
+    return (
+        text.rstrip("0")
+        .rstrip(".")
+        or "0"
     )
 
 
@@ -476,505 +670,475 @@ def set_leverage(symbol, leverage=None):
 # QUANTITY
 # ============================================================
 
-def _to_float(value, default=0.0):
-    try:
-        return float(value)
-    except Exception:
-        return default
-
-
-def _round_step(value, step):
-    """
-    Round quantity according to contract step.
-    """
-
-    value = _to_float(value)
-    step = _to_float(step)
-
-    if step <= 0:
-        return value
-
-    decimals = 0
-
-    text = f"{step:.12f}".rstrip("0")
-
-    if "." in text:
-        decimals = len(
-            text.split(".")[1]
-        )
-
-    rounded = round(
-        value / step
-    ) * step
-
-    return round(
-        rounded,
-        decimals
+def normalize_quantity(
+    symbol,
+    quantity,
+):
+    contract = (
+        get_contract(symbol)
+        or {}
     )
 
-
-def get_quantity_rules(symbol):
-    """
-    Extract quantity rules from BingX contract metadata.
-    """
-
-    contract = get_contract(symbol)
-
-    if not contract:
-        return {
-            "min_qty": 0.0,
-            "max_qty": 0.0,
-            "step_size": 0.0,
-        }
+    step = (
+        contract.get(
+            "tradeMinQuantity"
+        )
+        or contract.get(
+            "stepSize"
+        )
+    )
 
     min_qty = (
-        contract.get("tradeMinQuantity")
-        or contract.get("minQty")
-        or contract.get("min_quantity")
-        or 0
+        contract.get(
+            "tradeMinQuantity"
+        )
+        or contract.get(
+            "minQty"
+        )
+        or "0"
     )
 
-    max_qty = (
-        contract.get("tradeMaxQuantity")
-        or contract.get("maxQty")
-        or contract.get("max_quantity")
-        or 0
+    if (
+        not step
+        and contract.get(
+            "quantityPrecision"
+        )
+        is not None
+    ):
+        try:
+            precision = int(
+                contract[
+                    "quantityPrecision"
+                ]
+            )
+
+            step = Decimal(
+                "1"
+            ).scaleb(
+                -precision
+            )
+
+        except Exception:
+            step = "0"
+
+    if not step:
+        step = "0"
+
+    quantity = _floor_step(
+        quantity,
+        step,
     )
 
-    step_size = (
-        contract.get("tradeQuantityPrecision")
-        or contract.get("quantityPrecision")
-        or 0
-    )
+    if (
+        quantity <= 0
+        or quantity < _dec(min_qty)
+    ):
+        raise BingXError(
+            f"Количество {quantity} "
+            f"меньше минимального "
+            f"для {normalize_symbol(symbol)}: "
+            f"{min_qty}"
+        )
 
-    # Some BingX responses expose quantity precision
-    # as an integer instead of a step.
-    if isinstance(step_size, int):
-        precision = step_size
+    return _fmt(quantity)
 
-        if precision >= 0 and precision <= 12:
-            step_size = 10 ** (-precision)
 
-    try:
-        step_size = float(step_size)
-    except Exception:
-        step_size = 0.0
-
-    return {
-        "min_qty": _to_float(min_qty),
-        "max_qty": _to_float(max_qty),
-        "step_size": step_size,
-    }
-
+# ============================================================
+# RISK / QUANTITY
+# ============================================================
 
 def calculate_quantity(
-    symbol,
     entry,
-    stop_loss,
-    risk_usdt=None
+    sl,
+    risk_usdt=None,
 ):
-    """
-    Calculate quantity based on fixed USDT risk.
+    entry = float(entry)
+    sl = float(sl)
 
-    Example:
-
-        risk = $10
-        entry = 100
-        SL = 98
-
-        distance = $2
-        quantity = 10 / 2
-                 = 5 SOL
-    """
-
-    entry = _to_float(entry)
-    stop_loss = _to_float(stop_loss)
-
-    if entry <= 0:
-        return 0.0
-
-    if stop_loss <= 0:
-        return 0.0
-
-    risk_usdt = (
+    risk = float(
         RISK_USDT
         if risk_usdt is None
-        else _to_float(
-            risk_usdt,
-            RISK_USDT
-        )
+        else risk_usdt
     )
 
-    distance = abs(
-        entry - stop_loss
-    )
-
-    if distance <= 0:
-        return 0.0
-
-    quantity = risk_usdt / distance
-
-    rules = get_quantity_rules(symbol)
-
-    min_qty = rules["min_qty"]
-    max_qty = rules["max_qty"]
-    step_size = rules["step_size"]
-
-    if step_size > 0:
-        quantity = _round_step(
-            quantity,
-            step_size
+    if entry <= 0 or sl <= 0:
+        raise BingXError(
+            "Entry/SL должны быть > 0."
         )
 
-    if min_qty > 0 and quantity < min_qty:
-        quantity = min_qty
+    if entry == sl:
+        raise BingXError(
+            "Entry и SL не могут совпадать."
+        )
 
-    if max_qty > 0 and quantity > max_qty:
-        quantity = max_qty
+    if risk <= 0:
+        raise BingXError(
+            "Risk USDT должен быть > 0."
+        )
 
-    return quantity
+    return (
+        risk
+        / abs(entry - sl)
+    )
 
 
-# ============================================================
-# ORDER
-# ============================================================
-
-def place_order(
-    symbol,
-    side,
+def calculate_actual_risk(
+    entry,
+    sl,
     quantity,
-    position_side=None,
-    order_type="MARKET",
 ):
-    """
-    Place BingX perpetual order.
-
-    side:
-        BUY
-        SELL
-
-    position_side:
-        LONG
-        SHORT
-    """
-
-    symbol = normalize_symbol(symbol)
-
-    side = str(side).upper().strip()
-
-    quantity = _to_float(quantity)
-
-    if not symbol:
-        return {
-            "code": -1,
-            "msg": "Invalid symbol",
-            "data": None,
-        }
-
-    if side not in {
-        "BUY",
-        "SELL",
-    }:
-        return {
-            "code": -1,
-            "msg": "Invalid order side",
-            "data": None,
-        }
-
-    if quantity <= 0:
-        return {
-            "code": -1,
-            "msg": "Quantity must be greater than zero",
-            "data": None,
-        }
-
-    params = {
-        "symbol": symbol,
-        "side": side,
-        "positionSide": (
-            position_side
-            if position_side
-            else "BOTH"
-        ),
-        "type": order_type,
-        "quantity": quantity,
-    }
-
-    return _signed_post(
-        "/openApi/swap/v2/trade/order",
-        params
+    return (
+        abs(
+            float(entry)
+            - float(sl)
+        )
+        * float(quantity)
     )
 
 
 # ============================================================
-# STOP LOSS / TAKE PROFIT
+# SETUP VALIDATION
 # ============================================================
 
-def place_stop_loss(
-    symbol,
-    side,
-    quantity,
-    stop_price,
-    position_side=None,
-):
-    """
-    Place stop-loss order.
-    """
+def _validate_setup(setup):
 
-    symbol = normalize_symbol(symbol)
-
-    if side.upper() == "BUY":
-        working_side = "SELL"
-    else:
-        working_side = "BUY"
-
-    params = {
-        "symbol": symbol,
-        "side": working_side,
-        "positionSide": (
-            position_side
-            if position_side
-            else "BOTH"
-        ),
-        "type": "STOP_MARKET",
-        "stopPrice": stop_price,
-        "closePosition": "true",
-        "workingType": WORKING_TYPE,
-    }
-
-    return _signed_post(
-        "/openApi/swap/v2/trade/order",
-        params
-    )
-
-
-def place_take_profit(
-    symbol,
-    side,
-    quantity,
-    take_profit,
-    position_side=None,
-):
-    """
-    Place take-profit order.
-    """
-
-    symbol = normalize_symbol(symbol)
-
-    if side.upper() == "BUY":
-        working_side = "SELL"
-    else:
-        working_side = "BUY"
-
-    params = {
-        "symbol": symbol,
-        "side": working_side,
-        "positionSide": (
-            position_side
-            if position_side
-            else "BOTH"
-        ),
-        "type": "TAKE_PROFIT_MARKET",
-        "stopPrice": take_profit,
-        "closePosition": "true",
-        "workingType": WORKING_TYPE,
-    }
-
-    return _signed_post(
-        "/openApi/swap/v2/trade/order",
-        params
-    )
-
-
-# ============================================================
-# SETUP PARSING
-# ============================================================
-
-def _setup_value(setup, *keys):
-    """
-    Read setup field using several possible names.
-    """
-
-    if not isinstance(setup, dict):
-        return None
-
-    for key in keys:
-        if key in setup:
-            value = setup[key]
-
-            if value is not None:
-                return value
-
-    return None
-
-
-def _setup_symbol(setup):
-    return _setup_value(
-        setup,
+    for key in (
         "symbol",
-        "coin",
-        "ticker"
-    )
-
-
-def _setup_direction(setup):
-    value = _setup_value(
-        setup,
         "direction",
-        "side"
+        "entry",
+        "sl",
+        "tp",
+    ):
+        if setup.get(key) is None:
+            raise BingXError(
+                f"В setup отсутствует {key}."
+            )
+
+    direction = str(
+        setup["direction"]
+    ).upper()
+
+    entry = float(
+        setup["entry"]
     )
 
-    if value is None:
-        return None
+    sl = float(
+        setup["sl"]
+    )
 
-    value = str(value).upper()
+    tp = float(
+        setup["tp"]
+    )
 
-    if value in {
+    if direction not in {
         "LONG",
-        "BUY",
-    }:
-        return "LONG"
-
-    if value in {
         "SHORT",
-        "SELL",
     }:
-        return "SHORT"
+        raise BingXError(
+            "Direction must be LONG or SHORT."
+        )
+
+    if entry <= 0:
+        raise BingXError(
+            "Entry должен быть > 0."
+        )
+
+    if sl <= 0:
+        raise BingXError(
+            "SL должен быть > 0."
+        )
+
+    if tp <= 0:
+        raise BingXError(
+            "TP должен быть > 0."
+        )
+
+    if direction == "LONG":
+
+        if not (
+            sl < entry < tp
+        ):
+            raise BingXError(
+                "LONG должен иметь "
+                "SL < Entry < TP."
+            )
+
+    else:
+
+        if not (
+            tp < entry < sl
+        ):
+            raise BingXError(
+                "SHORT должен иметь "
+                "TP < Entry < SL."
+            )
+
+    # Проверяем RR.
+    risk = abs(
+        entry - sl
+    )
+
+    reward = abs(
+        tp - entry
+    )
+
+    if risk <= 0:
+        raise BingXError(
+            "Risk должен быть > 0."
+        )
+
+    rr = reward / risk
+
+    # TradeMind требует 2R.
+    if abs(rr - 2.0) > 0.03:
+        raise BingXError(
+            f"TradeMind требует RR 1:2. "
+            f"Получено RR={rr:.3f}."
+        )
+
+
+# ============================================================
+# ORDER PARAMS
+# ============================================================
+
+def _market_params(
+    symbol,
+    direction,
+    quantity,
+    sl,
+    tp,
+    client_order_id=None,
+):
+    direction = direction.upper()
+
+    if direction == "LONG":
+        side = "BUY"
+        position_side = "LONG"
+
+    else:
+        side = "SELL"
+        position_side = "SHORT"
+
+    params = {
+        "symbol": normalize_symbol(
+            symbol
+        ),
+        "side": side,
+        "positionSide": position_side,
+        "type": "MARKET",
+        "quantity": quantity,
+        "workingType": WORKING_TYPE,
+    }
+
+    if client_order_id:
+        params[
+            "clientOrderId"
+        ] = client_order_id
+
+    params["stopLoss"] = json.dumps(
+        {
+            "type": "STOP_MARKET",
+            "stopPrice": float(sl),
+            "workingType": WORKING_TYPE,
+            "stopGuaranteed": False,
+        },
+        separators=(
+            ",",
+            ":",
+        ),
+    )
+
+    params["takeProfit"] = json.dumps(
+        {
+            "type": "TAKE_PROFIT_MARKET",
+            "stopPrice": float(tp),
+            "workingType": WORKING_TYPE,
+            "stopGuaranteed": False,
+        },
+        separators=(
+            ",",
+            ":",
+        ),
+    )
+
+    return params
+
+
+# ============================================================
+# PLACE MARKET ORDER
+# ============================================================
+
+def place_market_order(
+    symbol,
+    direction,
+    quantity,
+    sl,
+    tp,
+    client_order_id=None,
+):
+
+    direction = direction.upper()
+
+    if direction not in {
+        "LONG",
+        "SHORT",
+    }:
+        raise BingXError(
+            "Direction must be LONG or SHORT."
+        )
+
+    sl = _validate_positive_number(
+        "SL",
+        sl,
+    )
+
+    tp = _validate_positive_number(
+        "TP",
+        tp,
+    )
+
+    # AUTO/CONFIRM требуют Hedge Mode.
+    if not get_position_mode():
+        raise BingXError(
+            "BingX находится в One-way Mode. "
+            "TradeMind использует Hedge Mode "
+            "(LONG/SHORT). "
+            "Переключи режим на Hedge Mode "
+            "перед использованием BingX."
+        )
+
+    set_leverage(
+        symbol,
+        direction,
+        LEVERAGE,
+    )
+
+    quantity = normalize_quantity(
+        symbol,
+        quantity,
+    )
+
+    return _signed_request(
+        "POST",
+        "/openApi/swap/v2/trade/order",
+        _market_params(
+            symbol,
+            direction,
+            quantity,
+            sl,
+            tp,
+            client_order_id,
+        ),
+    )
+
+
+# ============================================================
+# VERIFY POSITION
+# ============================================================
+
+def wait_for_position(
+    symbol,
+    direction,
+    timeout_seconds=5,
+    interval=0.5,
+):
+    started = time.time()
+
+    while (
+        time.time()
+        - started
+        < timeout_seconds
+    ):
+        position = get_position(
+            symbol,
+            direction,
+        )
+
+        if position:
+            return position
+
+        time.sleep(interval)
 
     return None
-
-
-def _setup_entry(setup):
-    return _to_float(
-        _setup_value(
-            setup,
-            "entry",
-            "entry_price"
-        )
-    )
-
-
-def _setup_sl(setup):
-    return _to_float(
-        _setup_value(
-            setup,
-            "sl",
-            "stop_loss",
-            "stop"
-        )
-    )
-
-
-def _setup_tp(setup):
-    return _to_float(
-        _setup_value(
-            setup,
-            "tp",
-            "take_profit",
-            "target"
-        )
-    )
 
 
 # ============================================================
 # OPEN TRADE
 # ============================================================
 
-def open_trade(setup):
+def open_trade(
+    setup,
+    risk_usdt=None,
+):
     """
-    Main function used by TradeMind.
+    Главная функция открытия сделки.
 
     OFF:
-        Does nothing.
+        ничего не открывает.
 
     PAPER:
-        Simulates opening.
+        симуляция.
 
     CONFIRM:
-        Returns prepared order information.
+        pending setup.
 
     AUTO:
-        Sends real market order.
+        реальный ордер.
     """
 
-    symbol = _setup_symbol(setup)
-    direction = _setup_direction(setup)
+    _validate_setup(setup)
 
-    entry = _setup_entry(setup)
-    stop_loss = _setup_sl(setup)
-    take_profit = _setup_tp(setup)
-
-    if not symbol:
-        return {
-            "ok": False,
-            "status": "ERROR",
-            "message": "Setup has no symbol",
-        }
-
-    if direction not in {
-        "LONG",
-        "SHORT",
-    }:
-        return {
-            "ok": False,
-            "status": "ERROR",
-            "message": "Setup has invalid direction",
-        }
-
-    if entry <= 0:
-        return {
-            "ok": False,
-            "status": "ERROR",
-            "message": "Invalid entry",
-        }
-
-    if stop_loss <= 0:
-        return {
-            "ok": False,
-            "status": "ERROR",
-            "message": "Invalid stop loss",
-        }
-
-    if take_profit <= 0:
-        return {
-            "ok": False,
-            "status": "ERROR",
-            "message": "Invalid take profit",
-        }
-
-    quantity = calculate_quantity(
-        symbol,
-        entry,
-        stop_loss,
+    risk_value = (
         RISK_USDT
+        if risk_usdt is None
+        else float(risk_usdt)
     )
 
-    if quantity <= 0:
-        return {
-            "ok": False,
-            "status": "ERROR",
-            "message": "Could not calculate quantity",
-        }
+    raw_quantity = calculate_quantity(
+        setup["entry"],
+        setup["sl"],
+        risk_value,
+    )
 
-    if direction == "LONG":
-        order_side = "BUY"
-        position_side = "LONG"
-    else:
-        order_side = "SELL"
-        position_side = "SHORT"
+    quantity = normalize_quantity(
+        setup["symbol"],
+        raw_quantity,
+    )
 
-    result = {
-        "ok": False,
-        "status": MODE,
-        "symbol": normalize_symbol(symbol),
-        "direction": direction,
-        "side": order_side,
-        "position_side": position_side,
-        "entry": entry,
-        "sl": stop_loss,
-        "tp": take_profit,
+    actual_quantity = float(
+        quantity
+    )
+
+    actual_risk = calculate_actual_risk(
+        setup["entry"],
+        setup["sl"],
+        actual_quantity,
+    )
+
+    payload = {
+        "symbol": normalize_symbol(
+            setup["symbol"]
+        ),
+        "direction": str(
+            setup["direction"]
+        ).upper(),
+        "entry": float(
+            setup["entry"]
+        ),
+        "sl": float(
+            setup["sl"]
+        ),
+        "tp": float(
+            setup["tp"]
+        ),
         "quantity": quantity,
-        "risk_usdt": RISK_USDT,
+        "risk_usdt": float(
+            risk_value
+        ),
+        "actual_risk_usdt": round(
+            actual_risk,
+            6,
+        ),
         "leverage": LEVERAGE,
     }
 
@@ -983,151 +1147,111 @@ def open_trade(setup):
     # --------------------------------------------------------
 
     if MODE == "OFF":
-        result.update({
+        return {
             "ok": True,
-            "status": "OFF",
-            "message": "BingX is OFF",
-        })
-
-        return result
+            "mode": MODE,
+            "status": "disabled",
+            "payload": payload,
+        }
 
     # --------------------------------------------------------
     # PAPER
     # --------------------------------------------------------
 
     if MODE == "PAPER":
-        result.update({
+        return {
             "ok": True,
-            "status": "PAPER",
-            "message": "Paper trade created",
-            "order": None,
-        })
-
-        logger.info(
-            "PAPER TRADE: %s %s qty=%s entry=%s SL=%s TP=%s",
-            direction,
-            symbol,
-            quantity,
-            entry,
-            stop_loss,
-            take_profit,
-        )
-
-        return result
+            "mode": MODE,
+            "status": "simulated",
+            "payload": payload,
+        }
 
     # --------------------------------------------------------
     # CONFIRM
     # --------------------------------------------------------
 
     if MODE == "CONFIRM":
-        result.update({
+        return {
             "ok": True,
-            "status": "CONFIRM",
-            "message": "Trade prepared; confirmation required",
-            "order": None,
-        })
-
-        return result
+            "mode": MODE,
+            "status": "pending_confirmation",
+            "payload": payload,
+        }
 
     # --------------------------------------------------------
     # AUTO
     # --------------------------------------------------------
 
     if MODE != "AUTO":
-        result.update({
-            "ok": False,
-            "status": "ERROR",
-            "message": f"Unknown BINGX_MODE: {MODE}",
-        })
-
-        return result
-
-    if not API_KEY or not SECRET_KEY:
-        result.update({
-            "ok": False,
-            "status": "ERROR",
-            "message": "BingX API keys are missing",
-        })
-
-        return result
-
-    # Set leverage before opening.
-    leverage_result = set_leverage(
-        symbol,
-        LEVERAGE
-    )
-
-    if leverage_result.get("code") != 0:
-        logger.warning(
-            "Could not set leverage: %s",
-            leverage_result
+        raise BingXError(
+            f"Неизвестный режим: {MODE}"
         )
 
-    # Open position.
-    order_result = place_order(
-        symbol=symbol,
-        side=order_side,
-        quantity=quantity,
-        position_side=position_side,
-        order_type="MARKET",
+    # В AUTO обязательно наличие API.
+    if not enabled():
+        raise BingXError(
+            "AUTO требует "
+            "BINGX_API_KEY и "
+            "BINGX_SECRET_KEY."
+        )
+
+    # Перед открытием проверяем Hedge Mode.
+    if not get_position_mode():
+        raise BingXError(
+            "AUTO остановлен: "
+            "BingX не находится в Hedge Mode."
+        )
+
+    # Не открываем вторую позицию того же направления.
+    existing = get_position(
+        setup["symbol"],
+        setup["direction"],
     )
 
-    result["order"] = order_result
+    if existing:
+        raise BingXError(
+            "Позиция этого направления "
+            "уже открыта."
+        )
 
-    if order_result.get("code") != 0:
-        result.update({
-            "ok": False,
-            "status": "ERROR",
-            "message": (
-                order_result.get("msg")
-                or "BingX order failed"
-            ),
-        })
+    data = place_market_order(
+        symbol=setup["symbol"],
+        direction=setup["direction"],
+        quantity=quantity,
+        sl=setup["sl"],
+        tp=setup["tp"],
+        client_order_id=setup.get(
+            "client_order_id"
+        ),
+    )
 
-        return result
+    # После отправки проверяем,
+    # появилась ли реальная позиция.
+    position = wait_for_position(
+        setup["symbol"],
+        setup["direction"],
+        timeout_seconds=5,
+    )
 
-    result.update({
+    if not position:
+
+        # Если ордер вроде бы отправлен,
+        # но позиция не появилась —
+        # НЕ считаем сделку успешной.
+        raise BingXError(
+            "BingX принял запрос, "
+            "но открытая позиция "
+            "не была подтверждена."
+        )
+
+    return {
         "ok": True,
-        "status": "OPENED",
-        "message": "BingX position opened",
-    })
-
-    logger.warning(
-        "LIVE TRADE OPENED: %s %s qty=%s",
-        direction,
-        symbol,
-        quantity,
-    )
-
-    # --------------------------------------------------------
-    # Attach SL
-    # --------------------------------------------------------
-
-    sl_result = place_stop_loss(
-        symbol=symbol,
-        side=order_side,
-        quantity=quantity,
-        stop_price=stop_loss,
-        position_side=position_side,
-    )
-
-    result["sl_order"] = sl_result
-
-    # --------------------------------------------------------
-    # Attach TP
-    # --------------------------------------------------------
-
-    tp_result = place_take_profit(
-        symbol=symbol,
-        side=order_side,
-        quantity=quantity,
-        take_profit=take_profit,
-        position_side=position_side,
-    )
-
-    result["tp_order"] = tp_result
-
-    return result
+        "mode": MODE,
+        "status": "submitted",
+        "payload": payload,
+        "data": data,
+        "position": position,
+    }
 
 
 # ============================================================
@@ -1136,118 +1260,92 @@ def open_trade(setup):
 
 def execute_confirmed(setup):
     """
-    Used by TradeMind when BINGX_MODE=CONFIRM
-    and user confirms a prepared setup.
+    Используется командой /execute.
 
-    Temporarily executes the same logic as AUTO.
+    Работает только в CONFIRM.
     """
 
-    if MODE == "OFF":
-        return {
-            "ok": False,
-            "status": "OFF",
-            "message": "BingX is OFF",
-        }
+    if MODE != "CONFIRM":
+        raise BingXError(
+            "Нужен BINGX_MODE=CONFIRM."
+        )
 
-    if MODE == "PAPER":
-        return open_trade(setup)
+    _validate_setup(setup)
 
-    # Validate setup first.
-    symbol = _setup_symbol(setup)
-    direction = _setup_direction(setup)
-
-    entry = _setup_entry(setup)
-    stop_loss = _setup_sl(setup)
-    take_profit = _setup_tp(setup)
-
-    if not symbol or not direction:
-        return {
-            "ok": False,
-            "status": "ERROR",
-            "message": "Invalid setup",
-        }
-
-    quantity = calculate_quantity(
-        symbol,
-        entry,
-        stop_loss,
-        RISK_USDT
+    risk_usdt = float(
+        setup.get(
+            "risk_usdt",
+            RISK_USDT,
+        )
     )
 
-    if quantity <= 0:
-        return {
-            "ok": False,
-            "status": "ERROR",
-            "message": "Invalid quantity",
-        }
-
-    if direction == "LONG":
-        order_side = "BUY"
-        position_side = "LONG"
-    else:
-        order_side = "SELL"
-        position_side = "SHORT"
-
-    if not API_KEY or not SECRET_KEY:
-        return {
-            "ok": False,
-            "status": "ERROR",
-            "message": "BingX API keys are missing",
-        }
-
-    set_leverage(
-        symbol,
-        LEVERAGE
+    raw_quantity = calculate_quantity(
+        setup["entry"],
+        setup["sl"],
+        risk_usdt,
     )
 
-    order_result = place_order(
-        symbol=symbol,
-        side=order_side,
+    quantity = normalize_quantity(
+        setup["symbol"],
+        raw_quantity,
+    )
+
+    actual_risk = calculate_actual_risk(
+        setup["entry"],
+        setup["sl"],
+        float(quantity),
+    )
+
+    data = place_market_order(
+        symbol=setup["symbol"],
+        direction=setup["direction"],
         quantity=quantity,
-        position_side=position_side,
-        order_type="MARKET",
+        sl=setup["sl"],
+        tp=setup["tp"],
+        client_order_id=setup.get(
+            "client_order_id"
+        ),
     )
 
-    if order_result.get("code") != 0:
-        return {
-            "ok": False,
-            "status": "ERROR",
-            "message": (
-                order_result.get("msg")
-                or "Order failed"
-            ),
-            "order": order_result,
-        }
-
-    sl_result = place_stop_loss(
-        symbol=symbol,
-        side=order_side,
-        quantity=quantity,
-        stop_price=stop_loss,
-        position_side=position_side,
+    position = wait_for_position(
+        setup["symbol"],
+        setup["direction"],
+        timeout_seconds=5,
     )
 
-    tp_result = place_take_profit(
-        symbol=symbol,
-        side=order_side,
-        quantity=quantity,
-        take_profit=take_profit,
-        position_side=position_side,
-    )
+    if not position:
+        raise BingXError(
+            "Ордер отправлен, "
+            "но позиция не подтверждена."
+        )
 
     return {
         "ok": True,
-        "status": "OPENED",
-        "message": "Confirmed BingX trade opened",
-        "symbol": normalize_symbol(symbol),
-        "direction": direction,
+        "mode": MODE,
+        "status": "submitted",
+        "symbol": normalize_symbol(
+            setup["symbol"]
+        ),
+        "direction": str(
+            setup["direction"]
+        ).upper(),
+        "entry": float(
+            setup["entry"]
+        ),
+        "sl": float(
+            setup["sl"]
+        ),
+        "tp": float(
+            setup["tp"]
+        ),
         "quantity": quantity,
-        "entry": entry,
-        "sl": stop_loss,
-        "tp": take_profit,
-        "order": order_result,
-        "sl_order": sl_result,
-        "tp_order": tp_result,
+        "risk_usdt": risk_usdt,
+        "actual_risk_usdt": round(
+            actual_risk,
+            6,
+        ),
+        "data": data,
+        "position": position,
     }
 
 
@@ -1255,103 +1353,20 @@ def execute_confirmed(setup):
 # CLOSE POSITION
 # ============================================================
 
-def close_position(symbol=None):
-    """
-    Close current position.
+def close_position(
+    symbol=None,
+):
+    params = {}
 
-    If symbol is None:
-        tries to close all active positions.
-    """
-
-    positions_result = get_positions(
-        symbol
-    )
-
-    if positions_result.get("code") != 0:
-        return positions_result
-
-    data = positions_result.get("data") or []
-
-    if isinstance(data, dict):
-        data = [data]
-
-    results = []
-
-    for position in data:
-        position_amt = _to_float(
-            position.get("positionAmt")
-            or position.get("positionAmount")
-            or position.get("amount")
-            or position.get("availableAmt")
+    if symbol:
+        params["symbol"] = normalize_symbol(
+            symbol
         )
 
-        if abs(position_amt) <= 0:
-            continue
-
-        pos_symbol = normalize_symbol(
-            position.get("symbol")
-            or symbol
-            or ""
-        )
-
-        if not pos_symbol:
-            continue
-
-        position_side = str(
-            position.get("positionSide")
-            or "BOTH"
-        ).upper()
-
-        if position_amt > 0:
-            side = "SELL"
-        else:
-            side = "BUY"
-
-        quantity = abs(position_amt)
-
-        close_params = {
-            "symbol": pos_symbol,
-            "side": side,
-            "positionSide": position_side,
-            "type": "MARKET",
-            "quantity": quantity,
-        }
-
-        result = _signed_post(
-            "/openApi/swap/v2/trade/order",
-            close_params
-        )
-
-        results.append({
-            "symbol": pos_symbol,
-            "quantity": quantity,
-            "side": side,
-            "result": result,
-        })
-
-    return {
-        "code": 0,
-        "msg": "Close operation completed",
-        "data": results,
-    }
-
-
-# ============================================================
-# CANCEL ALL ORDERS
-# ============================================================
-
-def cancel_all_orders(symbol):
-    """
-    Cancel all open orders for a symbol.
-    """
-
-    symbol = normalize_symbol(symbol)
-
-    return _signed_post(
-        "/openApi/swap/v2/trade/allOpenOrders",
-        {
-            "symbol": symbol,
-        }
+    return _signed_request(
+        "POST",
+        "/openApi/swap/v2/trade/closeAllPositions",
+        params,
     )
 
 
@@ -1359,100 +1374,100 @@ def cancel_all_orders(symbol):
 # OPEN ORDERS
 # ============================================================
 
-def get_open_orders(symbol=None):
-    """
-    Get open orders.
-    """
-
+def get_open_orders(
+    symbol=None,
+):
     params = {}
 
     if symbol:
-        params["symbol"] = normalize_symbol(symbol)
+        params["symbol"] = normalize_symbol(
+            symbol
+        )
 
-    return _signed_get(
+    return _signed_request(
+        "GET",
         "/openApi/swap/v2/trade/openOrders",
-        params
+        params,
     )
 
 
 # ============================================================
-# HEALTH CHECK
+# CANCEL ALL ORDERS
+# ============================================================
+
+def cancel_all_orders(
+    symbol=None,
+):
+    params = {}
+
+    if symbol:
+        params["symbol"] = normalize_symbol(
+            symbol
+        )
+
+    return _signed_request(
+        "DELETE",
+        "/openApi/swap/v2/trade/allOpenOrders",
+        params,
+    )
+
+
+# ============================================================
+# PING / HEALTH
 # ============================================================
 
 def ping():
-    """
-    Simple BingX API test.
-    """
-
-    result = _public_get(
+    return _public_request(
         "/openApi/swap/v2/server/time"
     )
 
-    return result
-
 
 def health():
-    """
-    Full integration health status.
-    """
-
-    status = config_status()
-
     result = {
-        "mode": status["mode"],
-        "configured": status["ready"],
-        "api_reachable": False,
-        "account_reachable": False,
+        "mode": MODE,
+        "configured": enabled(),
+        "env": ENV,
+        "api": False,
+        "hedge_mode": None,
+        "error": None,
     }
 
-    ping_result = ping()
+    try:
+        ping()
+        result["api"] = True
 
-    if ping_result.get("code") == 0:
-        result["api_reachable"] = True
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
 
-    if (
-        status["ready"]
-        and MODE != "OFF"
-    ):
-        balance = get_balance()
+    if enabled():
 
-        if balance.get("code") == 0:
-            result["account_reachable"] = True
+        try:
+            result[
+                "hedge_mode"
+            ] = get_position_mode()
+
+        except Exception as exc:
+            result["error"] = str(exc)
 
     return result
 
 
 # ============================================================
-# MODULE INFO
+# SAFE SUMMARY
 # ============================================================
 
-__version__ = "1.0"
+def status_text():
+    status = config_status()
 
-__all__ = [
-    "MODE",
-    "RISK_USDT",
-    "LEVERAGE",
-    "mode",
-    "is_enabled",
-    "is_live",
-    "config_status",
-    "get_ticker",
-    "get_contracts",
-    "get_contract",
-    "get_balance",
-    "get_positions",
-    "get_position_mode",
-    "set_position_mode",
-    "set_leverage",
-    "calculate_quantity",
-    "place_order",
-    "place_stop_loss",
-    "place_take_profit",
-    "open_trade",
-    "execute_confirmed",
-    "close_position",
-    "cancel_all_orders",
-    "get_open_orders",
-    "ping",
-    "health",
-]
+    return (
+        "BingX\n"
+        f"Mode: {status['mode']}\n"
+        f"Environment: {status['env']}\n"
+        f"API: "
+        f"{'OK' if status['configured'] else 'OFF'}\n"
+        f"Leverage: {status['leverage']}x\n"
+        f"Risk: ${status['risk_usdt']}\n"
+        f"Working type: "
+        f"{status['working_type']}"
+    )
