@@ -18,7 +18,6 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes,
 )
 
 from market import (
@@ -26,13 +25,26 @@ from market import (
     find_major_liquidity,
     detect_sweep,
 )
+
+import strategy
 from strategy import analyze
+
 import bingx
 
 
 # ============================================================
-# TRADEMIND 4.3
+# TRADEMIND 4.4.2
 # ============================================================
+
+BOT_VERSION = "4.4.2"
+
+# Если в strategy.py уже есть STRATEGY_VERSION,
+# бот покажет её. Если нет — покажет UNKNOWN.
+STRATEGY_VERSION = getattr(
+    strategy,
+    "STRATEGY_VERSION",
+    "UNKNOWN",
+)
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -310,7 +322,7 @@ def format_rr(rr):
 
 
 # ============================================================
-# STAGES — TRADEMIND 4.3
+# STAGES — TRADEMIND 4.4.2
 # ============================================================
 
 def stage_icon(stage):
@@ -561,7 +573,7 @@ def build_ready_message(coin, result, mode=None):
     raw_score = result.get("raw_score")
 
     lines = [
-        "🚨 <b>TRADEMIND 4.3 — ГОТОВЫЙ СЕТАП</b>",
+        f"🚨 <b>TRADEMIND {BOT_VERSION} — ГОТОВЫЙ СЕТАП</b>",
         "",
         f"💠 Монета: <b>{coin}</b>",
         f"📐 Направление: <b>{result.get('direction')}</b>",
@@ -596,6 +608,12 @@ def build_ready_message(coin, result, mode=None):
             f"⚠️ {result.get('liquidity_warning')}",
         ]
 
+    if result.get("reason"):
+        lines += [
+            "",
+            f"🧠 <b>Причина:</b> {result.get('reason')}",
+        ]
+
     if mode:
         lines += [
             "",
@@ -611,7 +629,7 @@ def build_ready_message(coin, result, mode=None):
 
 def build_market_message(results):
     lines = [
-        "📊 <b>TRADEMIND 4.3 — РЫНОК</b>",
+        f"📊 <b>TRADEMIND {BOT_VERSION} — РЫНОК</b>",
         "",
     ]
 
@@ -647,13 +665,9 @@ def build_market_message(results):
         lines += [
             f"💠 <b>{coin}</b> "
             f"{format_price(price)}",
-
             stage_line,
-
             f"Score: <b>{score}/100</b>",
-
             "💧 <b>Крупная ликвидность:</b>",
-
             format_levels(
                 result.get(
                     "major_levels",
@@ -661,7 +675,6 @@ def build_market_message(results):
                 ),
                 price,
             ),
-
             "",
             "────────────",
             "",
@@ -681,7 +694,7 @@ def build_market_message(results):
 
 def build_levels_message(results):
     lines = [
-        "💧 <b>TRADEMIND 4.3 — "
+        f"💧 <b>TRADEMIND {BOT_VERSION} — "
         "КЛЮЧЕВЫЕ УРОВНИ</b>",
         "",
         "Используем только крупную "
@@ -703,7 +716,6 @@ def build_levels_message(results):
         lines += [
             f"💠 <b>{coin}</b> "
             f"{format_price(price)}",
-
             format_levels(
                 result.get(
                     "major_levels",
@@ -711,7 +723,6 @@ def build_levels_message(results):
                 ),
                 price,
             ),
-
             "",
             "────────────",
             "",
@@ -807,7 +818,7 @@ def build_sol_message(result):
     )
 
     lines = [
-        "📈 <b>TRADEMIND 4.3 — SOL</b>",
+        f"📈 <b>TRADEMIND {BOT_VERSION} — SOL</b>",
         "",
         f"💰 Цена: "
         f"<b>{format_price(result.get('price'))}</b>",
@@ -900,7 +911,7 @@ def build_sol_message(result):
     if result.get("reason"):
         lines += [
             "",
-            f"Причина: "
+            f"🧠 Причина: "
             f"{result.get('reason')}",
         ]
 
@@ -950,6 +961,9 @@ def make_setup(coin, result):
         ),
         "liquidity_warning": result.get(
             "liquidity_warning"
+        ),
+        "reason": result.get(
+            "reason"
         ),
         "risk_usdt": getattr(
             bingx,
@@ -1009,7 +1023,7 @@ def build_bingx_message():
         }
 
     return "\n".join([
-        "🟠 <b>TRADEMIND 4.3 — BINGX</b>",
+        f"🟠 <b>TRADEMIND {BOT_VERSION} — BINGX</b>",
         "",
         f"Режим: "
         f"<b>{bingx_mode_text()}</b>",
@@ -1738,7 +1752,7 @@ def build_chart_caption(
     )
 
     lines = [
-        f"📈 <b>TRADEMIND 4.3 — {coin}</b>",
+        f"📈 <b>TRADEMIND {BOT_VERSION} — {coin}</b>",
         "",
         f"💰 Цена: "
         f"<b>{format_price(result.get('price'))}</b>",
@@ -1819,6 +1833,12 @@ def build_chart_caption(
             "",
             f"⚠️ "
             f"{result.get('liquidity_warning')}",
+        ]
+
+    if result.get("reason"):
+        lines += [
+            "",
+            f"🧠 Причина: {result.get('reason')}",
         ]
 
     return "\n".join(lines)
@@ -1927,7 +1947,10 @@ async def start(
 
     await update.message.reply_text(
         "\n".join([
-            "🤖 <b>TRADEMIND 4.3</b>",
+            f"🤖 <b>TRADEMIND {BOT_VERSION}</b>",
+            "",
+            f"Bot: <b>{BOT_VERSION}</b>",
+            f"Strategy: <b>{STRATEGY_VERSION}</b>",
             "",
             "Мониторинг:",
             "BTC • ETH • SOL • BNB • XRP",
@@ -2125,7 +2148,10 @@ async def status_command(
     state = load_state()
 
     lines = [
-        "📊 <b>TRADEMIND 4.3 — СТАТУС</b>",
+        f"📊 <b>TRADEMIND {BOT_VERSION} — СТАТУС</b>",
+        "",
+        f"Bot version: <b>{BOT_VERSION}</b>",
+        f"Strategy version: <b>{STRATEGY_VERSION}</b>",
         "",
         f"BingX mode: "
         f"<b>{bingx.mode()}</b>",
@@ -2497,7 +2523,7 @@ async def journal_command(
 ):
     await update.message.reply_text(
         "\n".join([
-            "📒 <b>TRADEMIND 4.3 — ЖУРНАЛ</b>",
+            f"📒 <b>TRADEMIND {BOT_VERSION} — ЖУРНАЛ</b>",
             "",
             "Мониторинг сигналов подключён.",
             "",
@@ -2521,7 +2547,15 @@ async def journal_command(
 
 async def monitor(application):
     print(
-        "TradeMind 4.3 monitor started."
+        f"TradeMind {BOT_VERSION} monitor started."
+    )
+
+    print(
+        f"Bot version: {BOT_VERSION}"
+    )
+
+    print(
+        f"Strategy version: {STRATEGY_VERSION}"
     )
 
     print(
@@ -2778,7 +2812,7 @@ async def monitor(application):
                         await broadcast(
                             application,
                             "\n".join([
-                                "🔎 <b>TRADEMIND 4.3 — SWEEP</b>",
+                                f"🔎 <b>TRADEMIND {BOT_VERSION} — SWEEP</b>",
                                 "",
                                 f"💠 {coin}",
                                 f"📐 {direction or '—'}",
@@ -2817,7 +2851,7 @@ async def monitor(application):
                         await broadcast(
                             application,
                             "\n".join([
-                                "🟡 <b>TRADEMIND 4.3 — 15M CONFIRMATION</b>",
+                                f"🟡 <b>TRADEMIND {BOT_VERSION} — 15M CONFIRMATION</b>",
                                 "",
                                 f"💠 {coin}",
                                 f"📐 {direction or '—'}",
@@ -2872,7 +2906,10 @@ async def callbacks(
         if data == "start":
             await query.edit_message_text(
                 "\n".join([
-                    "🤖 <b>TRADEMIND 4.3</b>",
+                    f"🤖 <b>TRADEMIND {BOT_VERSION}</b>",
+                    "",
+                    f"Bot: <b>{BOT_VERSION}</b>",
+                    f"Strategy: <b>{STRATEGY_VERSION}</b>",
                     "",
                     "9 монет • сканирование "
                     f"{CHECK_INTERVAL} секунд",
@@ -2934,7 +2971,7 @@ async def callbacks(
 
         if data == "chart":
             await query.edit_message_text(
-                "📈 <b>TRADEMIND 4.3 — ГРАФИК</b>\n\n"
+                f"📈 <b>TRADEMIND {BOT_VERSION} — ГРАФИК</b>\n\n"
                 "Выбери монету:",
                 parse_mode="HTML",
                 reply_markup=chart_keyboard(),
@@ -2991,7 +3028,10 @@ async def callbacks(
             state = load_state()
 
             text = "\n".join([
-                "📊 <b>TRADEMIND 4.3 — STATUS</b>",
+                f"📊 <b>TRADEMIND {BOT_VERSION} — STATUS</b>",
+                "",
+                f"Bot: <b>{BOT_VERSION}</b>",
+                f"Strategy: <b>{STRATEGY_VERSION}</b>",
                 "",
                 f"Active: "
                 f"<b>{state.get('active_coin') or 'нет'}</b>",
@@ -3085,7 +3125,7 @@ async def callbacks(
         if data == "journal":
             await query.edit_message_text(
                 "\n".join([
-                    "📒 <b>TRADEMIND 4.3 — ЖУРНАЛ</b>",
+                    f"📒 <b>TRADEMIND {BOT_VERSION} — ЖУРНАЛ</b>",
                     "",
                     "Система журнала подключена.",
                     "",
@@ -3158,6 +3198,16 @@ def main():
             "BOT_TOKEN не найден."
         )
 
+    print("=" * 60)
+    print(f"TradeMind Bot: {BOT_VERSION}")
+    print(f"TradeMind Strategy: {STRATEGY_VERSION}")
+    print("=" * 60)
+
+    if STRATEGY_VERSION != BOT_VERSION:
+        print(
+            "WARNING: bot.py и strategy.py имеют разные версии!"
+        )
+
     application = (
         Application
         .builder()
@@ -3197,7 +3247,7 @@ def main():
     )
 
     print(
-        "TradeMind 4.3 started."
+        f"TradeMind {BOT_VERSION} started."
     )
 
     print(
