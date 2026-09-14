@@ -1,4 +1,4 @@
-# strategy.py — TradeMind 4.2
+# strategy.py — TradeMind 4.3
 #
 # Логика:
 #
@@ -26,7 +26,15 @@
 # - 5M trigger обязателен
 # - Один TP
 # - RR = 1:2
-# - opposing liquidity < 1.5R = NO TRADE
+#
+# LIQUIDITY FILTER:
+# - < 1.50R  = NO TRADE
+# - 1.50–1.80R = штраф Score -10
+# - 1.80–2.00R = штраф Score -5
+# - >= 2.00R = без штрафа
+#
+# TP НИКОГДА не переносится.
+# Если сетап проходит — TP всегда строго 2R.
 
 
 MIN_SCORE = 80
@@ -34,6 +42,13 @@ MIN_SCORE = 80
 REQUIRED_RR = 2.0
 
 MIN_LIQUIDITY_CLEARANCE_R = 1.5
+
+# Границы предупреждений
+LIQUIDITY_WARNING_R = 1.8
+
+# Штрафы за близкую противоположную major liquidity
+LIQUIDITY_PENALTY_CLOSE = 10
+LIQUIDITY_PENALTY_WARNING = 5
 
 MAX_SWEEP_AGE_CANDLES = 12
 
@@ -350,8 +365,6 @@ def confirm_15m(candles_15m, direction, sweep):
                 last["close"] > level
             )
 
-            # Последняя свеча должна вернуть цену
-            # выше sweep level.
             if not reclaimed:
                 return False
 
@@ -438,8 +451,6 @@ def check_5m_trigger(candles_5m, direction, sweep):
             last_close > prev_high
         )
 
-        # Для LONG нужен bullish trigger
-        # и подтверждение движения вверх.
         return (
             bullish
             and momentum
@@ -804,6 +815,27 @@ def find_nearest_opposite_liquidity(
 
 
 # ============================================================
+# LIQUIDITY PENALTY
+# ============================================================
+
+def get_liquidity_penalty(liquidity_r):
+
+    if liquidity_r is None:
+        return 0
+
+    if liquidity_r < MIN_LIQUIDITY_CLEARANCE_R:
+        return 0
+
+    if liquidity_r < LIQUIDITY_WARNING_R:
+        return LIQUIDITY_PENALTY_CLOSE
+
+    if liquidity_r < REQUIRED_RR:
+        return LIQUIDITY_PENALTY_WARNING
+
+    return 0
+
+
+# ============================================================
 # TAKE PROFIT
 # ============================================================
 
@@ -828,6 +860,7 @@ def calculate_tp(
             "reason": "invalid_entry_or_sl",
             "opposing_liquidity": None,
             "liquidity_r": None,
+            "liquidity_penalty": 0,
         }
 
     risk = abs(entry - sl)
@@ -841,6 +874,7 @@ def calculate_tp(
             "reason": "zero_risk",
             "opposing_liquidity": None,
             "liquidity_r": None,
+            "liquidity_penalty": 0,
         }
 
     risk_pct = risk / entry
@@ -854,6 +888,7 @@ def calculate_tp(
             "reason": "risk_too_small",
             "opposing_liquidity": None,
             "liquidity_r": None,
+            "liquidity_penalty": 0,
         }
 
     # --------------------------------------------------------
@@ -881,6 +916,7 @@ def calculate_tp(
             "reason": "invalid_direction",
             "opposing_liquidity": None,
             "liquidity_r": None,
+            "liquidity_penalty": 0,
         }
 
     # --------------------------------------------------------
@@ -905,7 +941,10 @@ def calculate_tp(
             liquidity_distance / risk
         )
 
-        # <1.5R = block
+        # ----------------------------------------------------
+        # TOO CLOSE — HARD BLOCK
+        # ----------------------------------------------------
+
         if liquidity_r < MIN_LIQUIDITY_CLEARANCE_R:
 
             return {
@@ -917,9 +956,34 @@ def calculate_tp(
                 ),
                 "opposing_liquidity": opposing,
                 "liquidity_r": liquidity_r,
+                "liquidity_penalty": 0,
             }
 
-        # 1.5R–2R = valid, warning
+        # ----------------------------------------------------
+        # 1.5R–1.8R — WARNING + -10 SCORE
+        # ----------------------------------------------------
+
+        if liquidity_r < LIQUIDITY_WARNING_R:
+
+            return {
+                "valid": True,
+                "tp": tp,
+                "rr": REQUIRED_RR,
+                "reason": (
+                    "2R target; opposing major "
+                    f"liquidity at {liquidity_r:.2f}R"
+                ),
+                "opposing_liquidity": opposing,
+                "liquidity_r": liquidity_r,
+                "liquidity_penalty": (
+                    LIQUIDITY_PENALTY_CLOSE
+                ),
+            }
+
+        # ----------------------------------------------------
+        # 1.8R–2R — SMALL WARNING + -5 SCORE
+        # ----------------------------------------------------
+
         if liquidity_r < REQUIRED_RR:
 
             return {
@@ -927,13 +991,19 @@ def calculate_tp(
                 "tp": tp,
                 "rr": REQUIRED_RR,
                 "reason": (
-                    f"2R target; opposing "
-                    f"liquidity at "
-                    f"{liquidity_r:.2f}R"
+                    "2R target; opposing major "
+                    f"liquidity at {liquidity_r:.2f}R"
                 ),
                 "opposing_liquidity": opposing,
                 "liquidity_r": liquidity_r,
+                "liquidity_penalty": (
+                    LIQUIDITY_PENALTY_WARNING
+                ),
             }
+
+    # --------------------------------------------------------
+    # CLEAR 2R
+    # --------------------------------------------------------
 
     return {
         "valid": True,
@@ -942,6 +1012,7 @@ def calculate_tp(
         "reason": "2R target",
         "opposing_liquidity": opposing,
         "liquidity_r": liquidity_r,
+        "liquidity_penalty": 0,
     }
 
 
@@ -1044,7 +1115,7 @@ def calculate_base_score(
 
     score = 0
 
-    # Major liquidity exists
+    # Major liquidity
     if has_major_liquidity:
         score += 20
 
@@ -1421,7 +1492,7 @@ def analyze(
         }
 
     # --------------------------------------------------------
-    # TP 2R + LIQUIDITY FILTER
+    # TP 2R + LIQUIDITY
     # --------------------------------------------------------
 
     tp_result = calculate_tp(
@@ -1430,6 +1501,10 @@ def analyze(
         direction,
         major_levels,
     )
+
+    # --------------------------------------------------------
+    # HARD LIQUIDITY BLOCK
+    # --------------------------------------------------------
 
     if not tp_result["valid"]:
 
@@ -1462,20 +1537,45 @@ def analyze(
                 )
             ),
 
+            "liquidity_penalty": 0,
+
             "sweep": sweep,
             "sweep_extreme": sweep_extreme,
         }
 
     # --------------------------------------------------------
+    # LIQUIDITY PENALTY
+    # --------------------------------------------------------
+
+    liquidity_penalty = (
+        tp_result.get(
+            "liquidity_penalty",
+            0
+        )
+    )
+
+    final_score = max(
+        0,
+        min(
+            100,
+            int(
+                score
+                - liquidity_penalty
+            )
+        )
+    )
+
+    # --------------------------------------------------------
     # FINAL SCORE
     # --------------------------------------------------------
 
-    if score < MIN_SCORE:
+    if final_score < MIN_SCORE:
 
         return {
             "status": "WAIT",
             "stage": "LOW_SCORE",
-            "score": score,
+            "score": final_score,
+            "raw_score": score,
             "direction": direction,
 
             "context_1h": context_1h,
@@ -1498,6 +1598,10 @@ def analyze(
                 tp_result.get(
                     "liquidity_r"
                 )
+            ),
+
+            "liquidity_penalty": (
+                liquidity_penalty
             ),
 
             "sweep": sweep,
@@ -1528,7 +1632,9 @@ def analyze(
         "status": "READY",
         "stage": "READY",
 
-        "score": score,
+        "score": final_score,
+        "raw_score": score,
+
         "direction": direction,
 
         # Context
@@ -1555,6 +1661,10 @@ def analyze(
 
         "liquidity_r": liquidity_r,
 
+        "liquidity_penalty": (
+            liquidity_penalty
+        ),
+
         "liquidity_warning": (
             liquidity_warning
         ),
@@ -1577,7 +1687,7 @@ def analyze(
 
         # Human-readable reason
         "reason": (
-            "TradeMind 4.2 READY: "
+            "TradeMind 4.3 READY: "
             "major sweep → "
             "15M confirmation → "
             "5M trigger → "
