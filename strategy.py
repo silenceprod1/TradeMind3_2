@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
-STRATEGY_VERSION = "5.8.3"
+STRATEGY_VERSION = "6.0.0"
 
 
 # ============================================================
@@ -11,16 +11,23 @@ STRATEGY_VERSION = "5.8.3"
 
 MIN_SCORE_READY = 80
 
-RR = 2.0
+# Минимальный допустимый RR
+MIN_RR = 2.0
 
-# Буфер за экстремумом sweep.
-# SL не ставим ровно на high/low sweep.
-SL_BUFFER_PCT = 0.05
+# Буфер за extreme sweep
+# LONG  -> SL ниже extreme
+# SHORT -> SL выше extreme
+SL_BUFFER_PCT = 0.20
 
+# Минимальная манипуляция на 5M
 MIN_5M_MANIPULATION_PCT = 0.08
+
+# Минимальное восстановление после манипуляции
 MIN_5M_RECOVERY_PCT = 0.33
 
-MIN_15M_CONFIRMATION_BODY = True
+# Минимальное расстояние от Entry до TP,
+# чтобы TP не оказался фактически в том же месте
+MIN_TP_DISTANCE_PCT = 0.15
 
 SWING_LOOKBACK_D1 = 120
 SWING_LOOKBACK_1H = 80
@@ -34,6 +41,7 @@ SWING_LOOKBACK_5M = 60
 
 @dataclass
 class StrategyResult:
+
     direction: Optional[str] = None
 
     stage: str = "D1"
@@ -61,23 +69,32 @@ class StrategyResult:
     rr: Optional[float] = None
 
     def to_dict(self):
+
         return {
             "direction": self.direction,
+
             "stage": self.stage,
+
             "score": self.score,
+
             "reason": self.reason,
 
             "liquidity": self.liquidity,
+
             "sweep": self.sweep,
 
             "confirmation_15m": self.confirmation_15m,
+
             "confirmation_5m": self.confirmation_5m,
 
             "confirmation": self.confirmation_5m,
+
             "trigger_5m": self.trigger_5m,
 
             "entry": self.entry,
+
             "stop_loss": self.stop_loss,
+
             "take_profit": self.take_profit,
 
             "rr": self.rr,
@@ -88,7 +105,8 @@ class StrategyResult:
 # BASIC HELPERS
 # ============================================================
 
-def _safe_float(value, default=0.0):
+def _safe_float(value, default=None):
+
     try:
         return float(value)
     except Exception:
@@ -96,27 +114,39 @@ def _safe_float(value, default=0.0):
 
 
 def _pct(a, b):
-    if b in (None, 0):
+
+    if a is None or b in (None, 0):
         return 0.0
 
     return abs(a - b) / abs(b) * 100.0
 
 
 def _body(candle):
+
+    if not candle:
+        return 0.0
+
     return abs(
-        _safe_float(candle.get("close"))
-        - _safe_float(candle.get("open"))
+        _safe_float(candle.get("close"), 0.0)
+        -
+        _safe_float(candle.get("open"), 0.0)
     )
 
 
 def _range(candle):
+
+    if not candle:
+        return 0.0
+
     return (
-        _safe_float(candle.get("high"))
-        - _safe_float(candle.get("low"))
+        _safe_float(candle.get("high"), 0.0)
+        -
+        _safe_float(candle.get("low"), 0.0)
     )
 
 
 def _body_ratio(candle):
+
     r = _range(candle)
 
     if r <= 0:
@@ -126,16 +156,20 @@ def _body_ratio(candle):
 
 
 def _bullish(candle):
+
     return (
-        _safe_float(candle.get("close"))
-        > _safe_float(candle.get("open"))
+        _safe_float(candle.get("close"), 0.0)
+        >
+        _safe_float(candle.get("open"), 0.0)
     )
 
 
 def _bearish(candle):
+
     return (
-        _safe_float(candle.get("close"))
-        < _safe_float(candle.get("open"))
+        _safe_float(candle.get("close"), 0.0)
+        <
+        _safe_float(candle.get("open"), 0.0)
     )
 
 
@@ -144,6 +178,7 @@ def _bearish(candle):
 # ============================================================
 
 def _swing_highs(candles, lookback):
+
     if not candles:
         return []
 
@@ -153,12 +188,29 @@ def _swing_highs(candles, lookback):
 
     for i in range(1, len(data) - 1):
 
-        current = data[i]["high"]
+        current = _safe_float(
+            data[i].get("high")
+        )
+
+        if current is None:
+            continue
+
+        left = _safe_float(
+            data[i - 1].get("high")
+        )
+
+        right = _safe_float(
+            data[i + 1].get("high")
+        )
+
+        if left is None or right is None:
+            continue
 
         if (
-            current > data[i - 1]["high"]
-            and current >= data[i + 1]["high"]
+            current > left
+            and current >= right
         ):
+
             result.append({
                 "index": i,
                 "price": current,
@@ -169,6 +221,7 @@ def _swing_highs(candles, lookback):
 
 
 def _swing_lows(candles, lookback):
+
     if not candles:
         return []
 
@@ -178,12 +231,29 @@ def _swing_lows(candles, lookback):
 
     for i in range(1, len(data) - 1):
 
-        current = data[i]["low"]
+        current = _safe_float(
+            data[i].get("low")
+        )
+
+        if current is None:
+            continue
+
+        left = _safe_float(
+            data[i - 1].get("low")
+        )
+
+        right = _safe_float(
+            data[i + 1].get("low")
+        )
+
+        if left is None or right is None:
+            continue
 
         if (
-            current < data[i - 1]["low"]
-            and current <= data[i + 1]["low"]
+            current < left
+            and current <= right
         ):
+
             result.append({
                 "index": i,
                 "price": current,
@@ -197,15 +267,25 @@ def _swing_lows(candles, lookback):
 # MARKET STRUCTURE
 # ============================================================
 
-def structure_context(candles, swing_lookback=80):
+def structure_context(
+    candles,
+    swing_lookback=80
+):
 
     if not candles or len(candles) < 20:
         return "NEUTRAL"
 
     data = candles[-swing_lookback:]
 
-    highs = _swing_highs(data, len(data))
-    lows = _swing_lows(data, len(data))
+    highs = _swing_highs(
+        data,
+        len(data)
+    )
+
+    lows = _swing_lows(
+        data,
+        len(data)
+    )
 
     # --------------------------------------------------------
     # CLASSICAL STRUCTURE
@@ -214,9 +294,11 @@ def structure_context(candles, swing_lookback=80):
     if len(highs) >= 2 and len(lows) >= 2:
 
         previous_high = highs[-2]["price"]
+
         latest_high = highs[-1]["price"]
 
         previous_low = lows[-2]["price"]
+
         latest_low = lows[-1]["price"]
 
         # HH + HL
@@ -233,7 +315,12 @@ def structure_context(candles, swing_lookback=80):
         ):
             return "BEARISH"
 
-    latest_close = data[-1]["close"]
+    latest_close = _safe_float(
+        data[-1].get("close")
+    )
+
+    if latest_close is None:
+        return "NEUTRAL"
 
     # --------------------------------------------------------
     # BULLISH BOS
@@ -265,10 +352,19 @@ def structure_context(candles, swing_lookback=80):
 
     if len(recent) >= 6:
 
-        first_close = recent[0]["close"]
-        last_close = recent[-1]["close"]
+        first_close = _safe_float(
+            recent[0].get("close")
+        )
 
-        if first_close:
+        last_close = _safe_float(
+            recent[-1].get("close")
+        )
+
+        if (
+            first_close is not None
+            and last_close is not None
+            and first_close != 0
+        ):
 
             move = (
                 (last_close - first_close)
@@ -289,16 +385,21 @@ def structure_context(candles, swing_lookback=80):
 # D1 / W1 CONTEXT
 # ============================================================
 
-def get_higher_timeframe_direction(candles_d1, candles_w1):
+def get_higher_timeframe_direction(
+    candles_d1,
+    candles_w1
+):
 
     d1 = structure_context(
         candles_d1,
         SWING_LOOKBACK_D1
     )
 
+    # D1 главный
     if d1 in ("BULLISH", "BEARISH"):
         return d1, d1
 
+    # W1 fallback
     w1 = structure_context(
         candles_w1,
         SWING_LOOKBACK_D1
@@ -311,10 +412,12 @@ def get_higher_timeframe_direction(candles_d1, candles_w1):
 
 
 # ============================================================
-# LIQUIDITY
+# LIQUIDITY NORMALIZATION
 # ============================================================
 
-def _normalize_liquidity_levels(major_levels):
+def _normalize_liquidity_levels(
+    major_levels
+):
 
     if not major_levels:
         return []
@@ -323,28 +426,44 @@ def _normalize_liquidity_levels(major_levels):
 
     for level in major_levels:
 
+        if not isinstance(level, dict):
+            continue
+
         price = level.get(
             "price",
             level.get("level")
         )
 
-        if price is None:
+        price = _safe_float(price)
+
+        if price is None or price <= 0:
             continue
 
         item = dict(level)
 
-        item["price"] = _safe_float(price)
+        item["price"] = price
 
         result.append(item)
 
     return result
 
 
+# ============================================================
+# DIRECTIONAL LIQUIDITY FOR SWEEP
+# ============================================================
+
 def get_directional_liquidity(
     major_levels,
     current_price,
     direction
 ):
+
+    current_price = _safe_float(
+        current_price
+    )
+
+    if current_price is None:
+        return None
 
     levels = _normalize_liquidity_levels(
         major_levels
@@ -356,20 +475,23 @@ def get_directional_liquidity(
 
         price = level["price"]
 
-        if price <= 0:
-            continue
-
+        # Already swept liquidity
+        # is not fresh.
         if level.get("swept") is True:
             continue
 
         if direction == "LONG":
 
+            # SSL below price
             if price < current_price:
+
                 candidates.append(level)
 
         elif direction == "SHORT":
 
+            # BSL above price
             if price > current_price:
+
                 candidates.append(level)
 
     if not candidates:
@@ -385,10 +507,84 @@ def get_directional_liquidity(
 
 
 # ============================================================
+# NEXT MAJOR LIQUIDITY TARGET
+# ============================================================
+
+def get_next_major_target(
+    major_levels,
+    entry,
+    direction
+):
+    """
+    TP is ALWAYS the next major UNSWEPT
+    liquidity in the direction of the trade.
+
+    LONG:
+        next major liquidity ABOVE Entry
+
+    SHORT:
+        next major liquidity BELOW Entry
+
+    The swept liquidity that created the setup
+    is never reused as TP.
+    """
+
+    entry = _safe_float(entry)
+
+    if entry is None or entry <= 0:
+        return None
+
+    levels = _normalize_liquidity_levels(
+        major_levels
+    )
+
+    candidates = []
+
+    for level in levels:
+
+        price = level["price"]
+
+        # Never use already swept liquidity.
+        if level.get("swept") is True:
+            continue
+
+        if direction == "LONG":
+
+            if price > entry:
+                candidates.append(level)
+
+        elif direction == "SHORT":
+
+            if price < entry:
+                candidates.append(level)
+
+    if not candidates:
+        return None
+
+    if direction == "LONG":
+
+        candidates.sort(
+            key=lambda x: x["price"]
+        )
+
+    else:
+
+        candidates.sort(
+            key=lambda x: x["price"],
+            reverse=True
+        )
+
+    return candidates[0]
+
+
+# ============================================================
 # FVG
 # ============================================================
 
-def find_fvg(candles, direction):
+def find_fvg(
+    candles,
+    direction
+):
 
     if not candles or len(candles) < 3:
         return None
@@ -398,24 +594,48 @@ def find_fvg(candles, direction):
     c1 = data[0]
     c3 = data[2]
 
+    c1_high = _safe_float(
+        c1.get("high")
+    )
+
+    c1_low = _safe_float(
+        c1.get("low")
+    )
+
+    c3_high = _safe_float(
+        c3.get("high")
+    )
+
+    c3_low = _safe_float(
+        c3.get("low")
+    )
+
+    if None in (
+        c1_high,
+        c1_low,
+        c3_high,
+        c3_low,
+    ):
+        return None
+
     if direction == "LONG":
 
-        if c3["low"] > c1["high"]:
+        if c3_low > c1_high:
 
             return {
                 "direction": "LONG",
-                "low": c1["high"],
-                "high": c3["low"],
+                "low": c1_high,
+                "high": c3_low,
             }
 
     if direction == "SHORT":
 
-        if c3["high"] < c1["low"]:
+        if c3_high < c1_low:
 
             return {
                 "direction": "SHORT",
-                "low": c3["high"],
-                "high": c1["low"],
+                "low": c3_high,
+                "high": c1_low,
             }
 
     return None
@@ -436,52 +656,102 @@ def confirmation_15m(
 
     recent = candles_15m[-8:]
 
+    candle = recent[-1]
+
     if direction == "LONG":
 
-        recent_high = max(
-            c["high"]
-            for c in recent[:-1]
+        previous = recent[:-1]
+
+        highs = [
+            _safe_float(c.get("high"))
+            for c in previous
+        ]
+
+        highs = [
+            x for x in highs
+            if x is not None
+        ]
+
+        if not highs:
+            return None
+
+        recent_high = max(highs)
+
+        close = _safe_float(
+            candle.get("close")
         )
 
-        candle = recent[-1]
+        if close is None:
+            return None
 
         body_close = (
-            candle["close"] > recent_high
+            close > recent_high
         )
 
-        bullish_body = _bullish(candle)
+        bullish_body = _bullish(
+            candle
+        )
 
-        if body_close and bullish_body:
+        if (
+            body_close
+            and bullish_body
+        ):
 
             return {
                 "confirmed": True,
                 "direction": "LONG",
-                "price": candle["close"],
+                "price": close,
                 "time": candle.get("open_time"),
                 "type": "15M BULLISH CONFIRMATION",
             }
 
+    # --------------------------------------------------------
+    # SHORT
+    # --------------------------------------------------------
+
     if direction == "SHORT":
 
-        recent_low = min(
-            c["low"]
-            for c in recent[:-1]
+        previous = recent[:-1]
+
+        lows = [
+            _safe_float(c.get("low"))
+            for c in previous
+        ]
+
+        lows = [
+            x for x in lows
+            if x is not None
+        ]
+
+        if not lows:
+            return None
+
+        recent_low = min(lows)
+
+        close = _safe_float(
+            candle.get("close")
         )
 
-        candle = recent[-1]
+        if close is None:
+            return None
 
         body_close = (
-            candle["close"] < recent_low
+            close < recent_low
         )
 
-        bearish_body = _bearish(candle)
+        bearish_body = _bearish(
+            candle
+        )
 
-        if body_close and bearish_body:
+        if (
+            body_close
+            and bearish_body
+        ):
 
             return {
                 "confirmed": True,
                 "direction": "SHORT",
-                "price": candle["close"],
+                "price": close,
                 "time": candle.get("open_time"),
                 "type": "15M BEARISH CONFIRMATION",
             }
@@ -504,24 +774,47 @@ def detect_5m_ilm(
 
     data = candles_5m[-10:]
 
+    last = data[-1]
+
+    previous = data[:-1]
+
+    # ========================================================
+    # LONG
+    # ========================================================
+
     if direction == "LONG":
 
-        lowest = min(
-            data[:-1],
-            key=lambda x: x["low"]
+        lowest_candle = min(
+            previous,
+            key=lambda x: _safe_float(
+                x.get("low"),
+                0.0
+            )
         )
 
-        manipulation_low = lowest["low"]
-
-        reference = max(
-            c["high"]
-            for c in data[:-1]
+        manipulation_low = _safe_float(
+            lowest_candle.get("low")
         )
 
-        recovery = (
-            data[-1]["close"]
-            - manipulation_low
-        )
+        if manipulation_low is None:
+            return None
+
+        highs = [
+            _safe_float(
+                c.get("high")
+            )
+            for c in previous
+        ]
+
+        highs = [
+            x for x in highs
+            if x is not None
+        ]
+
+        if not highs:
+            return None
+
+        reference = max(highs)
 
         total_range = (
             reference
@@ -531,14 +824,21 @@ def detect_5m_ilm(
         if total_range <= 0:
             return None
 
-        recovery_ratio = (
-            recovery / total_range
+        close = _safe_float(
+            last.get("close")
         )
 
-        last = data[-1]
+        if close is None:
+            return None
 
-        bullish_close = (
-            last["close"] > last["open"]
+        recovery = (
+            close
+            - manipulation_low
+        )
+
+        recovery_ratio = (
+            recovery
+            / total_range
         )
 
         meaningful_manipulation = (
@@ -549,10 +849,19 @@ def detect_5m_ilm(
             >= MIN_5M_MANIPULATION_PCT
         )
 
+        bullish_close = _bullish(
+            last
+        )
+
+        body_ratio = _body_ratio(
+            last
+        )
+
         if (
             meaningful_manipulation
             and recovery_ratio >= MIN_5M_RECOVERY_PCT
             and bullish_close
+            and body_ratio >= 0.35
         ):
 
             return {
@@ -564,32 +873,51 @@ def detect_5m_ilm(
                     recovery_ratio,
                     3
                 ),
-                "price": last["close"],
+                "body_ratio": round(
+                    body_ratio,
+                    3
+                ),
+                "price": close,
                 "time": last.get("open_time"),
             }
 
-    # --------------------------------------------------------
+    # ========================================================
     # SHORT
-    # --------------------------------------------------------
+    # ========================================================
 
     if direction == "SHORT":
 
-        highest = max(
-            data[:-1],
-            key=lambda x: x["high"]
+        highest_candle = max(
+            previous,
+            key=lambda x: _safe_float(
+                x.get("high"),
+                0.0
+            )
         )
 
-        manipulation_high = highest["high"]
-
-        reference = min(
-            c["low"]
-            for c in data[:-1]
+        manipulation_high = _safe_float(
+            highest_candle.get("high")
         )
 
-        recovery = (
-            manipulation_high
-            - data[-1]["close"]
-        )
+        if manipulation_high is None:
+            return None
+
+        lows = [
+            _safe_float(
+                c.get("low")
+            )
+            for c in previous
+        ]
+
+        lows = [
+            x for x in lows
+            if x is not None
+        ]
+
+        if not lows:
+            return None
+
+        reference = min(lows)
 
         total_range = (
             manipulation_high
@@ -599,14 +927,21 @@ def detect_5m_ilm(
         if total_range <= 0:
             return None
 
-        recovery_ratio = (
-            recovery / total_range
+        close = _safe_float(
+            last.get("close")
         )
 
-        last = data[-1]
+        if close is None:
+            return None
 
-        bearish_close = (
-            last["close"] < last["open"]
+        recovery = (
+            manipulation_high
+            - close
+        )
+
+        recovery_ratio = (
+            recovery
+            / total_range
         )
 
         meaningful_manipulation = (
@@ -617,10 +952,19 @@ def detect_5m_ilm(
             >= MIN_5M_MANIPULATION_PCT
         )
 
+        bearish_close = _bearish(
+            last
+        )
+
+        body_ratio = _body_ratio(
+            last
+        )
+
         if (
             meaningful_manipulation
             and recovery_ratio >= MIN_5M_RECOVERY_PCT
             and bearish_close
+            and body_ratio >= 0.35
         ):
 
             return {
@@ -632,7 +976,11 @@ def detect_5m_ilm(
                     recovery_ratio,
                     3
                 ),
-                "price": last["close"],
+                "body_ratio": round(
+                    body_ratio,
+                    3
+                ),
+                "price": close,
                 "time": last.get("open_time"),
             }
 
@@ -648,19 +996,31 @@ def calculate_entry(
     direction,
     confirmation_5m
 ):
+    """
+    Entry is based on the confirmed 5M trigger.
+
+    We DO NOT simply use current price if a valid
+    5M confirmation exists.
+
+    This prevents the bot from waiting for an
+    arbitrary distant Entry.
+    """
 
     if confirmation_5m:
 
-        price = confirmation_5m.get(
-            "price",
-            current_price
+        price = _safe_float(
+            confirmation_5m.get("price")
         )
 
-        if price:
-            return float(price)
+        if price is not None and price > 0:
+            return price
 
-    if current_price:
-        return float(current_price)
+    current_price = _safe_float(
+        current_price
+    )
+
+    if current_price is not None and current_price > 0:
+        return current_price
 
     return None
 
@@ -675,32 +1035,22 @@ def calculate_stop(
     sweep
 ):
     """
-    TradeMind SL:
+    SL is always behind the actual sweep extreme.
 
     LONG:
-        ниже extreme 1H sweep
+        extreme - 0.20%
 
     SHORT:
-        выше extreme 1H sweep
+        extreme + 0.20%
 
-    SL НЕ ставится ровно на extreme.
-    Добавляется технический buffer.
-
-    Если sweep отсутствует или extreme
-    невозможно определить — SL = None.
+    No fallback to random 5M high/low.
     """
 
     if not sweep:
         return None
 
-    extreme = sweep.get("extreme")
-
-    if extreme is None:
-        return None
-
     extreme = _safe_float(
-        extreme,
-        None
+        sweep.get("extreme")
     )
 
     if extreme is None or extreme <= 0:
@@ -712,17 +1062,9 @@ def calculate_stop(
         / 100.0
     )
 
-    # --------------------------------------------------------
-    # LONG
-    # --------------------------------------------------------
-
     if direction == "LONG":
 
         return extreme - buffer
-
-    # --------------------------------------------------------
-    # SHORT
-    # --------------------------------------------------------
 
     if direction == "SHORT":
 
@@ -732,42 +1074,136 @@ def calculate_stop(
 
 
 # ============================================================
-# TAKE PROFIT — EXACT 1:2
+# TAKE PROFIT
 # ============================================================
 
 def calculate_take_profit(
     entry,
     stop_loss,
-    direction
+    direction,
+    major_levels
+):
+    """
+    NEW TP DOCTRINE:
+
+    TP = NEXT MAJOR UNSWEPT LIQUIDITY.
+
+    We do NOT force TP to 2R.
+
+    Example:
+
+        risk = $0.20
+        next liquidity = $0.60 away
+
+        RR = 1:3
+
+        TP stays at liquidity.
+
+    If next liquidity gives only 1:1.5:
+
+        NO TRADE.
+
+    We never move TP artificially farther
+    just to manufacture 1:2.
+    """
+
+    entry = _safe_float(entry)
+
+    stop_loss = _safe_float(
+        stop_loss
+    )
+
+    if (
+        entry is None
+        or stop_loss is None
+        or entry <= 0
+        or stop_loss <= 0
+    ):
+        return None
+
+    target = get_next_major_target(
+        major_levels,
+        entry,
+        direction
+    )
+
+    if not target:
+        return None
+
+    tp = _safe_float(
+        target.get("price")
+    )
+
+    if tp is None or tp <= 0:
+        return None
+
+    if direction == "LONG":
+
+        if tp <= entry:
+            return None
+
+    elif direction == "SHORT":
+
+        if tp >= entry:
+            return None
+
+    else:
+        return None
+
+    distance_pct = _pct(
+        tp,
+        entry
+    )
+
+    if distance_pct < MIN_TP_DISTANCE_PCT:
+        return None
+
+    return tp
+
+
+# ============================================================
+# RR CALCULATION
+# ============================================================
+
+def calculate_rr(
+    entry,
+    stop_loss,
+    take_profit
 ):
 
-    if entry is None or stop_loss is None:
+    entry = _safe_float(entry)
+
+    stop_loss = _safe_float(
+        stop_loss
+    )
+
+    take_profit = _safe_float(
+        take_profit
+    )
+
+    if (
+        entry is None
+        or stop_loss is None
+        or take_profit is None
+    ):
         return None
 
     risk = abs(
         entry - stop_loss
     )
 
+    reward = abs(
+        take_profit - entry
+    )
+
     if risk <= 0:
         return None
 
-    if direction == "LONG":
-
-        return entry + (
-            risk * RR
-        )
-
-    if direction == "SHORT":
-
-        return entry - (
-            risk * RR
-        )
-
-    return None
+    return reward / risk
 
 
 # ============================================================
-# STRUCTURAL TARGET CHECK
+# TARGET VALIDATION
 # ============================================================
 
 def validate_target(
@@ -777,46 +1213,62 @@ def validate_target(
     direction,
     major_levels
 ):
+    """
+    STRICT TARGET RULE:
+
+        RR >= 1:2
+
+    Not exactly 1:2.
+
+    1:2.0  -> valid
+    1:2.3  -> valid
+    1:3.0  -> valid
+
+    1:1.99 -> invalid
+    1:1.8  -> invalid
+    1:1.5  -> invalid
+    """
+
+    entry = _safe_float(entry)
+
+    stop_loss = _safe_float(
+        stop_loss
+    )
+
+    take_profit = _safe_float(
+        take_profit
+    )
 
     if (
         entry is None
         or stop_loss is None
         or take_profit is None
     ):
-        return False, "Невозможно рассчитать RR."
 
-    risk = abs(
-        entry - stop_loss
-    )
+        return False, "Entry / SL / TP отсутствуют."
 
-    if risk <= 0:
-        return False, "Некорректный SL."
+    if (
+        entry <= 0
+        or stop_loss <= 0
+        or take_profit <= 0
+    ):
 
-    reward = abs(
-        take_profit - entry
-    )
-
-    rr = reward / risk
+        return False, "Некорректные Entry / SL / TP."
 
     # --------------------------------------------------------
-    # EXACT 1:2
-    # --------------------------------------------------------
-
-    if abs(rr - RR) > 0.001:
-        return False, "RR не равен 1:2."
-
-    # --------------------------------------------------------
-    # CHECK SL DIRECTION
+    # Direction validation
     # --------------------------------------------------------
 
     if direction == "LONG":
 
         if stop_loss >= entry:
+
             return False, (
                 "LONG: SL должен быть ниже Entry."
             )
 
         if take_profit <= entry:
+
             return False, (
                 "LONG: TP должен быть выше Entry."
             )
@@ -824,11 +1276,13 @@ def validate_target(
     elif direction == "SHORT":
 
         if stop_loss <= entry:
+
             return False, (
                 "SHORT: SL должен быть выше Entry."
             )
 
         if take_profit >= entry:
+
             return False, (
                 "SHORT: TP должен быть ниже Entry."
             )
@@ -838,53 +1292,79 @@ def validate_target(
         return False, "Неизвестное направление."
 
     # --------------------------------------------------------
-    # MAJOR LIQUIDITY
+    # RR
     # --------------------------------------------------------
 
-    levels = _normalize_liquidity_levels(
-        major_levels
+    rr = calculate_rr(
+        entry,
+        stop_loss,
+        take_profit
     )
 
-    for level in levels:
+    if rr is None:
 
-        price = level["price"]
+        return False, (
+            "Невозможно рассчитать RR."
+        )
 
-        # Уже снятая ликвидность не является
-        # актуальной целью.
-        if level.get("swept") is True:
-            continue
+    # --------------------------------------------------------
+    # HARD MINIMUM 1:2
+    # --------------------------------------------------------
 
-        if direction == "LONG":
+    if rr < MIN_RR:
 
-            if (
-                price > entry
-                and abs(
-                    price - take_profit
-                )
-                <= risk * 0.15
-            ):
+        return False, (
+            f"RR {rr:.2f} меньше минимального 1:2."
+        )
 
-                return False, (
-                    "TP слишком близко к "
-                    "major liquidity."
-                )
+    # --------------------------------------------------------
+    # Check that TP corresponds to an actual
+    # major unswept liquidity level.
+    # --------------------------------------------------------
 
-        if direction == "SHORT":
+    target = get_next_major_target(
+        major_levels,
+        entry,
+        direction
+    )
 
-            if (
-                price < entry
-                and abs(
-                    price - take_profit
-                )
-                <= risk * 0.15
-            ):
+    if not target:
 
-                return False, (
-                    "TP слишком близко к "
-                    "major liquidity."
-                )
+        return False, (
+            "Следующая крупная неснятая "
+            "ликвидность не найдена."
+        )
 
-    return True, "TP валиден."
+    target_price = _safe_float(
+        target.get("price")
+    )
+
+    if target_price is None:
+
+        return False, (
+            "Цена target liquidity неизвестна."
+        )
+
+    # TP should be the actual target,
+    # not an artificial 2R price.
+    tolerance = max(
+        abs(entry) * 0.001,
+        0.00000001
+    )
+
+    if abs(
+        take_profit - target_price
+    ) > tolerance:
+
+        return False, (
+            "TP не совпадает со следующей "
+            "крупной неснятой ликвидностью."
+        )
+
+    return True, (
+        f"TP = next major liquidity. "
+        f"RR = {rr:.2f}."
+    )
 
 
 # ============================================================
@@ -904,23 +1384,54 @@ def calculate_score(
 
     score = 0
 
-    if d1 in ("BULLISH", "BEARISH"):
+    # --------------------------------------------------------
+    # Higher timeframe
+    # --------------------------------------------------------
+
+    if d1 in (
+        "BULLISH",
+        "BEARISH"
+    ):
         score += 20
+
+    # --------------------------------------------------------
+    # 1H sync
+    # --------------------------------------------------------
 
     if h1 == direction:
         score += 20
 
+    # --------------------------------------------------------
+    # Major liquidity
+    # --------------------------------------------------------
+
     if liquidity:
         score += 10
+
+    # --------------------------------------------------------
+    # Sweep
+    # --------------------------------------------------------
 
     if sweep:
         score += 20
 
+    # --------------------------------------------------------
+    # 15M
+    # --------------------------------------------------------
+
     if confirmation_15:
         score += 10
 
+    # --------------------------------------------------------
+    # 5M
+    # --------------------------------------------------------
+
     if confirmation_5:
         score += 10
+
+    # --------------------------------------------------------
+    # Valid target + RR
+    # --------------------------------------------------------
 
     if rr_valid:
         score += 10
@@ -968,8 +1479,7 @@ def analyze(
     result = StrategyResult()
 
     current_price = _safe_float(
-        current_price,
-        None
+        current_price
     )
 
     # ========================================================
@@ -1013,9 +1523,7 @@ def analyze(
 
     result.stage = "1H"
 
-    expected_h1 = direction
-
-    if h1 != expected_h1:
+    if h1 != direction:
 
         result.score = 35
 
@@ -1083,9 +1591,9 @@ def analyze(
 
         return result.to_dict()
 
-    # Sweep должен иметь экстремум,
-    # потому что от него рассчитывается SL.
-    sweep_extreme = sweep.get("extreme")
+    sweep_extreme = _safe_float(
+        sweep.get("extreme")
+    )
 
     if sweep_extreme is None:
 
@@ -1139,6 +1647,7 @@ def analyze(
     )
 
     result.confirmation_5m = confirm_5
+
     result.trigger_5m = confirm_5
 
     if confirm_5 is None:
@@ -1176,7 +1685,7 @@ def analyze(
         return result.to_dict()
 
     # ========================================================
-    # 8. SL — ЗА SWEEP EXTREME
+    # 8. STOP LOSS
     # ========================================================
 
     stop_loss = calculate_stop(
@@ -1192,15 +1701,14 @@ def analyze(
         result.score = 70
 
         result.reason = (
-            "5M trigger есть, "
-            "но SL невозможно определить "
+            "SL невозможно определить "
             "за sweep extreme."
         )
 
         return result.to_dict()
 
     # --------------------------------------------------------
-    # SL MUST BE ON CORRECT SIDE
+    # SL position validation
     # --------------------------------------------------------
 
     if trade_direction == "LONG":
@@ -1211,7 +1719,7 @@ def analyze(
 
             result.reason = (
                 "LONG: SL должен быть "
-                "ниже Entry и за sweep extreme."
+                "ниже Entry."
             )
 
             return result.to_dict()
@@ -1224,19 +1732,42 @@ def analyze(
 
             result.reason = (
                 "SHORT: SL должен быть "
-                "выше Entry и за sweep extreme."
+                "выше Entry."
             )
 
             return result.to_dict()
 
     # ========================================================
-    # 9. EXACT 1:2 TP
+    # 9. NEXT MAJOR LIQUIDITY
+    # ========================================================
+
+    target = get_next_major_target(
+        major_levels,
+        entry,
+        trade_direction
+    )
+
+    if not target:
+
+        result.score = 70
+
+        result.reason = (
+            "Следующая крупная "
+            "неснятая ликвидность "
+            "для TP не найдена."
+        )
+
+        return result.to_dict()
+
+    # ========================================================
+    # 10. TP = NEXT MAJOR LIQUIDITY
     # ========================================================
 
     take_profit = calculate_take_profit(
         entry,
         stop_loss,
-        trade_direction
+        trade_direction,
+        major_levels
     )
 
     result.take_profit = take_profit
@@ -1246,13 +1777,54 @@ def analyze(
         result.score = 70
 
         result.reason = (
-            "Невозможно рассчитать TP 1:2."
+            "TP на следующей крупной "
+            "ликвидности невозможно определить."
         )
 
         return result.to_dict()
 
     # ========================================================
-    # 10. VALIDATE TP / RR
+    # 11. RR
+    # ========================================================
+
+    rr = calculate_rr(
+        entry,
+        stop_loss,
+        take_profit
+    )
+
+    result.rr = rr
+
+    if rr is None:
+
+        result.score = 70
+
+        result.reason = (
+            "Невозможно рассчитать RR."
+        )
+
+        return result.to_dict()
+
+    # ========================================================
+    # 12. HARD RR FILTER
+    # ========================================================
+
+    if rr < MIN_RR:
+
+        result.score = 70
+
+        result.reason = (
+            f"Следующая крупная ликвидность "
+            f"даёт только RR 1:{rr:.2f}. "
+            f"Минимум 1:2 → NO TRADE."
+        )
+
+        result.stage = "WAIT"
+
+        return result.to_dict()
+
+    # ========================================================
+    # 13. TARGET VALIDATION
     # ========================================================
 
     rr_valid, target_reason = validate_target(
@@ -1269,47 +1841,12 @@ def analyze(
 
         result.reason = target_reason
 
-        return result.to_dict()
-
-    # ========================================================
-    # 11. RR
-    # ========================================================
-
-    risk = abs(
-        entry - stop_loss
-    )
-
-    reward = abs(
-        take_profit - entry
-    )
-
-    result.rr = (
-        reward / risk
-        if risk > 0
-        else None
-    )
-
-    # Жёсткая защита READY.
-    if (
-        result.entry is None
-        or result.stop_loss is None
-        or result.take_profit is None
-        or result.rr is None
-        or abs(result.rr - RR) > 0.001
-    ):
-
         result.stage = "WAIT"
-        result.score = 70
-
-        result.reason = (
-            "Entry / SL / TP / RR невалидны. "
-            "Вход запрещён."
-        )
 
         return result.to_dict()
 
     # ========================================================
-    # 12. FINAL SCORE
+    # 14. FINAL SCORE
     # ========================================================
 
     result.score = calculate_score(
@@ -1320,7 +1857,7 @@ def analyze(
         sweep=sweep,
         confirmation_15=confirm_15,
         confirmation_5=confirm_5,
-        rr_valid=rr_valid,
+        rr_valid=True,
     )
 
     label = score_label(
@@ -1328,16 +1865,21 @@ def analyze(
     )
 
     # ========================================================
-    # FINAL DECISION
+    # 15. FINAL READY
     # ========================================================
 
     if (
         result.score >= MIN_SCORE_READY
+
         and result.entry is not None
+
         and result.stop_loss is not None
+
         and result.take_profit is not None
+
         and result.rr is not None
-        and abs(result.rr - RR) <= 0.001
+
+        and result.rr >= MIN_RR
     ):
 
         result.stage = "READY"
@@ -1345,10 +1887,17 @@ def analyze(
         result.reason = (
             f"{label} SETUP → "
             f"{trade_direction}. "
+
             "D1 → 1H → MAJOR SWEEP → "
             "15M → 5M ILM подтверждены. "
-            "SL за sweep extreme. "
-            "TP = EXACT 1:2."
+
+            f"SL за sweep extreme "
+            f"+ {SL_BUFFER_PCT:.2f}% buffer. "
+
+            "TP = следующая крупная "
+            "неснятая ликвидность. "
+
+            f"RR = 1:{result.rr:.2f}."
         )
 
     else:
@@ -1368,19 +1917,38 @@ def analyze(
 # ============================================================
 
 __all__ = [
+
     "STRATEGY_VERSION",
+
     "StrategyResult",
+
     "analyze",
+
     "structure_context",
+
     "get_higher_timeframe_direction",
+
     "get_directional_liquidity",
+
+    "get_next_major_target",
+
     "find_fvg",
+
     "confirmation_15m",
+
     "detect_5m_ilm",
+
     "calculate_entry",
+
     "calculate_stop",
+
     "calculate_take_profit",
+
+    "calculate_rr",
+
     "validate_target",
+
     "calculate_score",
+
     "score_label",
 ]
