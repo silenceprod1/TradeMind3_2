@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
-STRATEGY_VERSION = "5.8.2"
+STRATEGY_VERSION = "5.8.3"
 
 
 # ============================================================
@@ -12,6 +12,10 @@ STRATEGY_VERSION = "5.8.2"
 MIN_SCORE_READY = 80
 
 RR = 2.0
+
+# Буфер за экстремумом sweep.
+# SL не ставим ровно на high/low sweep.
+SL_BUFFER_PCT = 0.05
 
 MIN_5M_MANIPULATION_PCT = 0.08
 MIN_5M_RECOVERY_PCT = 0.33
@@ -69,7 +73,6 @@ class StrategyResult:
             "confirmation_15m": self.confirmation_15m,
             "confirmation_5m": self.confirmation_5m,
 
-            # aliases для текущего bot(1).py
             "confirmation": self.confirmation_5m,
             "trigger_5m": self.trigger_5m,
 
@@ -195,22 +198,6 @@ def _swing_lows(candles, lookback):
 # ============================================================
 
 def structure_context(candles, swing_lookback=80):
-    """
-    Определение структуры.
-
-    D1/W1:
-        HH + HL = BULLISH
-        LH + LL = BEARISH
-
-    1H:
-        классическая структура
-        +
-        подтверждённый BOS
-        +
-        выраженный импульс.
-
-    Wick не считается BOS.
-    """
 
     if not candles or len(candles) < 20:
         return "NEUTRAL"
@@ -309,11 +296,9 @@ def get_higher_timeframe_direction(candles_d1, candles_w1):
         SWING_LOOKBACK_D1
     )
 
-    # D1 is primary.
     if d1 in ("BULLISH", "BEARISH"):
         return d1, d1
 
-    # W1 fallback only when D1 is unclear.
     w1 = structure_context(
         candles_w1,
         SWING_LOOKBACK_D1
@@ -338,7 +323,10 @@ def _normalize_liquidity_levels(major_levels):
 
     for level in major_levels:
 
-        price = level.get("price", level.get("level"))
+        price = level.get(
+            "price",
+            level.get("level")
+        )
 
         if price is None:
             continue
@@ -357,15 +345,6 @@ def get_directional_liquidity(
     current_price,
     direction
 ):
-    """
-    Только major liquidity.
-
-    LONG:
-        ищем SSL ниже цены.
-
-    SHORT:
-        ищем BSL выше цены.
-    """
 
     levels = _normalize_liquidity_levels(
         major_levels
@@ -386,19 +365,16 @@ def get_directional_liquidity(
         if direction == "LONG":
 
             if price < current_price:
-
                 candidates.append(level)
 
         elif direction == "SHORT":
 
             if price > current_price:
-
                 candidates.append(level)
 
     if not candidates:
         return None
 
-    # Ближайшая major liquidity
     candidates.sort(
         key=lambda x: abs(
             x["price"] - current_price
@@ -413,15 +389,6 @@ def get_directional_liquidity(
 # ============================================================
 
 def find_fvg(candles, direction):
-    """
-    Простой 3-candle FVG.
-
-    LONG:
-        candle 3 low > candle 1 high
-
-    SHORT:
-        candle 3 high < candle 1 low
-    """
 
     if not candles or len(candles) < 3:
         return None
@@ -463,19 +430,6 @@ def confirmation_15m(
     direction,
     sweep
 ):
-    """
-    После 1H sweep ждём подтверждение на 15M.
-
-    LONG:
-        sweep снизу
-        +
-        bullish displacement
-        +
-        body close выше локальной структуры.
-
-    SHORT:
-        зеркально.
-    """
 
     if not candles_15m or len(candles_15m) < 10:
         return None
@@ -544,21 +498,6 @@ def detect_5m_ilm(
     direction,
     sweep
 ):
-    """
-    TradeMind ILM.
-
-    LONG:
-        downside manipulation
-        -> V reversal
-        -> recovery
-        -> bullish body confirmation
-
-    SHORT:
-        upside manipulation
-        -> L reversal
-        -> recovery
-        -> bearish body confirmation
-    """
 
     if not candles_5m or len(candles_5m) < 10:
         return None
@@ -592,7 +531,9 @@ def detect_5m_ilm(
         if total_range <= 0:
             return None
 
-        recovery_ratio = recovery / total_range
+        recovery_ratio = (
+            recovery / total_range
+        )
 
         last = data[-1]
 
@@ -658,7 +599,9 @@ def detect_5m_ilm(
         if total_range <= 0:
             return None
 
-        recovery_ratio = recovery / total_range
+        recovery_ratio = (
+            recovery / total_range
+        )
 
         last = data[-1]
 
@@ -716,7 +659,10 @@ def calculate_entry(
         if price:
             return float(price)
 
-    return float(current_price)
+    if current_price:
+        return float(current_price)
+
+    return None
 
 
 # ============================================================
@@ -729,35 +675,58 @@ def calculate_stop(
     sweep
 ):
     """
-    SL ставится за manipulation/sweep,
-    а не случайно рядом с entry.
+    TradeMind SL:
+
+    LONG:
+        ниже extreme 1H sweep
+
+    SHORT:
+        выше extreme 1H sweep
+
+    SL НЕ ставится ровно на extreme.
+    Добавляется технический buffer.
+
+    Если sweep отсутствует или extreme
+    невозможно определить — SL = None.
     """
 
-    if sweep:
-
-        extreme = sweep.get("extreme")
-
-        if extreme is not None:
-            return float(extreme)
-
-    if not candles_5m:
+    if not sweep:
         return None
 
-    recent = candles_5m[-6:]
+    extreme = sweep.get("extreme")
+
+    if extreme is None:
+        return None
+
+    extreme = _safe_float(
+        extreme,
+        None
+    )
+
+    if extreme is None or extreme <= 0:
+        return None
+
+    buffer = (
+        extreme
+        * SL_BUFFER_PCT
+        / 100.0
+    )
+
+    # --------------------------------------------------------
+    # LONG
+    # --------------------------------------------------------
 
     if direction == "LONG":
 
-        return min(
-            c["low"]
-            for c in recent
-        )
+        return extreme - buffer
+
+    # --------------------------------------------------------
+    # SHORT
+    # --------------------------------------------------------
 
     if direction == "SHORT":
 
-        return max(
-            c["high"]
-            for c in recent
-        )
+        return extreme + buffer
 
     return None
 
@@ -771,19 +740,6 @@ def calculate_take_profit(
     stop_loss,
     direction
 ):
-    """
-    TradeMind:
-        TP = ровно 2R.
-
-    Никаких:
-        TP1
-        TP2
-        partial TP
-        1:2.5
-        1:3
-
-    Только один TP = 2R.
-    """
 
     if entry is None or stop_loss is None:
         return None
@@ -821,13 +777,6 @@ def validate_target(
     direction,
     major_levels
 ):
-    """
-    Проверяем, что TP не находится
-    в уже снятой liquidity.
-
-    Также проверяем минимальную
-    структурную дистанцию 2R.
-    """
 
     if (
         entry is None
@@ -849,11 +798,49 @@ def validate_target(
 
     rr = reward / risk
 
-    # Только 1:2
+    # --------------------------------------------------------
+    # EXACT 1:2
+    # --------------------------------------------------------
+
     if abs(rr - RR) > 0.001:
         return False, "RR не равен 1:2."
 
-    # Проверяем major liquidity
+    # --------------------------------------------------------
+    # CHECK SL DIRECTION
+    # --------------------------------------------------------
+
+    if direction == "LONG":
+
+        if stop_loss >= entry:
+            return False, (
+                "LONG: SL должен быть ниже Entry."
+            )
+
+        if take_profit <= entry:
+            return False, (
+                "LONG: TP должен быть выше Entry."
+            )
+
+    elif direction == "SHORT":
+
+        if stop_loss <= entry:
+            return False, (
+                "SHORT: SL должен быть выше Entry."
+            )
+
+        if take_profit >= entry:
+            return False, (
+                "SHORT: TP должен быть ниже Entry."
+            )
+
+    else:
+
+        return False, "Неизвестное направление."
+
+    # --------------------------------------------------------
+    # MAJOR LIQUIDITY
+    # --------------------------------------------------------
+
     levels = _normalize_liquidity_levels(
         major_levels
     )
@@ -862,6 +849,8 @@ def validate_target(
 
         price = level["price"]
 
+        # Уже снятая ликвидность не является
+        # актуальной целью.
         if level.get("swept") is True:
             continue
 
@@ -874,6 +863,7 @@ def validate_target(
                 )
                 <= risk * 0.15
             ):
+
                 return False, (
                     "TP слишком близко к "
                     "major liquidity."
@@ -888,6 +878,7 @@ def validate_target(
                 )
                 <= risk * 0.15
             ):
+
                 return False, (
                     "TP слишком близко к "
                     "major liquidity."
@@ -910,53 +901,26 @@ def calculate_score(
     confirmation_5,
     rr_valid
 ):
-    score = 0
 
-    # --------------------------------------------------------
-    # D1
-    # --------------------------------------------------------
+    score = 0
 
     if d1 in ("BULLISH", "BEARISH"):
         score += 20
 
-    # --------------------------------------------------------
-    # 1H
-    # --------------------------------------------------------
-
     if h1 == direction:
         score += 20
-
-    # --------------------------------------------------------
-    # MAJOR LIQUIDITY
-    # --------------------------------------------------------
 
     if liquidity:
         score += 10
 
-    # --------------------------------------------------------
-    # SWEEP
-    # --------------------------------------------------------
-
     if sweep:
         score += 20
-
-    # --------------------------------------------------------
-    # 15M
-    # --------------------------------------------------------
 
     if confirmation_15:
         score += 10
 
-    # --------------------------------------------------------
-    # 5M
-    # --------------------------------------------------------
-
     if confirmation_5:
         score += 10
-
-    # --------------------------------------------------------
-    # RR
-    # --------------------------------------------------------
 
     if rr_valid:
         score += 10
@@ -1004,7 +968,8 @@ def analyze(
     result = StrategyResult()
 
     current_price = _safe_float(
-        current_price
+        current_price,
+        None
     )
 
     # ========================================================
@@ -1018,7 +983,6 @@ def analyze(
 
     result.stage = "D1"
 
-    # Нет направления
     if direction is None:
 
         result.score = 20
@@ -1104,7 +1068,6 @@ def analyze(
 
         return result.to_dict()
 
-    # Проверяем направление sweep
     sweep_direction = sweep.get(
         "direction"
     )
@@ -1116,6 +1079,22 @@ def analyze(
         result.reason = (
             "Sweep есть, но направление "
             "не соответствует сетапу."
+        )
+
+        return result.to_dict()
+
+    # Sweep должен иметь экстремум,
+    # потому что от него рассчитывается SL.
+    sweep_extreme = sweep.get("extreme")
+
+    if sweep_extreme is None:
+
+        result.score = 55
+
+        result.reason = (
+            "Sweep подтверждён, "
+            "но extreme не определён. "
+            "Вход запрещён."
         )
 
         return result.to_dict()
@@ -1185,8 +1164,19 @@ def analyze(
 
     result.entry = entry
 
+    if entry is None or entry <= 0:
+
+        result.score = 70
+
+        result.reason = (
+            "5M trigger есть, "
+            "но Entry невозможно определить."
+        )
+
+        return result.to_dict()
+
     # ========================================================
-    # 8. SL
+    # 8. SL — ЗА SWEEP EXTREME
     # ========================================================
 
     stop_loss = calculate_stop(
@@ -1203,12 +1193,16 @@ def analyze(
 
         result.reason = (
             "5M trigger есть, "
-            "но SL невозможно определить."
+            "но SL невозможно определить "
+            "за sweep extreme."
         )
 
         return result.to_dict()
 
-    # Проверка расположения SL
+    # --------------------------------------------------------
+    # SL MUST BE ON CORRECT SIDE
+    # --------------------------------------------------------
+
     if trade_direction == "LONG":
 
         if stop_loss >= entry:
@@ -1216,21 +1210,21 @@ def analyze(
             result.score = 60
 
             result.reason = (
-                "LONG: SL находится "
-                "выше/на Entry."
+                "LONG: SL должен быть "
+                "ниже Entry и за sweep extreme."
             )
 
             return result.to_dict()
 
-    if trade_direction == "SHORT":
+    elif trade_direction == "SHORT":
 
         if stop_loss <= entry:
 
             result.score = 60
 
             result.reason = (
-                "SHORT: SL находится "
-                "ниже/на Entry."
+                "SHORT: SL должен быть "
+                "выше Entry и за sweep extreme."
             )
 
             return result.to_dict()
@@ -1258,7 +1252,7 @@ def analyze(
         return result.to_dict()
 
     # ========================================================
-    # 10. VALIDATE TP
+    # 10. VALIDATE TP / RR
     # ========================================================
 
     rr_valid, target_reason = validate_target(
@@ -1295,6 +1289,25 @@ def analyze(
         else None
     )
 
+    # Жёсткая защита READY.
+    if (
+        result.entry is None
+        or result.stop_loss is None
+        or result.take_profit is None
+        or result.rr is None
+        or abs(result.rr - RR) > 0.001
+    ):
+
+        result.stage = "WAIT"
+        result.score = 70
+
+        result.reason = (
+            "Entry / SL / TP / RR невалидны. "
+            "Вход запрещён."
+        )
+
+        return result.to_dict()
+
     # ========================================================
     # 12. FINAL SCORE
     # ========================================================
@@ -1318,7 +1331,14 @@ def analyze(
     # FINAL DECISION
     # ========================================================
 
-    if result.score >= MIN_SCORE_READY:
+    if (
+        result.score >= MIN_SCORE_READY
+        and result.entry is not None
+        and result.stop_loss is not None
+        and result.take_profit is not None
+        and result.rr is not None
+        and abs(result.rr - RR) <= 0.001
+    ):
 
         result.stage = "READY"
 
@@ -1327,7 +1347,8 @@ def analyze(
             f"{trade_direction}. "
             "D1 → 1H → MAJOR SWEEP → "
             "15M → 5M ILM подтверждены. "
-            "TP = 1:2."
+            "SL за sweep extreme. "
+            "TP = EXACT 1:2."
         )
 
     else:
