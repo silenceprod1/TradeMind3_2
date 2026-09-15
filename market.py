@@ -1,12 +1,15 @@
 import requests
 import time
+from typing import Any, Dict, List, Optional
 
 
 # ============================================================
-# TRADEMIND MARKET 6.1.1
+# TRADEMIND MARKET 6.2.1
+# BINANCE SPOT
+# 1H MAJOR LIQUIDITY + LOCAL LIQUIDITY
 # ============================================================
 
-MARKET_VERSION = "6.1.1"
+MARKET_VERSION = "6.2.1"
 
 BASE_URL = "https://api.binance.com/api/v3"
 
@@ -19,26 +22,46 @@ REQUEST_TIMEOUT = 10
 # LIQUIDITY CONFIG
 # ============================================================
 
+# Максимальная дистанция между swing-точками
+# для объединения в один liquidity cluster.
 LEVEL_CLUSTER_PCT = 0.35
 
+# Минимум касаний для MAJOR liquidity.
 MIN_MAJOR_TOUCHES = 2
 
-# Лимит теперь применяется отдельно к каждой стороне.
+# Отдельный лимит для каждой стороны.
 MAX_MAJOR_LEVELS = 20
 MAX_LEVELS_EACH_SIDE = 20
 
-LIQUIDITY_LOOKBACK = 120
+# Основной lookback 1H.
+LIQUIDITY_LOOKBACK = 160
 
-SWEEP_LOOKBACK_1H = 6
+# Сколько последних 1H свечей проверять для нового sweep.
+SWEEP_LOOKBACK_1H = 8
 
+# Минимальная глубина sweep.
 MIN_SWEEP_DEPTH_PCT = 0.08
+
+# Минимальный размер локального кластера.
+MIN_LOCAL_TOUCHES = 2
+
+# Максимальная ширина гибридной зоны.
+HYBRID_ZONE_MAX_PCT = 0.40
+
+# Local liquidity.
+LOCAL_LOOKBACK_15M = 120
+LOCAL_LOOKBACK_5M = 160
+LOCAL_LOOKBACK_1M = 180
 
 
 # ============================================================
 # HTTP
 # ============================================================
 
-def _get(path, params):
+def _get(
+    path: str,
+    params: Dict[str, Any],
+):
 
     response = requests.get(
         BASE_URL + path,
@@ -55,7 +78,9 @@ def _get(path, params):
 # PRICE
 # ============================================================
 
-def get_price(symbol=DEFAULT_SYMBOL):
+def get_price(
+    symbol: str = DEFAULT_SYMBOL,
+) -> float:
 
     data = _get(
         "/ticker/price",
@@ -64,7 +89,9 @@ def get_price(symbol=DEFAULT_SYMBOL):
         },
     )
 
-    return float(data["price"])
+    return float(
+        data["price"]
+    )
 
 
 # ============================================================
@@ -72,10 +99,10 @@ def get_price(symbol=DEFAULT_SYMBOL):
 # ============================================================
 
 def get_klines(
-    symbol=DEFAULT_SYMBOL,
-    interval="1h",
-    limit=200,
-):
+    symbol: str = DEFAULT_SYMBOL,
+    interval: str = "1h",
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
 
     raw = _get(
         "/klines",
@@ -91,17 +118,32 @@ def get_klines(
     for row in raw:
 
         candles.append({
-            "open_time": int(row[0]),
-            "open": float(row[1]),
-            "high": float(row[2]),
-            "low": float(row[3]),
-            "close": float(row[4]),
-            "volume": float(row[5]),
-            "close_time": int(row[6]),
+
+            "open_time":
+                int(row[0]),
+
+            "open":
+                float(row[1]),
+
+            "high":
+                float(row[2]),
+
+            "low":
+                float(row[3]),
+
+            "close":
+                float(row[4]),
+
+            "volume":
+                float(row[5]),
+
+            "close_time":
+                int(row[6]),
+
         })
 
     # --------------------------------------------------------
-    # Remove currently forming candle.
+    # Удаляем формирующуюся свечу.
     # --------------------------------------------------------
 
     if len(candles) > 1:
@@ -110,7 +152,10 @@ def get_klines(
             time.time() * 1000
         )
 
-        if candles[-1]["close_time"] > now_ms:
+        if (
+            candles[-1]["close_time"]
+            > now_ms
+        ):
 
             candles = candles[:-1]
 
@@ -122,47 +167,106 @@ def get_klines(
 # ============================================================
 
 def get_market_data(
-    symbol=DEFAULT_SYMBOL,
+    symbol: str = DEFAULT_SYMBOL,
 ):
 
     price = get_price(symbol)
 
+    candles_1h = get_klines(
+        symbol,
+        "1h",
+        200,
+    )
+
+    candles_15m = get_klines(
+        symbol,
+        "15m",
+        200,
+    )
+
+    candles_5m = get_klines(
+        symbol,
+        "5m",
+        200,
+    )
+
+    candles_1m = get_klines(
+        symbol,
+        "1m",
+        200,
+    )
+
     return {
 
-        "symbol": symbol,
-
-        "price": price,
-
-        "candles_d1": get_klines(
+        "symbol":
             symbol,
-            "1d",
-            200,
-        ),
 
-        "candles_w1": get_klines(
-            symbol,
-            "1w",
-            100,
-        ),
+        "price":
+            price,
 
-        "candles_1h": get_klines(
-            symbol,
-            "1h",
-            200,
-        ),
+        # ----------------------------------------------------
+        # D1/W1 намеренно отсутствуют.
+        # ----------------------------------------------------
 
-        "candles_15m": get_klines(
-            symbol,
-            "15m",
-            200,
-        ),
+        "candles_1h":
+            candles_1h,
 
-        "candles_5m": get_klines(
-            symbol,
-            "5m",
-            200,
-        ),
+        "candles_15m":
+            candles_15m,
+
+        "candles_5m":
+            candles_5m,
+
+        "candles_1m":
+            candles_1m,
+
     }
+
+
+# ============================================================
+# SAFE NUMBER
+# ============================================================
+
+def _safe_float(
+    value,
+    default: Optional[float] = None,
+):
+
+    try:
+
+        if value is None:
+            return default
+
+        return float(value)
+
+    except Exception:
+
+        return default
+
+
+# ============================================================
+# PERCENT DISTANCE
+# ============================================================
+
+def _pct_distance(
+    a: float,
+    b: float,
+) -> float:
+
+    if b in (
+        None,
+        0,
+    ):
+
+        return 999.0
+
+    return (
+        abs(a - b)
+        /
+        abs(b)
+        *
+        100.0
+    )
 
 
 # ============================================================
@@ -171,8 +275,8 @@ def get_market_data(
 
 def _local_swing_high(
     candles,
-    index,
-):
+    index: int,
+) -> bool:
 
     if not candles:
         return False
@@ -183,11 +287,25 @@ def _local_swing_high(
     if index >= len(candles) - 1:
         return False
 
-    current = candles[index]["high"]
+    current = _safe_float(
+        candles[index].get("high")
+    )
 
-    left = candles[index - 1]["high"]
+    left = _safe_float(
+        candles[index - 1].get("high")
+    )
 
-    right = candles[index + 1]["high"]
+    right = _safe_float(
+        candles[index + 1].get("high")
+    )
+
+    if None in (
+        current,
+        left,
+        right,
+    ):
+
+        return False
 
     return (
         current > left
@@ -201,8 +319,8 @@ def _local_swing_high(
 
 def _local_swing_low(
     candles,
-    index,
-):
+    index: int,
+) -> bool:
 
     if not candles:
         return False
@@ -213,11 +331,25 @@ def _local_swing_low(
     if index >= len(candles) - 1:
         return False
 
-    current = candles[index]["low"]
+    current = _safe_float(
+        candles[index].get("low")
+    )
 
-    left = candles[index - 1]["low"]
+    left = _safe_float(
+        candles[index - 1].get("low")
+    )
 
-    right = candles[index + 1]["low"]
+    right = _safe_float(
+        candles[index + 1].get("low")
+    )
+
+    if None in (
+        current,
+        left,
+        right,
+    ):
+
+        return False
 
     return (
         current < left
@@ -226,32 +358,93 @@ def _local_swing_low(
 
 
 # ============================================================
-# PERCENT DISTANCE
+# RAW SWINGS
 # ============================================================
 
-def _pct_distance(
-    a,
-    b,
+def _collect_swings(
+    candles,
 ):
 
-    if b in (
-        None,
-        0,
+    result = []
+
+    if not candles:
+        return result
+
+    for i in range(
+        1,
+        len(candles) - 1,
     ):
-        return 999.0
 
-    return (
-        abs(a - b)
-        / abs(b)
-        * 100.0
-    )
+        candle = candles[i]
+
+        if _local_swing_high(
+            candles,
+            i,
+        ):
+
+            high = _safe_float(
+                candle.get("high")
+            )
+
+            if high is not None:
+
+                result.append({
+
+                    "type":
+                        "HIGH",
+
+                    "price":
+                        high,
+
+                    "index":
+                        i,
+
+                    "time":
+                        candle.get(
+                            "open_time"
+                        ),
+
+                })
+
+        if _local_swing_low(
+            candles,
+            i,
+        ):
+
+            low = _safe_float(
+                candle.get("low")
+            )
+
+            if low is not None:
+
+                result.append({
+
+                    "type":
+                        "LOW",
+
+                    "price":
+                        low,
+
+                    "index":
+                        i,
+
+                    "time":
+                        candle.get(
+                            "open_time"
+                        ),
+
+                })
+
+    return result
 
 
 # ============================================================
-# CLUSTER LIQUIDITY
+# CLUSTER LEVELS
 # ============================================================
 
-def _cluster_levels(items):
+def _cluster_levels(
+    items,
+):
 
     if not items:
         return []
@@ -269,12 +462,14 @@ def _cluster_levels(items):
 
             for item in items
 
-            if item["type"] == side
+            if item.get("type")
+            == side
 
         ]
 
         side_items.sort(
-            key=lambda x: x["price"]
+            key=lambda x:
+                x["price"]
         )
 
         clusters = []
@@ -286,8 +481,11 @@ def _cluster_levels(items):
             for cluster in clusters:
 
                 distance = _pct_distance(
+
                     item["price"],
+
                     cluster["price"],
+
                 )
 
                 if (
@@ -299,34 +497,48 @@ def _cluster_levels(items):
                         "members"
                     ].append(item)
 
+                    prices = [
+
+                        x["price"]
+
+                        for x
+                        in cluster[
+                            "members"
+                        ]
+
+                    ]
+
                     cluster["price"] = (
-
-                        sum(
-
-                            x["price"]
-
-                            for x
-                            in cluster[
-                                "members"
-                            ]
-
-                        )
-
+                        sum(prices)
                         /
+                        len(prices)
+                    )
 
-                        len(
-                            cluster[
-                                "members"
-                            ]
-                        )
+                    cluster[
+                        "last_index"
+                    ] = max(
+
+                        cluster[
+                            "last_index"
+                        ],
+
+                        item[
+                            "index"
+                        ],
 
                     )
 
-                    cluster["last_index"] = max(
+                    cluster[
+                        "first_index"
+                    ] = min(
 
-                        cluster["last_index"],
+                        cluster[
+                            "first_index"
+                        ],
 
-                        item["index"],
+                        item[
+                            "index"
+                        ],
 
                     )
 
@@ -338,13 +550,19 @@ def _cluster_levels(items):
 
                 clusters.append({
 
-                    "type": side,
+                    "type":
+                        side,
 
-                    "price": item["price"],
+                    "price":
+                        item["price"],
 
-                    "members": [item],
+                    "members":
+                        [item],
 
                     "last_index":
+                        item["index"],
+
+                    "first_index":
                         item["index"],
 
                 })
@@ -357,7 +575,7 @@ def _cluster_levels(items):
 
 
 # ============================================================
-# CLUSTER SWEEP INFO
+# CLUSTER SWEEP
 # ============================================================
 
 def _cluster_sweep_info(
@@ -365,13 +583,31 @@ def _cluster_sweep_info(
     cluster,
 ):
 
-    price = cluster["price"]
+    price = _safe_float(
+        cluster.get("price")
+    )
 
-    last_index = cluster["last_index"]
+    if price is None:
 
-    sweep_candle = None
+        return {
 
-    sweep_index = None
+            "swept":
+                False,
+
+            "sweep_candle":
+                None,
+
+            "sweep_index":
+                None,
+
+        }
+
+    last_index = int(
+        cluster.get(
+            "last_index",
+            0,
+        )
+    )
 
     for i in range(
         last_index + 1,
@@ -380,59 +616,72 @@ def _cluster_sweep_info(
 
         candle = data[i]
 
-        # ----------------------------------------------------
-        # BSL
-        # ----------------------------------------------------
+        high = _safe_float(
+            candle.get("high")
+        )
 
-        if cluster["type"] == "HIGH":
+        low = _safe_float(
+            candle.get("low")
+        )
 
-            if candle["high"] > price:
+        if cluster.get(
+            "type"
+        ) == "HIGH":
 
-                sweep_candle = candle
+            if (
+                high is not None
+                and high > price
+            ):
 
-                sweep_index = i
+                return {
 
-                break
+                    "swept":
+                        True,
 
-        # ----------------------------------------------------
-        # SSL
-        # ----------------------------------------------------
+                    "sweep_candle":
+                        candle,
+
+                    "sweep_index":
+                        i,
+
+                }
 
         else:
 
-            if candle["low"] < price:
+            if (
+                low is not None
+                and low < price
+            ):
 
-                sweep_candle = candle
+                return {
 
-                sweep_index = i
+                    "swept":
+                        True,
 
-                break
+                    "sweep_candle":
+                        candle,
 
-    if sweep_candle is None:
+                    "sweep_index":
+                        i,
 
-        return {
-
-            "swept": False,
-
-            "sweep_candle": None,
-
-            "sweep_index": None,
-
-        }
+                }
 
     return {
 
-        "swept": True,
+        "swept":
+            False,
 
-        "sweep_candle": sweep_candle,
+        "sweep_candle":
+            None,
 
-        "sweep_index": sweep_index,
+        "sweep_index":
+            None,
 
     }
 
 
 # ============================================================
-# BUILD LEVEL
+# BUILD MAJOR LEVEL
 # ============================================================
 
 def _build_level(
@@ -441,20 +690,39 @@ def _build_level(
     data,
 ):
 
-    price = cluster["price"]
+    price = _safe_float(
+        cluster.get("price")
+    )
+
+    if price is None:
+        return None
 
     touches = len(
-        cluster["members"]
+        cluster.get(
+            "members",
+            [],
+        )
     )
 
     latest_member = max(
-        cluster["members"],
-        key=lambda x: x["index"],
+
+        cluster[
+            "members"
+        ],
+
+        key=lambda x:
+            x.get(
+                "index",
+                0,
+            ),
+
     )
 
-    level_time = latest_member[
-        "time"
-    ]
+    level_time = (
+        latest_member.get(
+            "time"
+        )
+    )
 
     sweep_info = _cluster_sweep_info(
         data,
@@ -473,10 +741,15 @@ def _build_level(
         "sweep_index"
     ]
 
+    # --------------------------------------------------------
+    # Base strength.
+    # --------------------------------------------------------
+
     strength = min(
+
         1.0,
 
-        0.45
+        0.40
         +
         0.15
         *
@@ -488,8 +761,11 @@ def _build_level(
     )
 
     distance_pct = _pct_distance(
+
         price,
+
         current_price,
+
     )
 
     # ========================================================
@@ -497,37 +773,51 @@ def _build_level(
     # ========================================================
 
     if (
-        cluster["type"] == "HIGH"
+        cluster["type"]
+        == "HIGH"
         and price > current_price
     ):
 
         return {
 
-            "price": round(
-                price,
-                8,
-            ),
+            "price":
+                round(
+                    price,
+                    8,
+                ),
 
-            "level": round(
-                price,
-                8,
-            ),
+            "level":
+                round(
+                    price,
+                    8,
+                ),
 
-            "type": "HIGH",
+            "type":
+                "HIGH",
 
-            "side": "SHORT",
+            "side":
+                "SHORT",
 
-            "position": "ABOVE",
+            "position":
+                "ABOVE",
 
             "liquidity_type":
                 "BSL / 1H major swing high",
 
-            "touches": touches,
+            "source":
+                "1H",
 
-            "strength": round(
-                strength,
-                3,
-            ),
+            "touches":
+                touches,
+
+            "cluster_size":
+                touches,
+
+            "strength":
+                round(
+                    strength,
+                    3,
+                ),
 
             "distance_pct":
                 round(
@@ -535,9 +825,21 @@ def _build_level(
                     4,
                 ),
 
-            "time": level_time,
+            "time":
+                level_time,
 
-            "swept": swept,
+            "created_index":
+                cluster[
+                    "first_index"
+                ],
+
+            "last_touch_index":
+                cluster[
+                    "last_index"
+                ],
+
+            "swept":
+                swept,
 
             "sweep_candle":
                 sweep_candle,
@@ -552,37 +854,51 @@ def _build_level(
     # ========================================================
 
     if (
-        cluster["type"] == "LOW"
+        cluster["type"]
+        == "LOW"
         and price < current_price
     ):
 
         return {
 
-            "price": round(
-                price,
-                8,
-            ),
+            "price":
+                round(
+                    price,
+                    8,
+                ),
 
-            "level": round(
-                price,
-                8,
-            ),
+            "level":
+                round(
+                    price,
+                    8,
+                ),
 
-            "type": "LOW",
+            "type":
+                "LOW",
 
-            "side": "LONG",
+            "side":
+                "LONG",
 
-            "position": "BELOW",
+            "position":
+                "BELOW",
 
             "liquidity_type":
                 "SSL / 1H major swing low",
 
-            "touches": touches,
+            "source":
+                "1H",
 
-            "strength": round(
-                strength,
-                3,
-            ),
+            "touches":
+                touches,
+
+            "cluster_size":
+                touches,
+
+            "strength":
+                round(
+                    strength,
+                    3,
+                ),
 
             "distance_pct":
                 round(
@@ -590,9 +906,21 @@ def _build_level(
                     4,
                 ),
 
-            "time": level_time,
+            "time":
+                level_time,
 
-            "swept": swept,
+            "created_index":
+                cluster[
+                    "first_index"
+                ],
+
+            "last_touch_index":
+                cluster[
+                    "last_index"
+                ],
+
+            "swept":
+                swept,
 
             "sweep_candle":
                 sweep_candle,
@@ -614,6 +942,9 @@ def find_major_liquidity(
     current_price,
     max_levels=MAX_MAJOR_LEVELS,
     include_swept=False,
+    candles_15m=None,
+    candles_5m=None,
+    candles_1m=None,
 ):
 
     if (
@@ -623,85 +954,38 @@ def find_major_liquidity(
 
         return []
 
-    current_price = float(
+    current_price = _safe_float(
         current_price
     )
+
+    if current_price is None:
+        return []
 
     data = candles_1h[
         -LIQUIDITY_LOOKBACK:
     ]
 
-    if len(data) < 3:
-        return []
-
-    # --------------------------------------------------------
-    # Collect raw swings.
-    # --------------------------------------------------------
-
-    raw = []
-
-    for i in range(
-        1,
-        len(data) - 1,
-    ):
-
-        if _local_swing_high(
-            data,
-            i,
-        ):
-
-            raw.append({
-
-                "type": "HIGH",
-
-                "price":
-                    data[i]["high"],
-
-                "index": i,
-
-                "time":
-                    data[i]["open_time"],
-
-            })
-
-        if _local_swing_low(
-            data,
-            i,
-        ):
-
-            raw.append({
-
-                "type": "LOW",
-
-                "price":
-                    data[i]["low"],
-
-                "index": i,
-
-                "time":
-                    data[i]["open_time"],
-
-            })
+    raw = _collect_swings(
+        data
+    )
 
     if not raw:
         return []
-
-    # --------------------------------------------------------
-    # Cluster.
-    # --------------------------------------------------------
 
     clusters = _cluster_levels(
         raw
     )
 
     above = []
-
     below = []
 
     for cluster in clusters:
 
         touches = len(
-            cluster["members"]
+            cluster.get(
+                "members",
+                [],
+            )
         )
 
         if touches < MIN_MAJOR_TOUCHES:
@@ -720,10 +1004,6 @@ def find_major_liquidity(
         if level is None:
             continue
 
-        # ----------------------------------------------------
-        # Swept liquidity.
-        # ----------------------------------------------------
-
         if (
             level["swept"]
             and not include_swept
@@ -731,36 +1011,87 @@ def find_major_liquidity(
             continue
 
         # ----------------------------------------------------
-        # ABOVE = BSL
+        # Hybrid lower timeframe confirmation.
         # ----------------------------------------------------
 
-        if level["position"] == "ABOVE":
+        local_bonus = _local_liquidity_bonus(
+
+            level,
+
+            candles_15m,
+
+            candles_5m,
+
+            candles_1m,
+
+        )
+
+        if local_bonus:
+
+            level[
+                "local_bonus"
+            ] = local_bonus
+
+            level[
+                "strength"
+            ] = round(
+
+                min(
+
+                    1.0,
+
+                    level[
+                        "strength"
+                    ]
+                    +
+                    local_bonus[
+                        "bonus"
+                    ],
+
+                ),
+
+                3,
+
+            )
+
+            level[
+                "local_touches"
+            ] = local_bonus[
+                "touches"
+            ]
+
+            level[
+                "zone_low"
+            ] = local_bonus[
+                "zone_low"
+            ]
+
+            level[
+                "zone_high"
+            ] = local_bonus[
+                "zone_high"
+            ]
+
+        else:
+
+            level[
+                "local_bonus"
+            ] = None
+
+        if level[
+            "position"
+        ] == "ABOVE":
 
             above.append(level)
 
-        # ----------------------------------------------------
-        # BELOW = SSL
-        # ----------------------------------------------------
-
-        elif level["position"] == "BELOW":
+        elif level[
+            "position"
+        ] == "BELOW":
 
             below.append(level)
 
     # --------------------------------------------------------
-    # Sort independently.
-    #
-    # THIS IS THE IMPORTANT FIX.
-    #
-    # Previously:
-    #
-    # BSL + SSL -> sort -> [:20]
-    #
-    # That could completely remove one side.
-    #
-    # Now:
-    #
-    # BSL -> own 20
-    # SSL -> own 20
+    # Separate sorting.
     # --------------------------------------------------------
 
     above.sort(
@@ -799,17 +1130,222 @@ def find_major_liquidity(
         :MAX_LEVELS_EACH_SIDE
     ]
 
-    # --------------------------------------------------------
-    # Return both sides.
-    #
-    # ABOVE first + BELOW second.
-    # --------------------------------------------------------
-
     return (
         above
         +
         below
     )
+
+
+# ============================================================
+# LOCAL LIQUIDITY BONUS
+# ============================================================
+
+def _local_liquidity_bonus(
+    major_level,
+    candles_15m=None,
+    candles_5m=None,
+    candles_1m=None,
+):
+
+    price = _safe_float(
+        major_level.get("price")
+    )
+
+    if price is None:
+        return None
+
+    sources = []
+
+    if candles_15m:
+        sources.append(
+            (
+                "15M",
+                candles_15m[
+                    -LOCAL_LOOKBACK_15M:
+                ],
+            )
+        )
+
+    if candles_5m:
+        sources.append(
+            (
+                "5M",
+                candles_5m[
+                    -LOCAL_LOOKBACK_5M:
+                ],
+            )
+        )
+
+    if candles_1m:
+        sources.append(
+            (
+                "1M",
+                candles_1m[
+                    -LOCAL_LOOKBACK_1M:
+                ],
+            )
+        )
+
+    if not sources:
+        return None
+
+    all_prices = []
+
+    source_counts = {}
+
+    for timeframe, candles in sources:
+
+        count = 0
+
+        for i in range(
+            1,
+            len(candles) - 1,
+        ):
+
+            candle = candles[i]
+
+            candidate = None
+
+            if (
+                major_level[
+                    "position"
+                ]
+                == "ABOVE"
+            ):
+
+                if _local_swing_high(
+                    candles,
+                    i,
+                ):
+
+                    candidate = _safe_float(
+                        candle.get(
+                            "high"
+                        )
+                    )
+
+            else:
+
+                if _local_swing_low(
+                    candles,
+                    i,
+                ):
+
+                    candidate = _safe_float(
+                        candle.get(
+                            "low"
+                        )
+                    )
+
+            if candidate is None:
+                continue
+
+            distance = _pct_distance(
+                candidate,
+                price,
+            )
+
+            # Local liquidity must actually be near
+            # the major area.
+            if distance <= HYBRID_ZONE_MAX_PCT:
+
+                all_prices.append(
+                    candidate
+                )
+
+                count += 1
+
+        source_counts[
+            timeframe
+        ] = count
+
+    if len(all_prices) < MIN_LOCAL_TOUCHES:
+        return None
+
+    center = (
+        sum(all_prices)
+        /
+        len(all_prices)
+    )
+
+    zone_half = (
+        center
+        *
+        HYBRID_ZONE_MAX_PCT
+        /
+        100.0
+    )
+
+    zone_low = center - zone_half
+    zone_high = center + zone_half
+
+    # --------------------------------------------------------
+    # Do not allow the hybrid zone to become excessive.
+    # --------------------------------------------------------
+
+    max_width = (
+        price
+        *
+        HYBRID_ZONE_MAX_PCT
+        /
+        100.0
+    )
+
+    if (
+        zone_high
+        -
+        zone_low
+        >
+        max_width
+    ):
+
+        zone_low = (
+            center
+            -
+            max_width / 2.0
+        )
+
+        zone_high = (
+            center
+            +
+            max_width / 2.0
+        )
+
+    bonus = min(
+
+        0.25,
+
+        0.03
+        *
+        len(all_prices),
+
+    )
+
+    return {
+
+        "touches":
+            len(all_prices),
+
+        "bonus":
+            bonus,
+
+        "zone_low":
+            round(
+                zone_low,
+                8,
+            ),
+
+        "zone_high":
+            round(
+                zone_high,
+                8,
+            ),
+
+        "source_counts":
+            source_counts,
+
+    }
 
 
 # ============================================================
@@ -820,6 +1356,9 @@ def get_fresh_liquidity(
     candles_1h,
     current_price,
     max_levels=MAX_MAJOR_LEVELS,
+    candles_15m=None,
+    candles_5m=None,
+    candles_1m=None,
 ):
 
     return find_major_liquidity(
@@ -832,6 +1371,12 @@ def get_fresh_liquidity(
 
         include_swept=False,
 
+        candles_15m=candles_15m,
+
+        candles_5m=candles_5m,
+
+        candles_1m=candles_1m,
+
     )
 
 
@@ -843,6 +1388,9 @@ def get_all_major_liquidity(
     candles_1h,
     current_price,
     max_levels=MAX_MAJOR_LEVELS,
+    candles_15m=None,
+    candles_5m=None,
+    candles_1m=None,
 ):
 
     return find_major_liquidity(
@@ -854,6 +1402,12 @@ def get_all_major_liquidity(
         max_levels=max_levels,
 
         include_swept=True,
+
+        candles_15m=candles_15m,
+
+        candles_5m=candles_5m,
+
+        candles_1m=candles_1m,
 
     )
 
@@ -869,7 +1423,12 @@ def get_target_liquidity(
     max_levels=MAX_MAJOR_LEVELS,
 ):
 
-    entry = float(entry)
+    entry = _safe_float(
+        entry
+    )
+
+    if entry is None:
+        return None
 
     levels = get_fresh_liquidity(
 
@@ -885,9 +1444,16 @@ def get_target_liquidity(
 
     for level in levels:
 
-        price = level["price"]
+        if level.get(
+            "swept"
+        ) is True:
+            continue
 
-        if level.get("swept") is True:
+        price = _safe_float(
+            level.get("price")
+        )
+
+        if price is None:
             continue
 
         if direction == "LONG":
@@ -950,11 +1516,12 @@ def detect_sweep(
 
         return None
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # include_swept=True because we need to find
-    # the liquidity that has just been taken.
-    # --------------------------------------------------------
+    current_price = _safe_float(
+        current_price
+    )
+
+    if current_price is None:
+        return None
 
     levels = find_major_liquidity(
 
@@ -976,18 +1543,42 @@ def detect_sweep(
     ]
 
     # --------------------------------------------------------
-    # Newest candle first.
+    # Newest first.
     # --------------------------------------------------------
 
-    for candle in reversed(data):
+    for candle_offset in range(
+        len(data) - 1,
+        -1,
+        -1,
+    ):
 
-        high = candle["high"]
+        candle = data[
+            candle_offset
+        ]
 
-        low = candle["low"]
+        high = _safe_float(
+            candle.get("high")
+        )
 
-        open_price = candle["open"]
+        low = _safe_float(
+            candle.get("low")
+        )
 
-        close = candle["close"]
+        open_price = _safe_float(
+            candle.get("open")
+        )
+
+        close = _safe_float(
+            candle.get("close")
+        )
+
+        if None in (
+            high,
+            low,
+            open_price,
+            close,
+        ):
+            continue
 
         # ====================================================
         # LONG
@@ -995,28 +1586,49 @@ def detect_sweep(
 
         if direction == "LONG":
 
-            for level_data in levels:
+            ssl_levels = [
 
-                if (
-                    level_data["side"]
-                    != "LONG"
-                ):
+                x
 
-                    continue
+                for x in levels
 
-                level = level_data[
-                    "price"
-                ]
-
-                depth = (
-                    level
-                    -
-                    low
+                if x.get(
+                    "side"
                 )
+                == "LONG"
+
+            ]
+
+            # Ближайшая major SSL
+            ssl_levels.sort(
+
+                key=lambda x:
+                    abs(
+                        x["price"]
+                        -
+                        current_price
+                    )
+
+            )
+
+            for level_data in ssl_levels:
+
+                level = _safe_float(
+                    level_data.get(
+                        "price"
+                    )
+                )
+
+                if level is None:
+                    continue
 
                 depth_pct = (
 
-                    depth
+                    (
+                        level
+                        -
+                        low
+                    )
                     /
                     level
                     *
@@ -1052,28 +1664,37 @@ def detect_sweep(
 
                     return {
 
-                        "swept": True,
+                        "swept":
+                            True,
 
-                        "direction": "LONG",
+                        "direction":
+                            "LONG",
 
-                        "level": level,
+                        "level":
+                            level,
 
-                        "extreme": low,
+                        "extreme":
+                            low,
 
                         "time":
-                            candle[
+                            candle.get(
                                 "open_time"
-                            ],
+                            ),
+
+                        "candle_index":
+                            candle_offset,
 
                         "strength":
-                            level_data[
-                                "strength"
-                            ],
+                            level_data.get(
+                                "strength",
+                                0,
+                            ),
 
                         "touches":
-                            level_data[
-                                "touches"
-                            ],
+                            level_data.get(
+                                "touches",
+                                0,
+                            ),
 
                         "liquidity_type":
                             "SSL",
@@ -1087,6 +1708,9 @@ def detect_sweep(
                                 4,
                             ),
 
+                        "body_close":
+                            close,
+
                     }
 
         # ====================================================
@@ -1095,28 +1719,48 @@ def detect_sweep(
 
         else:
 
-            for level_data in levels:
+            bsl_levels = [
 
-                if (
-                    level_data["side"]
-                    != "SHORT"
-                ):
+                x
 
-                    continue
+                for x in levels
 
-                level = level_data[
-                    "price"
-                ]
-
-                depth = (
-                    high
-                    -
-                    level
+                if x.get(
+                    "side"
                 )
+                == "SHORT"
+
+            ]
+
+            bsl_levels.sort(
+
+                key=lambda x:
+                    abs(
+                        x["price"]
+                        -
+                        current_price
+                    )
+
+            )
+
+            for level_data in bsl_levels:
+
+                level = _safe_float(
+                    level_data.get(
+                        "price"
+                    )
+                )
+
+                if level is None:
+                    continue
 
                 depth_pct = (
 
-                    depth
+                    (
+                        high
+                        -
+                        level
+                    )
                     /
                     level
                     *
@@ -1152,28 +1796,37 @@ def detect_sweep(
 
                     return {
 
-                        "swept": True,
+                        "swept":
+                            True,
 
-                        "direction": "SHORT",
+                        "direction":
+                            "SHORT",
 
-                        "level": level,
+                        "level":
+                            level,
 
-                        "extreme": high,
+                        "extreme":
+                            high,
 
                         "time":
-                            candle[
+                            candle.get(
                                 "open_time"
-                            ],
+                            ),
+
+                        "candle_index":
+                            candle_offset,
 
                         "strength":
-                            level_data[
-                                "strength"
-                            ],
+                            level_data.get(
+                                "strength",
+                                0,
+                            ),
 
                         "touches":
-                            level_data[
-                                "touches"
-                            ],
+                            level_data.get(
+                                "touches",
+                                0,
+                            ),
 
                         "liquidity_type":
                             "BSL",
@@ -1187,6 +1840,9 @@ def detect_sweep(
                                 4,
                             ),
 
+                        "body_close":
+                            close,
+
                     }
 
     return None
@@ -1196,7 +1852,9 @@ def detect_sweep(
 # COMPATIBILITY
 # ============================================================
 
-get_major_liquidity = find_major_liquidity
+get_major_liquidity = (
+    find_major_liquidity
+)
 
 
 # ============================================================
