@@ -2,21 +2,18 @@
 # TRADEMIND 6.2.1
 # Binance Spot | 1H -> Major Liquidity -> Sweep -> 15M -> 5M
 # D1/W1 REMOVED
-# Hybrid liquidity: 1H major + 15M/5M/1M local clusters
-# Telegram chart with active waiting stage
+# Hybrid liquidity | Telegram charts | Auto monitor
 # ============================================================
 
 import os
 import io
 import json
-import math
-import time
 import asyncio
 import traceback
-from datetime import datetime
 
 import matplotlib
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
@@ -55,18 +52,16 @@ BOT_VERSION = "6.2.1"
 TOKEN = os.getenv("BOT_TOKEN")
 
 if not TOKEN:
-    raise RuntimeError("BOT_TOKEN не найден в Environment Variables")
+    raise RuntimeError(
+        "BOT_TOKEN не найден в Environment Variables"
+    )
 
 CHECK_INTERVAL = 15
 SCAN_WORKERS = 9
 MIN_SCORE_READY = 80
 
-# Максимальная ширина гибридной зоны в процентах.
-# Локальная ликвидность далеко от major-level не объединяется.
 MAX_LOCAL_ZONE_PCT = 0.0040
 
-# Минимальный размер движения для нормального сетапа.
-MIN_EXPECTED_MOVE_PCT = 0.0060
 
 # ============================================================
 # COINS
@@ -95,7 +90,7 @@ JOURNAL_FILE = "trade_journal.json"
 
 
 # ============================================================
-# BASIC JSON HELPERS
+# JSON
 # ============================================================
 
 def load_json(filename, default):
@@ -143,11 +138,15 @@ def default_state():
 
 
 def load_state():
-    state = load_json(STATE_FILE, default_state())
+    state = load_json(
+        STATE_FILE,
+        default_state(),
+    )
 
     if not isinstance(state, dict):
         state = default_state()
 
+    # Старые ограничения полностью удаляем
     state.pop("daily_date", None)
     state.pop("daily_trades", None)
     state.pop("daily_stop", None)
@@ -159,8 +158,12 @@ def load_state():
         "last_ready_keys",
         "subscribers",
     ):
-        if not isinstance(state.get(key), (dict, list)):
-            state[key] = {} if key != "subscribers" else []
+        if key not in state:
+            state[key] = (
+                []
+                if key == "subscribers"
+                else {}
+            )
 
     return state
 
@@ -169,7 +172,10 @@ STATE = load_state()
 
 
 def save_state():
-    save_json(STATE_FILE, STATE)
+    save_json(
+        STATE_FILE,
+        STATE,
+    )
 
 
 # ============================================================
@@ -177,7 +183,10 @@ def save_state():
 # ============================================================
 
 def get_subscribers():
-    return STATE.get("subscribers", [])
+    return STATE.get(
+        "subscribers",
+        [],
+    )
 
 
 def add_subscriber(chat_id):
@@ -185,7 +194,9 @@ def add_subscriber(chat_id):
 
     if chat_id not in subscribers:
         subscribers.append(chat_id)
+
         STATE["subscribers"] = subscribers
+
         save_state()
 
 
@@ -194,7 +205,9 @@ def remove_subscriber(chat_id):
 
     if chat_id in subscribers:
         subscribers.remove(chat_id)
+
         STATE["subscribers"] = subscribers
+
         save_state()
 
 
@@ -226,13 +239,21 @@ def fmt_price(value):
 
 def pct_distance(level, price):
     try:
-        return ((float(level) / float(price)) - 1.0) * 100.0
+        return (
+            (
+                float(level)
+                / float(price)
+            ) - 1.0
+        ) * 100.0
+
     except Exception:
         return 0.0
 
 
 def stage_icon(stage):
-    stage = str(stage or "").upper()
+    stage = str(
+        stage or ""
+    ).upper()
 
     mapping = {
         "READY": "🟢",
@@ -244,10 +265,12 @@ def stage_icon(stage):
         "1H": "🔵",
         "WAIT": "⏳",
         "NO_TRADE": "❌",
-        "TP": "🎯",
     }
 
-    return mapping.get(stage, "⏳")
+    return mapping.get(
+        stage,
+        "⏳",
+    )
 
 
 def direction_icon(direction):
@@ -260,26 +283,49 @@ def direction_icon(direction):
     return "⚪"
 
 
-def level_position(level, price=None):
-    """
-    Нормализует сторону liquidity.
-
-    Новая market.py:
-        position = ABOVE / BELOW
-        side = SHORT / LONG
-
-    Старые варианты тоже поддерживаются.
-    """
-
+def level_price(level):
     if not isinstance(level, dict):
         return None
 
-    position = str(level.get("position", "")).upper()
+    for key in (
+        "price",
+        "level",
+        "value",
+    ):
+        value = level.get(key)
 
-    if position in ("ABOVE", "BELOW"):
+        if value is not None:
+            try:
+                return float(value)
+            except Exception:
+                pass
+
+    return None
+
+
+def level_position(level, price=None):
+    if not isinstance(level, dict):
+        return None
+
+    position = str(
+        level.get(
+            "position",
+            "",
+        )
+    ).upper()
+
+    if position in (
+        "ABOVE",
+        "BELOW",
+    ):
         return position
 
-    side = str(level.get("side", "")).upper()
+    side = str(
+        level.get(
+            "side",
+            "",
+        )
+    ).upper()
 
     if side == "SHORT":
         return "ABOVE"
@@ -287,32 +333,17 @@ def level_position(level, price=None):
     if side == "LONG":
         return "BELOW"
 
-    try:
-        value = float(
-            level.get("price")
-            or level.get("level")
-            or level.get("value")
+    value = level_price(level)
+
+    if (
+        value is not None
+        and price is not None
+    ):
+        return (
+            "ABOVE"
+            if value > float(price)
+            else "BELOW"
         )
-
-        if price is not None:
-            return "ABOVE" if value > float(price) else "BELOW"
-
-    except Exception:
-        pass
-
-    return None
-
-
-def level_price(level):
-    if not isinstance(level, dict):
-        return None
-
-    for key in ("price", "level", "value"):
-        if level.get(key) is not None:
-            try:
-                return float(level[key])
-            except Exception:
-                pass
 
     return None
 
@@ -321,7 +352,10 @@ def level_price(level):
 # LIQUIDITY
 # ============================================================
 
-def split_liquidity(levels, price):
+def split_liquidity(
+    levels,
+    price,
+):
     above = []
     below = []
 
@@ -331,7 +365,10 @@ def split_liquidity(levels, price):
         if p is None:
             continue
 
-        position = level_position(level, price)
+        position = level_position(
+            level,
+            price,
+        )
 
         if position == "ABOVE":
             above.append(level)
@@ -339,25 +376,56 @@ def split_liquidity(levels, price):
         elif position == "BELOW":
             below.append(level)
 
-    above.sort(key=lambda x: level_price(x) or 10**30)
+    above.sort(
+        key=lambda x: (
+            level_price(x)
+            if level_price(x) is not None
+            else 10**30
+        )
+    )
+
     below.sort(
-        key=lambda x: level_price(x) or -10**30,
+        key=lambda x: (
+            level_price(x)
+            if level_price(x) is not None
+            else -10**30
+        ),
         reverse=True,
     )
 
     return above, below
 
 
-def nearest_bsl(levels, price):
-    above, _ = split_liquidity(levels, price)
+def nearest_bsl(
+    levels,
+    price,
+):
+    above, _ = split_liquidity(
+        levels,
+        price,
+    )
 
-    return above[0] if above else None
+    return (
+        above[0]
+        if above
+        else None
+    )
 
 
-def nearest_ssl(levels, price):
-    _, below = split_liquidity(levels, price)
+def nearest_ssl(
+    levels,
+    price,
+):
+    _, below = split_liquidity(
+        levels,
+        price,
+    )
 
-    return below[0] if below else None
+    return (
+        below[0]
+        if below
+        else None
+    )
 
 
 def liquidity_strength(level):
@@ -365,38 +433,58 @@ def liquidity_strength(level):
         return 0.0
 
     try:
-        strength = float(level.get("strength", 0))
+        strength = float(
+            level.get(
+                "strength",
+                0,
+            )
+        )
     except Exception:
         strength = 0.0
 
     try:
-        touches = int(level.get("touches", 0))
+        touches = int(
+            level.get(
+                "touches",
+                0,
+            )
+        )
     except Exception:
         touches = 0
 
-    score = strength * 70.0
-    score += min(touches, 8) * 3.75
+    # Поддерживаем как 0-1, так и 0-100
+    if 0 < strength <= 1:
+        score = strength * 70.0
+    else:
+        score = strength
 
-    return min(100.0, round(score, 1))
+    score += min(
+        touches,
+        8,
+    ) * 3.75
+
+    return min(
+        100.0,
+        round(score, 1),
+    )
 
 
-def build_liquidity_zone(levels, center_level, price):
-    """
-    Гибридная зона.
-
-    Major level остаётся центром.
-    Локальные уровни используются только если они находятся
-    рядом с major-level.
-
-    Мы НЕ создаём отдельные зоны для каждой мелкой ликвидности.
-    """
-
-    center = level_price(center_level)
+def build_liquidity_zone(
+    levels,
+    center_level,
+    price,
+):
+    center = level_price(
+        center_level
+    )
 
     if center is None:
         return None
 
-    position = level_position(center_level, price)
+    position = level_position(
+        center_level,
+        price,
+    )
 
     nearby = []
 
@@ -406,96 +494,165 @@ def build_liquidity_zone(levels, center_level, price):
         if p is None:
             continue
 
-        if level_position(level, price) != position:
+        if level_position(
+            level,
+            price,
+        ) != position:
             continue
 
-        distance = abs(p - center) / center
+        distance = (
+            abs(p - center)
+            / center
+        )
 
         if distance <= MAX_LOCAL_ZONE_PCT:
             nearby.append(p)
 
-    points = [center] + nearby
-
-    if not points:
-        return None
+    points = [
+        center,
+        *nearby,
+    ]
 
     low = min(points)
     high = max(points)
 
-    # Защита от чрезмерно широких зон.
-    max_width = center * MAX_LOCAL_ZONE_PCT
+    max_width = (
+        center
+        * MAX_LOCAL_ZONE_PCT
+    )
 
-    low = max(low, center - max_width)
-    high = min(high, center + max_width)
+    low = max(
+        low,
+        center - max_width,
+    )
+
+    high = min(
+        high,
+        center + max_width,
+    )
 
     return {
         "low": low,
         "high": high,
         "center": center,
         "position": position,
-        "strength": liquidity_strength(center_level),
+        "strength": liquidity_strength(
+            center_level
+        ),
         "major": center_level,
-        "local_count": len(nearby),
+        "local_count": len(
+            nearby
+        ),
     }
 
 
 # ============================================================
-# STRATEGY ANALYSIS
+# ANALYSIS
 # ============================================================
 
 def build_analysis(symbol):
-    data = get_market_data(symbol)
+    data = get_market_data(
+        symbol
+    )
 
-    price = float(data["price"])
+    price = float(
+        data["price"]
+    )
 
-    candles_1h = data.get("candles_1h", [])
-    candles_15m = data.get("candles_15m", [])
-    candles_5m = data.get("candles_5m", [])
+    candles_1h = data.get(
+        "candles_1h",
+        [],
+    )
 
-    # --------------------------------------------------------
-    # ВАЖНО:
-    # D1/W1 больше вообще не передаём.
-    # --------------------------------------------------------
+    candles_15m = data.get(
+        "candles_15m",
+        [],
+    )
+
+    candles_5m = data.get(
+        "candles_5m",
+        [],
+    )
+
+    candles_1m = data.get(
+        "candles_1m",
+        [],
+    )
+
+    # ========================================================
+    # MAJOR + HYBRID LIQUIDITY
+    # ========================================================
 
     major_levels = find_major_liquidity(
         candles_1h,
         price,
         max_levels=20,
         include_swept=True,
+        candles_15m=candles_15m,
+        candles_5m=candles_5m,
+        candles_1m=candles_1m,
     )
 
-    # Первый проход — определяем 1H direction.
+    # ========================================================
+    # FIRST PASS
+    # Получаем направление только от 1H.
+    # D1/W1 НЕ ИСПОЛЬЗУЮТСЯ.
+    # ========================================================
+
     context = analyze(
         candles_1h=candles_1h,
         candles_15m=candles_15m,
         candles_5m=candles_5m,
+        candles_1m=candles_1m,
         current_price=price,
         major_levels=major_levels,
         sweep=None,
     )
 
-    direction = context.get("direction")
+    if not isinstance(
+        context,
+        dict,
+    ):
+        context = {}
+
+    direction = context.get(
+        "direction"
+    )
 
     sweep = None
 
-    if direction in ("LONG", "SHORT"):
-        sweep = detect_sweep(
-            candles_1h,
-            price,
-            direction,
-        )
+    if direction in (
+        "LONG",
+        "SHORT",
+    ):
+        try:
+            sweep = detect_sweep(
+                candles_1h,
+                price,
+                direction,
+            )
+        except Exception:
+            sweep = None
 
-    # Второй проход — полный сетап.
+    # ========================================================
+    # SECOND PASS
+    # Полный pipeline.
+    # ========================================================
+
     result = analyze(
         candles_1h=candles_1h,
         candles_15m=candles_15m,
         candles_5m=candles_5m,
+        candles_1m=candles_1m,
         current_price=price,
         major_levels=major_levels,
         sweep=sweep,
     )
 
-    if not isinstance(result, dict):
+    if not isinstance(
+        result,
+        dict,
+    ):
         result = {}
 
     result.update({
@@ -503,99 +660,133 @@ def build_analysis(symbol):
         "price": price,
         "major_levels": major_levels,
         "sweep": sweep,
-        "candles_5m": candles_5m,
-        "candles_15m": candles_15m,
         "candles_1h": candles_1h,
+        "candles_15m": candles_15m,
+        "candles_5m": candles_5m,
+        "candles_1m": candles_1m,
         "strategy_version": STRATEGY_VERSION,
     })
 
-    # --------------------------------------------------------
-    # Если strategy.py не определил направление,
-    # используем context.
-    # --------------------------------------------------------
-
-    if not result.get("direction"):
+    if not result.get(
+        "direction"
+    ):
         result["direction"] = direction
 
     return result
 
 
 # ============================================================
-# ACTIVE STAGE
+# STAGE
 # ============================================================
 
 def get_result_stage(result):
-    stage = result.get("stage")
+    stage = result.get(
+        "stage"
+    )
 
     if stage:
-        return str(stage).upper()
+        return str(
+            stage
+        ).upper()
 
-    if result.get("ready") is True:
+    if result.get(
+        "ready"
+    ) is True:
         return "READY"
 
-    if result.get("trigger_5m"):
+    if result.get(
+        "trigger_5m"
+    ):
         return "5M"
 
-    if result.get("confirmation_15m"):
+    if result.get(
+        "confirmation_15m"
+    ):
         return "15M_CONFIRMED"
 
-    if result.get("sweep"):
+    if result.get(
+        "sweep"
+    ):
         return "SWEEP"
 
     return "WAIT"
 
 
 # ============================================================
-# TEXT OUTPUT
+# TEXT
 # ============================================================
 
-def build_sol_message(result):
-    symbol = result.get("symbol", "SOL")
-    price = result.get("price", 0)
+def build_coin_message(result):
+    symbol = result.get(
+        "symbol",
+        "SOL",
+    )
 
-    direction = result.get("direction")
-    score = result.get("score", 0)
+    price = result.get(
+        "price",
+        0,
+    )
 
-    stage = get_result_stage(result)
+    direction = result.get(
+        "direction"
+    )
 
-    levels = result.get("major_levels", [])
+    score = result.get(
+        "score",
+        0,
+    )
 
-    bsl = nearest_bsl(levels, price)
-    ssl = nearest_ssl(levels, price)
+    stage = get_result_stage(
+        result
+    )
 
-    sweep = result.get("sweep")
+    levels = result.get(
+        "major_levels",
+        [],
+    )
+
+    bsl = nearest_bsl(
+        levels,
+        price,
+    )
+
+    ssl = nearest_ssl(
+        levels,
+        price,
+    )
+
+    sweep = result.get(
+        "sweep"
+    )
 
     lines = [
         f"📈 <b>TRADEMIND {BOT_VERSION} — {symbol}</b>",
         "",
         f"💰 Цена: <b>${fmt_price(price)}</b>",
         "",
+        (
+            f"{direction_icon(direction)} "
+            f"<b>1H DIRECTION: "
+            f"{direction or 'NEUTRAL'}</b>"
+        ),
+        "",
+        (
+            f"{stage_icon(stage)} "
+            f"Stage: <b>{stage}</b>"
+        ),
+        f"⭐ Score: <b>{score}/100</b>",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "💧 <b>MAJOR LIQUIDITY</b>",
+        "━━━━━━━━━━━━━━━━━━",
     ]
 
-    if direction:
-        lines.append(
-            f"{direction_icon(direction)} "
-            f"<b>1H DIRECTION: {direction}</b>"
-        )
-    else:
-        lines.append("⚪ <b>1H DIRECTION: NEUTRAL</b>")
-
-    lines.append(
-        f"{stage_icon(stage)} Stage: <b>{stage}</b>"
-    )
-
-    lines.append(
-        f"⭐ Score: <b>{score}/100</b>"
-    )
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append("💧 <b>MAJOR LIQUIDITY</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    # ========================================================
+    # BSL
+    # ========================================================
 
     if bsl:
         p = level_price(bsl)
-        dist = pct_distance(p, price)
 
         zone = build_liquidity_zone(
             levels,
@@ -605,28 +796,43 @@ def build_sol_message(result):
 
         if zone:
             lines.append(
-                f"🔴 <b>BSL</b> ${fmt_price(zone['low'])}"
-                f" — ${fmt_price(zone['high'])}"
+                f"🔴 <b>BSL ZONE</b> "
+                f"${fmt_price(zone['low'])}"
+                f" — "
+                f"${fmt_price(zone['high'])}"
             )
         else:
             lines.append(
-                f"🔴 <b>BSL</b> ${fmt_price(p)}"
+                f"🔴 <b>BSL</b> "
+                f"${fmt_price(p)}"
             )
+
+        dist = pct_distance(
+            p,
+            price,
+        )
 
         lines.append(
             f"   +{dist:.2f}% | "
-            f"touches: {bsl.get('touches', 0)} | "
-            f"strength: {bsl.get('strength', 0)}"
+            f"touches: "
+            f"{bsl.get('touches', 0)} | "
+            f"strength: "
+            f"{bsl.get('strength', 0)}"
         )
 
     else:
-        lines.append("🔴 BSL — нет свежей major liquidity")
+        lines.append(
+            "🔴 BSL — нет major liquidity"
+        )
 
     lines.append("")
 
+    # ========================================================
+    # SSL
+    # ========================================================
+
     if ssl:
         p = level_price(ssl)
-        dist = abs(pct_distance(p, price))
 
         zone = build_liquidity_zone(
             levels,
@@ -636,137 +842,190 @@ def build_sol_message(result):
 
         if zone:
             lines.append(
-                f"🟢 <b>SSL</b> ${fmt_price(zone['low'])}"
-                f" — ${fmt_price(zone['high'])}"
+                f"🟢 <b>SSL ZONE</b> "
+                f"${fmt_price(zone['low'])}"
+                f" — "
+                f"${fmt_price(zone['high'])}"
             )
         else:
             lines.append(
-                f"🟢 <b>SSL</b> ${fmt_price(p)}"
+                f"🟢 <b>SSL</b> "
+                f"${fmt_price(p)}"
             )
+
+        dist = abs(
+            pct_distance(
+                p,
+                price,
+            )
+        )
 
         lines.append(
             f"   -{dist:.2f}% | "
-            f"touches: {ssl.get('touches', 0)} | "
-            f"strength: {ssl.get('strength', 0)}"
+            f"touches: "
+            f"{ssl.get('touches', 0)} | "
+            f"strength: "
+            f"{ssl.get('strength', 0)}"
         )
 
     else:
-        lines.append("🟢 SSL — нет свежей major liquidity")
+        lines.append(
+            "🟢 SSL — нет major liquidity"
+        )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SWEEP
-    # --------------------------------------------------------
+    # ========================================================
 
     if sweep:
-        lines.append("")
-        lines.append("━━━━━━━━━━━━━━━━━━")
-        lines.append("🟠 <b>SWEEP</b>")
-        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.extend([
+            "",
+            "━━━━━━━━━━━━━━━━━━",
+            "🟠 <b>SWEEP</b>",
+            "━━━━━━━━━━━━━━━━━━",
+        ])
 
-        sweep_level = (
+        level = (
             sweep.get("level")
             or sweep.get("price")
-            or sweep.get("liquidity_level")
+            or sweep.get(
+                "liquidity_level"
+            )
         )
 
         extreme = (
             sweep.get("extreme")
-            or sweep.get("sweep_extreme")
+            or sweep.get(
+                "sweep_extreme"
+            )
             or sweep.get("high")
             or sweep.get("low")
         )
 
-        if sweep_level:
+        if level is not None:
             lines.append(
-                f"💧 Level: ${fmt_price(sweep_level)}"
+                f"💧 Level: "
+                f"${fmt_price(level)}"
             )
 
-        if extreme:
+        if extreme is not None:
             lines.append(
-                f"📍 Extreme: ${fmt_price(extreme)}"
+                f"📍 Extreme: "
+                f"${fmt_price(extreme)}"
             )
 
-        if stage in ("SWEEP", "SWEPT"):
-            lines.append("")
-            lines.append(
-                "⏳ <b>ЖДЁМ 15M CONFIRMATION</b>"
-            )
+        if stage in (
+            "SWEEP",
+            "SWEPT",
+        ):
+            lines.extend([
+                "",
+                "⏳ <b>ЖДЁМ "
+                "15M CONFIRMATION</b>",
+                "❌ Вход запрещён.",
+            ])
 
-        elif stage in ("15M", "15M_CONFIRMED"):
-            lines.append("")
-            lines.append(
-                "🟡 <b>15M CONFIRMED</b>"
-            )
-            lines.append(
-                "⏳ Ждём 5M ILM"
-            )
+        elif stage in (
+            "15M",
+            "15M_CONFIRMED",
+        ):
+            lines.extend([
+                "",
+                "🟡 <b>15M CONFIRMED</b>",
+                "⏳ <b>ЖДЁМ 5M ILM</b>",
+                "❌ Вход запрещён.",
+            ])
 
-        elif stage in ("5M", "READY"):
-            lines.append("")
-            lines.append(
-                "🟢 <b>5M ILM CONFIRMED</b>"
-            )
+        elif stage == "5M":
+            lines.extend([
+                "",
+                "🟢 <b>5M ILM CONFIRMED</b>",
+                "⏳ Ждём финальный trigger",
+            ])
 
-    # --------------------------------------------------------
+    # ========================================================
     # READY
-    # --------------------------------------------------------
+    # ========================================================
 
     if stage == "READY":
         entry = (
             result.get("entry")
-            or result.get("entry_price")
+            or result.get(
+                "entry_price"
+            )
         )
 
         sl = (
             result.get("sl")
-            or result.get("stop_loss")
+            or result.get(
+                "stop_loss"
+            )
         )
 
         tp = (
             result.get("tp")
-            or result.get("take_profit")
+            or result.get(
+                "take_profit"
+            )
         )
 
-        rr = result.get("rr")
+        rr = result.get(
+            "rr"
+        )
 
-        lines.append("")
-        lines.append("━━━━━━━━━━━━━━━━━━")
-        lines.append("🟢 <b>READY</b>")
-        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.extend([
+            "",
+            "━━━━━━━━━━━━━━━━━━",
+            "🟢 <b>READY</b>",
+            "━━━━━━━━━━━━━━━━━━",
+        ])
 
-        if entry:
+        if entry is not None:
             lines.append(
-                f"🎯 Entry: <b>${fmt_price(entry)}</b>"
+                f"🎯 Entry: "
+                f"<b>${fmt_price(entry)}</b>"
             )
 
-        if sl:
+        if sl is not None:
             lines.append(
-                f"🛑 SL: <b>${fmt_price(sl)}</b>"
+                f"🛑 SL: "
+                f"<b>${fmt_price(sl)}</b>"
             )
 
-        if tp:
+        if tp is not None:
             lines.append(
-                f"💰 TP: <b>${fmt_price(tp)}</b>"
+                f"💰 TP: "
+                f"<b>${fmt_price(tp)}</b>"
             )
 
         if rr is not None:
             try:
                 lines.append(
-                    f"📐 RR: <b>1:{float(rr):.2f}</b>"
+                    f"📐 RR: "
+                    f"<b>1:{float(rr):.2f}</b>"
                 )
             except Exception:
                 pass
 
-        lines.append("")
-        lines.append("🟢 <b>МОЖНО ВХОДИТЬ</b>")
+        lines.extend([
+            "",
+            "🟢 <b>МОЖНО ВХОДИТЬ</b>",
+        ])
 
-    elif stage in ("WAIT", "NO_TRADE"):
-        reason = result.get("reason")
+    elif stage in (
+        "WAIT",
+        "NO_TRADE",
+    ):
+        reason = result.get(
+            "reason"
+        )
 
         if reason:
-            lines.append("")
-            lines.append("Причина:")
-            lines.append(str(reason))
+            lines.extend([
+                "",
+                "Причина:",
+                str(reason),
+            ])
 
     return "\n".join(lines)
 
@@ -775,63 +1034,114 @@ def build_sol_message(result):
 # RADAR
 # ============================================================
 
-def radar_line(symbol, result):
-    score = result.get("score", 0)
-    direction = result.get("direction") or "NEUTRAL"
-    stage = get_result_stage(result)
+def radar_line(
+    symbol,
+    result,
+):
+    score = result.get(
+        "score",
+        0,
+    )
 
-    icon = stage_icon(stage)
+    direction = (
+        result.get(
+            "direction"
+        )
+        or "NEUTRAL"
+    )
 
-    if stage in ("SWEEP", "SWEPT"):
-        text = "SWEEP СНЯТ — ЖДЁМ 15M"
+    stage = get_result_stage(
+        result
+    )
 
-    elif stage in ("15M", "15M_CONFIRMED"):
-        text = "15M CONFIRMED — ЖДЁМ 5M"
+    icon = stage_icon(
+        stage
+    )
+
+    if stage in (
+        "SWEEP",
+        "SWEPT",
+    ):
+        text = (
+            "SWEEP СНЯТ — "
+            "ЖДЁМ 15M"
+        )
+
+    elif stage in (
+        "15M",
+        "15M_CONFIRMED",
+    ):
+        text = (
+            "15M CONFIRMED — "
+            "ЖДЁМ 5M"
+        )
+
+    elif stage == "5M":
+        text = (
+            "5M ILM — "
+            "ЖДЁМ TRIGGER"
+        )
 
     elif stage == "READY":
         text = "READY"
+
+    elif stage == "NO_TRADE":
+        text = "NO TRADE"
 
     else:
         text = "ОЖИДАНИЕ"
 
     return (
         f"{icon} <b>{symbol}</b> — "
-        f"{text} · {direction} · {score}/100"
+        f"{text} · "
+        f"{direction} · "
+        f"{score}/100"
     )
 
 
-async def build_radar():
-    results = []
-
-    async def scan(symbol):
-        try:
-            return symbol, await asyncio.to_thread(
+async def scan_coin(
+    symbol,
+):
+    try:
+        return (
+            symbol,
+            await asyncio.to_thread(
                 build_analysis,
                 COINS[symbol],
-            )
-        except Exception as exc:
-            return symbol, {
+            ),
+        )
+
+    except Exception as exc:
+        traceback.print_exc()
+
+        return (
+            symbol,
+            {
                 "score": 0,
                 "direction": "NEUTRAL",
                 "stage": "WAIT",
-                "reason": f"Ошибка анализа: {exc}",
-            }
+                "reason": (
+                    f"Ошибка анализа: "
+                    f"{exc}"
+                ),
+            },
+        )
 
-    tasks = [
-        scan(symbol)
-        for symbol in COINS
-    ]
 
-    scanned = await asyncio.gather(*tasks)
-
-    for symbol, result in scanned:
-        results.append((symbol, result))
+async def build_radar():
+    results = await asyncio.gather(
+        *[
+            scan_coin(symbol)
+            for symbol in COINS
+        ]
+    )
 
     lines = [
         f"🧠 <b>TRADEMIND {BOT_VERSION}</b>",
         "",
         "📡 Monitor: <b>ONLINE</b>",
         "📊 Market: <b>Binance Spot</b>",
+        f"🕐 Scan: <b>{CHECK_INTERVAL}s</b>",
         "",
         "━━━━━━━━━━━━━━━━━━",
         "📡 <b>TRADE RADAR</b>",
@@ -842,50 +1152,59 @@ async def build_radar():
 
     for symbol, result in results:
         lines.append(
-            radar_line(symbol, result)
+            radar_line(
+                symbol,
+                result,
+            )
         )
 
         if (
-            get_result_stage(result) == "READY"
-            and float(result.get("score", 0)) >= MIN_SCORE_READY
+            get_result_stage(
+                result
+            ) == "READY"
+            and float(
+                result.get(
+                    "score",
+                    0,
+                )
+            ) >= MIN_SCORE_READY
         ):
             ready_count += 1
 
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+    ])
 
     if ready_count:
         lines.append(
-            f"🟢 <b>ГОТОВЫХ СЕТАПОВ: {ready_count}</b>"
+            f"🟢 <b>ГОТОВЫХ "
+            f"СЕТАПОВ: "
+            f"{ready_count}</b>"
         )
     else:
         lines.append(
-            "🎯 <b>ГОТОВОГО СЕТАПА НЕТ</b>"
+            "🎯 <b>ГОТОВОГО "
+            "СЕТАПА НЕТ</b>"
         )
 
-    lines.append("")
-    lines.append(
-        "⏳ Ждём:"
-    )
-    lines.append(
-        "1H → Major Liquidity → Sweep"
-    )
-    lines.append(
-        "→ 15M → 5M ILM"
-    )
-    lines.append("")
-    lines.append(
-        "❌ Нет полного подтверждения"
-    )
-    lines.append(
-        "→ нет входа."
-    )
+    lines.extend([
+        "",
+        "⏳ Pipeline:",
+        "1H → Major Liquidity",
+        "→ Sweep → 15M",
+        "→ 5M ILM → Entry",
+        "",
+        "❌ Нет полного "
+        "подтверждения",
+        "→ нет входа.",
+    ])
 
     return "\n".join(lines)
 
 
 # ============================================================
-# TELEGRAM KEYBOARD
+# KEYBOARD
 # ============================================================
 
 def main_keyboard():
@@ -937,29 +1256,52 @@ def main_keyboard():
 # CHART
 # ============================================================
 
-def candle_to_ohlc(candle):
-    """
-    Поддержка нескольких форматов свечей.
-    """
-
-    if isinstance(candle, dict):
+def candle_to_ohlc(
+    candle,
+):
+    if isinstance(
+        candle,
+        dict,
+    ):
         try:
             return {
-                "open": float(candle["open"]),
-                "high": float(candle["high"]),
-                "low": float(candle["low"]),
-                "close": float(candle["close"]),
+                "open": float(
+                    candle["open"]
+                ),
+                "high": float(
+                    candle["high"]
+                ),
+                "low": float(
+                    candle["low"]
+                ),
+                "close": float(
+                    candle["close"]
+                ),
             }
         except Exception:
             return None
 
-    if isinstance(candle, (list, tuple)) and len(candle) >= 5:
+    if (
+        isinstance(
+            candle,
+            (list, tuple),
+        )
+        and len(candle) >= 5
+    ):
         try:
             return {
-                "open": float(candle[1]),
-                "high": float(candle[2]),
-                "low": float(candle[3]),
-                "close": float(candle[4]),
+                "open": float(
+                    candle[1]
+                ),
+                "high": float(
+                    candle[2]
+                ),
+                "low": float(
+                    candle[3]
+                ),
+                "close": float(
+                    candle[4]
+                ),
             }
         except Exception:
             return None
@@ -967,75 +1309,111 @@ def candle_to_ohlc(candle):
     return None
 
 
-def create_chart(result, timeframe="15M"):
-    """
-    Создаёт актуальный PNG-график.
-
-    Показывает:
-    - свечи;
-    - текущую цену;
-    - BSL;
-    - SSL;
-    - active sweep;
-    - Entry/SL/TP;
-    - stage ожидания.
-    """
-
+def create_chart(
+    result,
+    timeframe="15M",
+):
     if timeframe == "1H":
-        raw_candles = result.get("candles_1h", [])
+        raw = result.get(
+            "candles_1h",
+            [],
+        )
+
     elif timeframe == "5M":
-        raw_candles = result.get("candles_5m", [])
+        raw = result.get(
+            "candles_5m",
+            [],
+        )
+
     else:
-        raw_candles = result.get("candles_15m", [])
+        raw = result.get(
+            "candles_15m",
+            [],
+        )
 
     candles = []
 
-    for candle in raw_candles[-80:]:
-        parsed = candle_to_ohlc(candle)
+    for candle in raw[-80:]:
+        parsed = candle_to_ohlc(
+            candle
+        )
 
         if parsed:
-            candles.append(parsed)
+            candles.append(
+                parsed
+            )
 
     if not candles:
         return None
 
-    price = float(result.get("price", candles[-1]["close"]))
+    price = float(
+        result.get(
+            "price",
+            candles[-1]["close"],
+        )
+    )
 
-    levels = result.get("major_levels", [])
+    levels = result.get(
+        "major_levels",
+        [],
+    )
 
-    bsl = nearest_bsl(levels, price)
-    ssl = nearest_ssl(levels, price)
+    bsl = nearest_bsl(
+        levels,
+        price,
+    )
 
-    stage = get_result_stage(result)
-    direction = result.get("direction") or "NEUTRAL"
+    ssl = nearest_ssl(
+        levels,
+        price,
+    )
 
-    sweep = result.get("sweep")
+    stage = get_result_stage(
+        result
+    )
+
+    direction = (
+        result.get(
+            "direction"
+        )
+        or "NEUTRAL"
+    )
+
+    sweep = result.get(
+        "sweep"
+    )
 
     fig, ax = plt.subplots(
         figsize=(13, 7),
         dpi=140,
     )
 
-    # --------------------------------------------------------
-    # Candles
-    # --------------------------------------------------------
+    # ========================================================
+    # CANDLES
+    # ========================================================
 
-    for i, candle in enumerate(candles):
+    for i, candle in enumerate(
+        candles
+    ):
         o = candle["open"]
         h = candle["high"]
         l = candle["low"]
         c = candle["close"]
 
-        # Wick
         ax.plot(
             [i, i],
             [l, h],
             linewidth=1,
         )
 
-        # Body
-        bottom = min(o, c)
-        height = abs(c - o)
+        bottom = min(
+            o,
+            c,
+        )
+
+        height = abs(
+            c - o
+        )
 
         if height == 0:
             height = max(
@@ -1043,13 +1421,17 @@ def create_chart(result, timeframe="15M"):
                 price * 0.00005,
             )
 
-        if c >= o:
-            face = "white"
-        else:
-            face = "black"
+        face = (
+            "white"
+            if c >= o
+            else "black"
+        )
 
         rect = Rectangle(
-            (i - 0.32, bottom),
+            (
+                i - 0.32,
+                bottom,
+            ),
             0.64,
             height,
             facecolor=face,
@@ -1057,17 +1439,24 @@ def create_chart(result, timeframe="15M"):
             linewidth=0.8,
         )
 
-        ax.add_patch(rect)
+        ax.add_patch(
+            rect
+        )
 
-    # --------------------------------------------------------
-    # Liquidity helper
-    # --------------------------------------------------------
+    # ========================================================
+    # LIQUIDITY
+    # ========================================================
 
-    def draw_liquidity(level, label):
+    def draw_liquidity(
+        level,
+        label,
+    ):
         if not level:
             return
 
-        p = level_price(level)
+        p = level_price(
+            level
+        )
 
         if p is None:
             return
@@ -1079,12 +1468,9 @@ def create_chart(result, timeframe="15M"):
         )
 
         if zone:
-            low = zone["low"]
-            high = zone["high"]
-
             ax.axhspan(
-                low,
-                high,
+                zone["low"],
+                zone["high"],
                 alpha=0.10,
             )
 
@@ -1097,7 +1483,10 @@ def create_chart(result, timeframe="15M"):
             ax.text(
                 len(candles) - 1,
                 zone["center"],
-                f" {label} ${fmt_price(zone['center'])}",
+                (
+                    f" {label} "
+                    f"${fmt_price(zone['center'])}"
+                ),
                 va="center",
                 fontsize=9,
             )
@@ -1112,17 +1501,27 @@ def create_chart(result, timeframe="15M"):
             ax.text(
                 len(candles) - 1,
                 p,
-                f" {label} ${fmt_price(p)}",
+                (
+                    f" {label} "
+                    f"${fmt_price(p)}"
+                ),
                 va="center",
                 fontsize=9,
             )
 
-    draw_liquidity(bsl, "BSL")
-    draw_liquidity(ssl, "SSL")
+    draw_liquidity(
+        bsl,
+        "BSL",
+    )
 
-    # --------------------------------------------------------
-    # Current price
-    # --------------------------------------------------------
+    draw_liquidity(
+        ssl,
+        "SSL",
+    )
+
+    # ========================================================
+    # CURRENT PRICE
+    # ========================================================
 
     ax.axhline(
         price,
@@ -1132,33 +1531,42 @@ def create_chart(result, timeframe="15M"):
     ax.text(
         len(candles) - 1,
         price,
-        f" NOW ${fmt_price(price)}",
+        (
+            f" NOW "
+            f"${fmt_price(price)}"
+        ),
         va="bottom",
         fontsize=10,
         fontweight="bold",
     )
 
-    # --------------------------------------------------------
-    # Sweep
-    # --------------------------------------------------------
+    # ========================================================
+    # SWEEP
+    # ========================================================
 
     if sweep:
         sweep_level = (
             sweep.get("level")
             or sweep.get("price")
-            or sweep.get("liquidity_level")
+            or sweep.get(
+                "liquidity_level"
+            )
         )
 
         extreme = (
             sweep.get("extreme")
-            or sweep.get("sweep_extreme")
+            or sweep.get(
+                "sweep_extreme"
+            )
             or sweep.get("high")
             or sweep.get("low")
         )
 
-        if sweep_level:
+        if sweep_level is not None:
             try:
-                sweep_level = float(sweep_level)
+                sweep_level = float(
+                    sweep_level
+                )
 
                 ax.axhline(
                     sweep_level,
@@ -1178,9 +1586,11 @@ def create_chart(result, timeframe="15M"):
             except Exception:
                 pass
 
-        if extreme:
+        if extreme is not None:
             try:
-                extreme = float(extreme)
+                extreme = float(
+                    extreme
+                )
 
                 ax.axhline(
                     extreme,
@@ -1199,39 +1609,51 @@ def create_chart(result, timeframe="15M"):
             except Exception:
                 pass
 
-    # --------------------------------------------------------
-    # Entry / SL / TP
-    # --------------------------------------------------------
+    # ========================================================
+    # ENTRY / SL / TP
+    # ========================================================
 
     entry = (
         result.get("entry")
-        or result.get("entry_price")
+        or result.get(
+            "entry_price"
+        )
     )
 
     sl = (
         result.get("sl")
-        or result.get("stop_loss")
+        or result.get(
+            "stop_loss"
+        )
     )
 
     tp = (
         result.get("tp")
-        or result.get("take_profit")
+        or result.get(
+            "take_profit"
+        )
     )
 
-    if entry:
+    def draw_trade_line(
+        value,
+        label,
+    ):
+        if value is None:
+            return
+
         try:
-            entry = float(entry)
+            value = float(value)
 
             ax.axhline(
-                entry,
+                value,
                 linestyle="-.",
                 linewidth=1.5,
             )
 
             ax.text(
                 2,
-                entry,
-                " ENTRY",
+                value,
+                f" {label}",
                 va="bottom",
                 fontsize=9,
                 fontweight="bold",
@@ -1240,73 +1662,74 @@ def create_chart(result, timeframe="15M"):
         except Exception:
             pass
 
-    if sl:
-        try:
-            sl = float(sl)
+    draw_trade_line(
+        entry,
+        "ENTRY",
+    )
 
-            ax.axhline(
-                sl,
-                linestyle="-.",
-                linewidth=1.5,
-            )
+    draw_trade_line(
+        sl,
+        "SL",
+    )
 
-            ax.text(
-                2,
-                sl,
-                " SL",
-                va="bottom",
-                fontsize=9,
-                fontweight="bold",
-            )
+    draw_trade_line(
+        tp,
+        "TP",
+    )
 
-        except Exception:
-            pass
+    # ========================================================
+    # WAITING STAGE
+    # ========================================================
 
-    if tp:
-        try:
-            tp = float(tp)
+    if stage in (
+        "SWEEP",
+        "SWEPT",
+    ):
+        waiting = (
+            "🟠 ЖДЁМ 15M CONFIRMATION"
+        )
 
-            ax.axhline(
-                tp,
-                linestyle="-.",
-                linewidth=1.5,
-            )
+    elif stage in (
+        "15M",
+        "15M_CONFIRMED",
+    ):
+        waiting = (
+            "🟡 15M CONFIRMED "
+            "→ ЖДЁМ 5M ILM"
+        )
 
-            ax.text(
-                2,
-                tp,
-                " TP",
-                va="bottom",
-                fontsize=9,
-                fontweight="bold",
-            )
-
-        except Exception:
-            pass
-
-    # --------------------------------------------------------
-    # WAITING LABEL
-    # --------------------------------------------------------
-
-    if stage in ("SWEEP", "SWEPT"):
-        waiting = "🟠 ЖДЁМ 15M CONFIRMATION"
-
-    elif stage in ("15M", "15M_CONFIRMED"):
-        waiting = "🟡 15M CONFIRMED → ЖДЁМ 5M ILM"
-
-    elif stage in ("5M",):
-        waiting = "🟢 ЖДЁМ ФИНАЛЬНЫЙ TRIGGER"
+    elif stage == "5M":
+        waiting = (
+            "🟢 5M ILM "
+            "→ ЖДЁМ TRIGGER"
+        )
 
     elif stage == "READY":
-        waiting = "🟢 READY — МОЖНО ВХОДИТЬ"
+        waiting = (
+            "🟢 READY — "
+            "МОЖНО ВХОДИТЬ"
+        )
+
+    elif stage == "NO_TRADE":
+        waiting = (
+            "❌ NO TRADE"
+        )
 
     else:
         if direction == "SHORT":
-            waiting = "🔴 ЖДЁМ SHORT SWEEP"
+            waiting = (
+                "🔴 ЖДЁМ SHORT SWEEP"
+            )
+
         elif direction == "LONG":
-            waiting = "🟢 ЖДЁМ LONG SWEEP"
+            waiting = (
+                "🟢 ЖДЁМ LONG SWEEP"
+            )
+
         else:
-            waiting = "⚪ ЖДЁМ 1H DIRECTION"
+            waiting = (
+                "⚪ ЖДЁМ 1H DIRECTION"
+            )
 
     ax.text(
         0.01,
@@ -1318,24 +1741,38 @@ def create_chart(result, timeframe="15M"):
         va="top",
     )
 
-    # --------------------------------------------------------
-    # Title
-    # --------------------------------------------------------
+    # ========================================================
+    # TITLE
+    # ========================================================
 
-    symbol = result.get("symbol", "SOL")
+    symbol = result.get(
+        "symbol",
+        "SOL",
+    )
 
     ax.set_title(
-        f"TradeMind {BOT_VERSION} — {symbol} — {timeframe}\n"
-        f"1H: {direction} | Stage: {stage}",
+        (
+            f"TradeMind "
+            f"{BOT_VERSION} — "
+            f"{symbol} — "
+            f"{timeframe}\n"
+            f"1H: {direction} | "
+            f"Stage: {stage}"
+        ),
         fontsize=14,
         fontweight="bold",
     )
 
-    ax.set_ylabel("Price")
-    ax.set_xlabel("Candles")
+    ax.set_ylabel(
+        "Price"
+    )
+
+    ax.set_xlabel(
+        "Candles"
+    )
 
     ax.grid(
-        alpha=0.18,
+        alpha=0.18
     )
 
     ax.set_xlim(
@@ -1343,40 +1780,45 @@ def create_chart(result, timeframe="15M"):
         len(candles) + 2,
     )
 
-    # --------------------------------------------------------
-    # Price range
-    # --------------------------------------------------------
+    # ========================================================
+    # RANGE
+    # ========================================================
 
     all_prices = []
 
-    for c in candles:
+    for candle in candles:
         all_prices.extend([
-            c["high"],
-            c["low"],
+            candle["high"],
+            candle["low"],
         ])
 
-    if bsl:
-        p = level_price(bsl)
-        if p:
-            all_prices.append(p)
-
-    if ssl:
-        p = level_price(ssl)
-        if p:
-            all_prices.append(p)
-
-    if entry:
-        all_prices.append(entry)
-
-    if sl:
-        all_prices.append(sl)
-
-    if tp:
-        all_prices.append(tp)
+    for value in (
+        level_price(bsl)
+        if bsl
+        else None,
+        level_price(ssl)
+        if ssl
+        else None,
+        entry,
+        sl,
+        tp,
+    ):
+        if value is not None:
+            try:
+                all_prices.append(
+                    float(value)
+                )
+            except Exception:
+                pass
 
     if all_prices:
-        low = min(all_prices)
-        high = max(all_prices)
+        low = min(
+            all_prices
+        )
+
+        high = max(
+            all_prices
+        )
 
         margin = max(
             (high - low) * 0.08,
@@ -1398,7 +1840,9 @@ def create_chart(result, timeframe="15M"):
         bbox_inches="tight",
     )
 
-    plt.close(fig)
+    plt.close(
+        fig
+    )
 
     output.seek(0)
 
@@ -1414,7 +1858,7 @@ async def build_dashboard_message():
 
 
 # ============================================================
-# SAFE MESSAGE EDIT
+# SAFE EDIT
 # ============================================================
 
 async def safe_edit_message(
@@ -1432,7 +1876,10 @@ async def safe_edit_message(
         return True
 
     except BadRequest as exc:
-        if "Message is not modified" in str(exc):
+        if (
+            "Message is not modified"
+            in str(exc)
+        ):
             return False
 
         raise
@@ -1442,10 +1889,17 @@ async def safe_edit_message(
 # COMMANDS
 # ============================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    chat_id = (
+        update.effective_chat.id
+    )
 
-    add_subscriber(chat_id)
+    add_subscriber(
+        chat_id
+    )
 
     text = await build_dashboard_message()
 
@@ -1456,10 +1910,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+async def subscribe(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    chat_id = (
+        update.effective_chat.id
+    )
 
-    add_subscriber(chat_id)
+    add_subscriber(
+        chat_id
+    )
 
     await update.message.reply_text(
         "📡 <b>TradeMind monitor включён.</b>",
@@ -1467,17 +1928,27 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+async def unsubscribe(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    chat_id = (
+        update.effective_chat.id
+    )
 
-    remove_subscriber(chat_id)
+    remove_subscriber(
+        chat_id
+    )
 
     await update.message.reply_text(
-        "🔕 Мониторинг выключен.",
+        "🔕 Мониторинг выключен."
     )
 
 
-async def radar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def radar_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     text = await build_dashboard_message()
 
     await update.message.reply_text(
@@ -1487,44 +1958,67 @@ async def radar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def sol_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     try:
         result = await asyncio.to_thread(
             build_analysis,
             COINS["SOL"],
         )
 
-        text = build_sol_message(result)
+        text = build_coin_message(
+            result
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "📈 График 15M",
+                    callback_data="chart_SOL",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📊 График 1H",
+                    callback_data="chart1h_SOL",
+                ),
+                InlineKeyboardButton(
+                    "⚡ График 5M",
+                    callback_data="chart5m_SOL",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔄 Обновить",
+                    callback_data="sol",
+                ),
+            ],
+        ])
 
         await update.message.reply_text(
             text,
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "📈 График SOL",
-                        callback_data="chart_SOL",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🔄 Обновить",
-                        callback_data="sol",
-                    )
-                ],
-            ]),
+            reply_markup=keyboard,
         )
 
     except Exception as exc:
         traceback.print_exc()
 
         await update.message.reply_text(
-            f"❌ Ошибка SOL:\n<code>{exc}</code>",
+            (
+                f"❌ Ошибка SOL:\n"
+                f"<code>{exc}</code>"
+            ),
             parse_mode=ParseMode.HTML,
         )
 
 
-async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def chart_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     try:
         result = await asyncio.to_thread(
             build_analysis,
@@ -1543,30 +2037,44 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        stage = get_result_stage(result)
+        stage = get_result_stage(
+            result
+        )
 
-        if stage in ("SWEEP", "SWEPT"):
+        if stage in (
+            "SWEEP",
+            "SWEPT",
+        ):
             caption = (
-                f"🟠 <b>SOL — SWEEP</b>\n"
-                f"⏳ Ждём 15M confirmation"
+                "🟠 <b>SOL — SWEEP</b>\n"
+                "⏳ Ждём 15M confirmation"
             )
 
-        elif stage in ("15M", "15M_CONFIRMED"):
+        elif stage in (
+            "15M",
+            "15M_CONFIRMED",
+        ):
             caption = (
-                f"🟡 <b>SOL — 15M CONFIRMED</b>\n"
-                f"⏳ Ждём 5M ILM"
+                "🟡 <b>SOL — 15M CONFIRMED</b>\n"
+                "⏳ Ждём 5M ILM"
+            )
+
+        elif stage == "5M":
+            caption = (
+                "🟢 <b>SOL — 5M ILM</b>\n"
+                "⏳ Ждём trigger"
             )
 
         elif stage == "READY":
             caption = (
-                f"🟢 <b>SOL — READY</b>\n"
-                f"Entry / SL / TP показаны на графике"
+                "🟢 <b>SOL — READY</b>\n"
+                "Entry / SL / TP показаны"
             )
 
         else:
             caption = (
-                f"⏳ <b>SOL — WAIT</b>\n"
-                f"График актуальный"
+                "⏳ <b>SOL — WAIT</b>\n"
+                "График актуальный"
             )
 
         await update.message.reply_photo(
@@ -1579,7 +2087,10 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         traceback.print_exc()
 
         await update.message.reply_text(
-            f"❌ Ошибка графика:\n<code>{exc}</code>",
+            (
+                f"❌ Ошибка графика:\n"
+                f"<code>{exc}</code>"
+            ),
             parse_mode=ParseMode.HTML,
         )
 
@@ -1598,11 +2109,14 @@ async def callback_handler(
 
     data = query.data or ""
 
-    # --------------------------------------------------------
+    # ========================================================
     # RADAR
-    # --------------------------------------------------------
+    # ========================================================
 
-    if data in ("radar", "refresh"):
+    if data in (
+        "radar",
+        "refresh",
+    ):
         text = await build_dashboard_message()
 
         await safe_edit_message(
@@ -1613,9 +2127,9 @@ async def callback_handler(
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # SOL
-    # --------------------------------------------------------
+    # ========================================================
 
     if data == "sol":
         result = await asyncio.to_thread(
@@ -1623,7 +2137,9 @@ async def callback_handler(
             COINS["SOL"],
         )
 
-        text = build_sol_message(result)
+        text = build_coin_message(
+            result
+        )
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -1658,9 +2174,9 @@ async def callback_handler(
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # CHART 15M
-    # --------------------------------------------------------
+    # ========================================================
 
     if data == "chart_SOL":
         result = await asyncio.to_thread(
@@ -1680,18 +2196,32 @@ async def callback_handler(
             )
             return
 
-        stage = get_result_stage(result)
+        stage = get_result_stage(
+            result
+        )
 
-        if stage in ("SWEEP", "SWEPT"):
+        if stage in (
+            "SWEEP",
+            "SWEPT",
+        ):
             caption = (
                 "🟠 <b>SOL — SWEEP СНЯТ</b>\n"
                 "⏳ ЖДЁМ 15M CONFIRMATION"
             )
 
-        elif stage in ("15M", "15M_CONFIRMED"):
+        elif stage in (
+            "15M",
+            "15M_CONFIRMED",
+        ):
             caption = (
                 "🟡 <b>SOL — 15M CONFIRMED</b>\n"
                 "⏳ ЖДЁМ 5M ILM"
+            )
+
+        elif stage == "5M":
+            caption = (
+                "🟢 <b>SOL — 5M ILM</b>\n"
+                "⏳ ЖДЁМ TRIGGER"
             )
 
         elif stage == "READY":
@@ -1701,7 +2231,12 @@ async def callback_handler(
             )
 
         else:
-            direction = result.get("direction") or "NEUTRAL"
+            direction = (
+                result.get(
+                    "direction"
+                )
+                or "NEUTRAL"
+            )
 
             caption = (
                 f"⏳ <b>SOL — WAIT</b>\n"
@@ -1716,9 +2251,9 @@ async def callback_handler(
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # CHART 1H
-    # --------------------------------------------------------
+    # ========================================================
 
     if data == "chart1h_SOL":
         result = await asyncio.to_thread(
@@ -1737,16 +2272,17 @@ async def callback_handler(
                 photo=chart,
                 caption=(
                     "📈 <b>SOL — 1H</b>\n"
-                    "💧 Major Liquidity + 1H structure"
+                    "💧 Major Liquidity + "
+                    "1H structure"
                 ),
                 parse_mode=ParseMode.HTML,
             )
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # CHART 5M
-    # --------------------------------------------------------
+    # ========================================================
 
     if data == "chart5m_SOL":
         result = await asyncio.to_thread(
@@ -1765,16 +2301,16 @@ async def callback_handler(
                 photo=chart,
                 caption=(
                     "⚡ <b>SOL — 5M</b>\n"
-                    "ILM / trigger / current stage"
+                    "ILM / trigger / stage"
                 ),
                 parse_mode=ParseMode.HTML,
             )
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # ACTIVE
-    # --------------------------------------------------------
+    # ========================================================
 
     if data == "active":
         found = []
@@ -1786,25 +2322,37 @@ async def callback_handler(
                     pair,
                 )
 
-                stage = get_result_stage(result)
-                score = float(result.get("score", 0))
+                stage = get_result_stage(
+                    result
+                )
+
+                score = float(
+                    result.get(
+                        "score",
+                        0,
+                    )
+                )
 
                 if (
                     stage == "READY"
                     and score >= MIN_SCORE_READY
                 ):
                     found.append(
-                        (symbol, result)
+                        (
+                            symbol,
+                            result,
+                        )
                     )
 
             except Exception:
-                continue
+                traceback.print_exc()
 
         if not found:
             text = (
-                f"🔥 <b>ACTIVE SETUP</b>\n\n"
-                f"🎯 Готового сетапа нет.\n\n"
-                f"Минимальный score: {MIN_SCORE_READY}/100"
+                "🔥 <b>ACTIVE SETUP</b>\n\n"
+                "🎯 Готового сетапа нет.\n\n"
+                f"Минимальный score: "
+                f"{MIN_SCORE_READY}/100"
             )
 
         else:
@@ -1814,12 +2362,19 @@ async def callback_handler(
             ]
 
             for symbol, result in found:
+                result["symbol"] = symbol
+
                 lines.append(
-                    build_sol_message(result)
+                    build_coin_message(
+                        result
+                    )
                 )
+
                 lines.append("")
 
-            text = "\n".join(lines)
+            text = "\n".join(
+                lines
+            )
 
         await safe_edit_message(
             query,
@@ -1829,9 +2384,9 @@ async def callback_handler(
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # LIQUIDITY
-    # --------------------------------------------------------
+    # ========================================================
 
     if data == "liquidity":
         try:
@@ -1840,11 +2395,25 @@ async def callback_handler(
                 COINS["SOL"],
             )
 
-            price = result.get("price", 0)
-            levels = result.get("major_levels", [])
+            price = result.get(
+                "price",
+                0,
+            )
 
-            bsl = nearest_bsl(levels, price)
-            ssl = nearest_ssl(levels, price)
+            levels = result.get(
+                "major_levels",
+                [],
+            )
+
+            bsl = nearest_bsl(
+                levels,
+                price,
+            )
+
+            ssl = nearest_ssl(
+                levels,
+                price,
+            )
 
             lines = [
                 "💧 <b>SOL LIQUIDITY</b>",
@@ -1860,14 +2429,14 @@ async def callback_handler(
 
                 if zone:
                     lines.append(
-                        f"🔴 BSL ZONE: "
+                        "🔴 BSL ZONE: "
                         f"${fmt_price(zone['low'])}"
-                        f" — "
+                        " — "
                         f"${fmt_price(zone['high'])}"
                     )
 
                     lines.append(
-                        f"🔥 Strength: "
+                        "🔥 Strength: "
                         f"{zone['strength']:.0f}/100"
                     )
 
@@ -1887,14 +2456,14 @@ async def callback_handler(
 
                 if zone:
                     lines.append(
-                        f"🟢 SSL ZONE: "
+                        "🟢 SSL ZONE: "
                         f"${fmt_price(zone['low'])}"
-                        f" — "
+                        " — "
                         f"${fmt_price(zone['high'])}"
                     )
 
                     lines.append(
-                        f"🔥 Strength: "
+                        "🔥 Strength: "
                         f"{zone['strength']:.0f}/100"
                     )
 
@@ -1912,15 +2481,18 @@ async def callback_handler(
         except Exception as exc:
             await safe_edit_message(
                 query,
-                f"❌ Liquidity error: {exc}",
+                (
+                    f"❌ Liquidity error: "
+                    f"{exc}"
+                ),
                 main_keyboard(),
             )
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # JOURNAL
-    # --------------------------------------------------------
+    # ========================================================
 
     if data == "journal":
         journal = load_json(
@@ -1942,12 +2514,15 @@ async def callback_handler(
 
             for trade in journal[-10:]:
                 lines.append(
-                    f"• {trade.get('symbol', '—')} "
+                    f"• "
+                    f"{trade.get('symbol', '—')} "
                     f"{trade.get('direction', '—')} "
                     f"{trade.get('result', '—')}"
                 )
 
-            text = "\n".join(lines)
+            text = "\n".join(
+                lines
+            )
 
         await safe_edit_message(
             query,
@@ -1957,21 +2532,27 @@ async def callback_handler(
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # STATUS
-    # --------------------------------------------------------
+    # ========================================================
 
     if data == "status":
         text = (
-            f"🧠 <b>TRADEMIND {BOT_VERSION}</b>\n\n"
+            f"🧠 <b>TRADEMIND "
+            f"{BOT_VERSION}</b>\n\n"
             f"📡 Monitor: ONLINE\n"
             f"📊 Market: Binance Spot\n"
-            f"🕐 Scan: {CHECK_INTERVAL}s\n"
-            f"🧵 Workers: {SCAN_WORKERS}\n"
-            f"⭐ READY score: {MIN_SCORE_READY}+\n\n"
-            f"📐 Strategy: {STRATEGY_VERSION}\n\n"
+            f"🕐 Scan: "
+            f"{CHECK_INTERVAL}s\n"
+            f"🧵 Workers: "
+            f"{SCAN_WORKERS}\n"
+            f"⭐ READY score: "
+            f"{MIN_SCORE_READY}+\n\n"
+            f"📐 Strategy: "
+            f"{STRATEGY_VERSION}\n\n"
             f"1H → Major Liquidity\n"
-            f"→ Sweep → 15M → 5M ILM\n\n"
+            f"→ Sweep → 15M\n"
+            f"→ 5M ILM → Entry\n\n"
             f"❌ D1: REMOVED\n"
             f"❌ W1: REMOVED\n"
             f"💧 Hybrid liquidity: ON\n"
@@ -1989,11 +2570,16 @@ async def callback_handler(
 
 
 # ============================================================
-# MONITOR ALERTS
+# MONITOR KEYS
 # ============================================================
 
-def make_sweep_key(symbol, result):
-    sweep = result.get("sweep")
+def make_sweep_key(
+    symbol,
+    result,
+):
+    sweep = result.get(
+        "sweep"
+    )
 
     if not sweep:
         return None
@@ -2001,12 +2587,16 @@ def make_sweep_key(symbol, result):
     level = (
         sweep.get("level")
         or sweep.get("price")
-        or sweep.get("liquidity_level")
+        or sweep.get(
+            "liquidity_level"
+        )
     )
 
     extreme = (
         sweep.get("extreme")
-        or sweep.get("sweep_extreme")
+        or sweep.get(
+            "sweep_extreme"
+        )
         or sweep.get("high")
         or sweep.get("low")
     )
@@ -2019,16 +2609,27 @@ def make_sweep_key(symbol, result):
     )
 
 
-def make_15m_key(symbol, result):
+def make_15m_key(
+    symbol,
+    result,
+):
+    confirmation = (
+        result.get(
+            "confirmation_15m"
+        )
+    )
+
     return (
         f"{symbol}:"
         f"{result.get('direction')}:"
-        f"{result.get('stage')}:"
-        f"{result.get('confirmation_15m')}"
+        f"{confirmation}"
     )
 
 
-def make_ready_key(symbol, result):
+def make_ready_key(
+    symbol,
+    result,
+):
     return (
         f"{symbol}:"
         f"{result.get('direction')}:"
@@ -2038,11 +2639,17 @@ def make_ready_key(symbol, result):
     )
 
 
+# ============================================================
+# MONITOR SEND
+# ============================================================
+
 async def send_monitor_message(
     application,
     text,
 ):
-    subscribers = list(get_subscribers())
+    subscribers = list(
+        get_subscribers()
+    )
 
     for chat_id in subscribers:
         try:
@@ -2061,28 +2668,39 @@ async def send_sweep_alert(
     symbol,
     result,
 ):
-    direction = result.get("direction")
-    sweep = result.get("sweep")
+    direction = result.get(
+        "direction"
+    )
+
+    sweep = result.get(
+        "sweep"
+    )
 
     level = (
         sweep.get("level")
         or sweep.get("price")
-        or sweep.get("liquidity_level")
+        or sweep.get(
+            "liquidity_level"
+        )
     )
 
     extreme = (
         sweep.get("extreme")
-        or sweep.get("sweep_extreme")
+        or sweep.get(
+            "sweep_extreme"
+        )
         or sweep.get("high")
         or sweep.get("low")
     )
 
     text = (
-        f"🟠 <b>{symbol} — {direction} SWEEP</b>\n\n"
+        f"🟠 <b>{symbol} — "
+        f"{direction} SWEEP</b>\n\n"
         f"💧 Liquidity снята\n"
         f"Level: ${fmt_price(level)}\n"
         f"Extreme: ${fmt_price(extreme)}\n\n"
-        f"⏳ <b>ЖДЁМ 15M CONFIRMATION</b>\n"
+        f"⏳ <b>ЖДЁМ "
+        f"15M CONFIRMATION</b>\n"
         f"❌ Вход пока запрещён."
     )
 
@@ -2097,10 +2715,13 @@ async def send_15m_alert(
     symbol,
     result,
 ):
-    direction = result.get("direction")
+    direction = result.get(
+        "direction"
+    )
 
     text = (
-        f"🟡 <b>{symbol} — 15M CONFIRMED</b>\n\n"
+        f"🟡 <b>{symbol} — "
+        f"15M CONFIRMED</b>\n\n"
         f"Direction: {direction}\n\n"
         f"⏳ <b>ЖДЁМ 5M ILM</b>\n"
         f"❌ Вход пока запрещён."
@@ -2117,33 +2738,58 @@ async def send_ready_alert(
     symbol,
     result,
 ):
-    direction = result.get("direction")
+    direction = result.get(
+        "direction"
+    )
 
     entry = (
         result.get("entry")
-        or result.get("entry_price")
+        or result.get(
+            "entry_price"
+        )
     )
 
     sl = (
         result.get("sl")
-        or result.get("stop_loss")
+        or result.get(
+            "stop_loss"
+        )
     )
 
     tp = (
         result.get("tp")
-        or result.get("take_profit")
+        or result.get(
+            "take_profit"
+        )
     )
 
-    rr = result.get("rr")
-    score = result.get("score", 0)
+    rr = result.get(
+        "rr"
+    )
+
+    score = result.get(
+        "score",
+        0,
+    )
+
+    try:
+        rr_text = (
+            f"1:{float(rr):.2f}"
+        )
+    except Exception:
+        rr_text = "—"
 
     text = (
-        f"🟢 <b>{symbol} — READY {direction}</b>\n\n"
+        f"🟢 <b>{symbol} — "
+        f"READY {direction}</b>\n\n"
         f"⭐ Score: {score}/100\n\n"
-        f"🎯 Entry: ${fmt_price(entry)}\n"
-        f"🛑 SL: ${fmt_price(sl)}\n"
-        f"💰 TP: ${fmt_price(tp)}\n"
-        f"📐 RR: 1:{float(rr):.2f}\n\n"
+        f"🎯 Entry: "
+        f"${fmt_price(entry)}\n"
+        f"🛑 SL: "
+        f"${fmt_price(sl)}\n"
+        f"💰 TP: "
+        f"${fmt_price(tp)}\n"
+        f"📐 RR: {rr_text}\n\n"
         f"🟢 <b>МОЖНО ВХОДИТЬ</b>"
     )
 
@@ -2153,32 +2799,48 @@ async def send_ready_alert(
     )
 
 
+# ============================================================
+# MONITOR COIN
+# ============================================================
+
 async def monitor_coin(
     application,
     symbol,
 ):
-    pair = COINS[symbol]
-
     try:
         result = await asyncio.to_thread(
             build_analysis,
-            pair,
+            COINS[symbol],
         )
 
-        stage = get_result_stage(result)
+        stage = get_result_stage(
+            result
+        )
 
-        # ----------------------------------------------------
+        # ====================================================
         # SWEEP
-        # ----------------------------------------------------
+        # ====================================================
 
-        if stage in ("SWEEP", "SWEPT"):
+        if stage in (
+            "SWEEP",
+            "SWEPT",
+        ):
             key = make_sweep_key(
                 symbol,
                 result,
             )
 
-            if key and STATE["last_sweep_keys"].get(symbol) != key:
-                STATE["last_sweep_keys"][symbol] = key
+            if (
+                key
+                and STATE[
+                    "last_sweep_keys"
+                ].get(symbol)
+                != key
+            ):
+                STATE[
+                    "last_sweep_keys"
+                ][symbol] = key
+
                 save_state()
 
                 await send_sweep_alert(
@@ -2187,18 +2849,30 @@ async def monitor_coin(
                     result,
                 )
 
-        # ----------------------------------------------------
+        # ====================================================
         # 15M
-        # ----------------------------------------------------
+        # ====================================================
 
-        if stage in ("15M", "15M_CONFIRMED"):
+        if stage in (
+            "15M",
+            "15M_CONFIRMED",
+        ):
             key = make_15m_key(
                 symbol,
                 result,
             )
 
-            if key and STATE["last_15m_keys"].get(symbol) != key:
-                STATE["last_15m_keys"][symbol] = key
+            if (
+                key
+                and STATE[
+                    "last_15m_keys"
+                ].get(symbol)
+                != key
+            ):
+                STATE[
+                    "last_15m_keys"
+                ][symbol] = key
+
                 save_state()
 
                 await send_15m_alert(
@@ -2207,12 +2881,15 @@ async def monitor_coin(
                     result,
                 )
 
-        # ----------------------------------------------------
+        # ====================================================
         # READY
-        # ----------------------------------------------------
+        # ====================================================
 
         score = float(
-            result.get("score", 0)
+            result.get(
+                "score",
+                0,
+            )
         )
 
         if (
@@ -2224,8 +2901,17 @@ async def monitor_coin(
                 result,
             )
 
-            if key and STATE["last_ready_keys"].get(symbol) != key:
-                STATE["last_ready_keys"][symbol] = key
+            if (
+                key
+                and STATE[
+                    "last_ready_keys"
+                ].get(symbol)
+                != key
+            ):
+                STATE[
+                    "last_ready_keys"
+                ][symbol] = key
+
                 save_state()
 
                 await send_ready_alert(
@@ -2238,12 +2924,20 @@ async def monitor_coin(
         traceback.print_exc()
 
 
-async def monitor_loop(application):
+# ============================================================
+# MONITOR LOOP
+# ============================================================
+
+async def monitor_loop(
+    application,
+):
     semaphore = asyncio.Semaphore(
         SCAN_WORKERS
     )
 
-    async def worker(symbol):
+    async def worker(
+        symbol,
+    ):
         async with semaphore:
             await monitor_coin(
                 application,
@@ -2259,6 +2953,9 @@ async def monitor_loop(application):
                 ]
             )
 
+        except asyncio.CancelledError:
+            raise
+
         except Exception:
             traceback.print_exc()
 
@@ -2268,12 +2965,16 @@ async def monitor_loop(application):
 
 
 # ============================================================
-# POST INIT / SHUTDOWN
+# POST INIT
 # ============================================================
 
-async def post_init(application):
+async def post_init(
+    application,
+):
     task = asyncio.create_task(
-        monitor_loop(application)
+        monitor_loop(
+            application
+        )
     )
 
     application.bot_data[
@@ -2286,12 +2987,21 @@ async def post_init(application):
     )
 
 
-async def post_shutdown(application):
+# ============================================================
+# POST SHUTDOWN
+# ============================================================
+
+async def post_shutdown(
+    application,
+):
     task = application.bot_data.get(
         "monitor_task"
     )
 
-    if task and not task.done():
+    if (
+        task
+        and not task.done()
+    ):
         task.cancel()
 
         try:
@@ -2313,8 +3023,12 @@ def main():
     application = (
         Application.builder()
         .token(TOKEN)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
+        .post_init(
+            post_init
+        )
+        .post_shutdown(
+            post_shutdown
+        )
         .build()
     )
 
