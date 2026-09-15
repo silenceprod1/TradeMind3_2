@@ -1,10 +1,6 @@
 """
-TradeMind 6.1.0 — Telegram Bot
-
-Market:
+TradeMind 6.1.1 — Telegram Bot
 Binance Spot
-
-Execution:
 BingX optional / OFF by default
 
 Strategy:
@@ -18,10 +14,10 @@ Rules:
 - Sweep -> 15M confirmation -> 5M ILM
 - One TP only
 - TP = next major unswept liquidity
-- RR must be >= 1:2
-- No artificial TP just to make 1:2
+- RR >= 1:2
+- No artificial TP
 - No daily trade limit
-- Duplicate alerts are blocked
+- Duplicate alerts blocked
 """
 
 import asyncio
@@ -79,7 +75,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 CHECK_INTERVAL = 15
 SCAN_WORKERS = 9
-
 MIN_SCORE_READY = 80
 
 
@@ -111,43 +106,25 @@ RESULTS_CACHE_FILE = "trademind_results_cache.json"
 
 
 # =========================================================
-# JSON HELPERS
+# JSON
 # =========================================================
 
 def load_json(filename, default):
-
     try:
-
         if not os.path.exists(filename):
             return default
 
-        with open(
-            filename,
-            "r",
-            encoding="utf-8",
-        ) as file:
-
+        with open(filename, "r", encoding="utf-8") as file:
             return json.load(file)
 
     except Exception as exc:
-
-        print(
-            f"JSON LOAD ERROR {filename}: {exc}"
-        )
-
+        print(f"JSON LOAD ERROR {filename}: {exc}")
         return default
 
 
 def save_json(filename, data):
-
     try:
-
-        with open(
-            filename,
-            "w",
-            encoding="utf-8",
-        ) as file:
-
+        with open(filename, "w", encoding="utf-8") as file:
             json.dump(
                 data,
                 file,
@@ -156,18 +133,14 @@ def save_json(filename, data):
             )
 
     except Exception as exc:
-
-        print(
-            f"JSON SAVE ERROR {filename}: {exc}"
-        )
+        print(f"JSON SAVE ERROR {filename}: {exc}")
 
 
 # =========================================================
-# RESULTS CACHE
+# CACHE
 # =========================================================
 
 def load_results_cache():
-
     return load_json(
         RESULTS_CACHE_FILE,
         {
@@ -178,7 +151,6 @@ def load_results_cache():
 
 
 def save_results_cache(results):
-
     save_json(
         RESULTS_CACHE_FILE,
         {
@@ -191,17 +163,10 @@ def save_results_cache(results):
 
 
 def get_cached_results():
-
     cache = load_results_cache()
 
-    results = cache.get(
-        "results",
-        {},
-    )
-
-    updated_at = cache.get(
-        "updated_at"
-    )
+    results = cache.get("results", {})
+    updated_at = cache.get("updated_at")
 
     if not isinstance(results, dict):
         results = {}
@@ -210,37 +175,24 @@ def get_cached_results():
 
 
 def cache_age_text(updated_at):
-
     if not updated_at:
         return "нет данных"
 
     try:
-
-        dt = datetime.fromisoformat(
-            updated_at
-        )
-
-        now = datetime.now(
-            timezone.utc
-        )
+        dt = datetime.fromisoformat(updated_at)
+        now = datetime.now(timezone.utc)
 
         seconds = max(
             0,
-            int(
-                (
-                    now - dt
-                ).total_seconds()
-            ),
+            int((now - dt).total_seconds()),
         )
 
         if seconds < 60:
-
             return f"{seconds} сек. назад"
 
         minutes = seconds // 60
 
         if minutes < 60:
-
             return f"{minutes} мин. назад"
 
         hours = minutes // 60
@@ -248,7 +200,6 @@ def cache_age_text(updated_at):
         return f"{hours} ч. назад"
 
     except Exception:
-
         return "неизвестно"
 
 
@@ -257,82 +208,39 @@ def cache_age_text(updated_at):
 # =========================================================
 
 def default_state():
-
     return {
-
         "last_signal_key": None,
-
         "last_sweep_keys": {},
-
         "last_15m_keys": {},
-
         "last_ready_keys": {},
-
         "subscribers": [],
-
     }
 
 
 def load_state():
-
     state = load_json(
         STATE_FILE,
         default_state(),
     )
 
     if not isinstance(state, dict):
-
         state = default_state()
 
-    state.setdefault(
-        "last_signal_key",
-        None,
-    )
+    state.setdefault("last_signal_key", None)
+    state.setdefault("last_sweep_keys", {})
+    state.setdefault("last_15m_keys", {})
+    state.setdefault("last_ready_keys", {})
+    state.setdefault("subscribers", [])
 
-    state.setdefault(
-        "last_sweep_keys",
-        {},
-    )
-
-    state.setdefault(
-        "last_15m_keys",
-        {},
-    )
-
-    state.setdefault(
-        "last_ready_keys",
-        {},
-    )
-
-    state.setdefault(
-        "subscribers",
-        [],
-    )
-
-    # -----------------------------------------------------
-    # CLEAN OLD 5.8 STATE
-    # -----------------------------------------------------
-
-    state.pop(
-        "daily_date",
-        None,
-    )
-
-    state.pop(
-        "daily_trades",
-        None,
-    )
-
-    state.pop(
-        "daily_stop",
-        None,
-    )
+    # Удаляем старые ограничения.
+    state.pop("daily_date", None)
+    state.pop("daily_trades", None)
+    state.pop("daily_stop", None)
 
     return state
 
 
 def save_state(state):
-
     save_json(
         STATE_FILE,
         state,
@@ -344,21 +252,15 @@ def save_state(state):
 # =========================================================
 
 def load_subscribers():
-
     data = load_json(
         SUBSCRIBERS_FILE,
         [],
     )
 
-    if not isinstance(data, list):
-
-        return []
-
-    return data
+    return data if isinstance(data, list) else []
 
 
 def save_subscribers(subscribers):
-
     save_json(
         SUBSCRIBERS_FILE,
         subscribers,
@@ -366,105 +268,69 @@ def save_subscribers(subscribers):
 
 
 # =========================================================
-# FORMATTING
+# FORMAT
 # =========================================================
 
 def format_price(value):
-
     if value is None:
         return "N/A"
 
     try:
-
         value = float(value)
-
     except Exception:
-
         return "N/A"
 
     if value >= 1000:
-
         return f"${value:,.2f}"
 
     if value >= 1:
-
         return f"${value:,.4f}"
 
     return f"${value:,.6f}"
 
 
 def format_rr(value):
-
     if value is None:
         return "N/A"
 
     try:
-
         return f"1:{float(value):.2f}"
-
     except Exception:
-
         return "N/A"
 
 
 def stage_icon(stage):
-
     return {
-
         "READY": "🟢",
-
         "5M": "🔵",
-
         "15M": "🟡",
-
         "SWEEP": "🟠",
-
+        "SWEPT": "🟠",
         "1H": "🟣",
-
         "D1": "⚪",
-
         "TP": "🔴",
-
         "WAIT": "⏳",
-
         "NO_TRADE": "⛔",
-
-    }.get(
-        stage,
-        "⚪",
-    )
+    }.get(stage, "⚪")
 
 
 def stage_text(stage):
-
     return {
-
         "READY": "МОЖНО ВХОДИТЬ",
-
         "5M": "ЖДЁМ 5M ILM",
-
         "15M": "ЖДЁМ 15M",
-
         "SWEEP": "ЖДЁМ SWEEP",
-
+        "SWEPT": "SWEEP СНЯТ — ЖДЁМ 15M",
         "1H": "1H НЕ СИНХРОНИЗИРОВАН",
-
         "D1": "D1/W1 НЕЯСНЫЙ",
-
         "TP": "RR / TP НЕ ПРОХОДИТ",
-
         "WAIT": "ОЖИДАНИЕ",
-
         "NO_TRADE": "НЕТ СДЕЛКИ",
-
-    }.get(
-        stage,
-        "ОЖИДАНИЕ",
-    )
+    }.get(stage, "ОЖИДАНИЕ")
 
 
 # =========================================================
-# STAGE DETECTION
+# STAGE
 # =========================================================
 
 def get_result_stage(result):
@@ -480,70 +346,34 @@ def get_result_stage(result):
     if stage:
         return stage
 
-    # -----------------------------------------------------
-    # READY
-    # -----------------------------------------------------
-
     if (
-
         result.get("entry") is not None
-
         and result.get("sl") is not None
-
         and result.get("tp") is not None
-
     ):
-
-        rr = result.get("rr")
-
         try:
+            rr = float(result.get("rr", 0))
 
-            if rr is not None and float(rr) >= 2:
-
+            if rr >= 2:
                 return "READY"
 
         except Exception:
-
             pass
 
-    # -----------------------------------------------------
-    # 5M
-    # -----------------------------------------------------
-
-    if result.get("confirmation_5m"):
-
+    if (
+        result.get("confirmation_5m")
+        or result.get("trigger_5m")
+        or result.get("confirmation")
+    ):
         return "5M"
-
-    if result.get("trigger_5m"):
-
-        return "5M"
-
-    if result.get("confirmation"):
-
-        return "5M"
-
-    # -----------------------------------------------------
-    # 15M
-    # -----------------------------------------------------
 
     if result.get("confirmation_15m"):
-
         return "15M"
 
-    # -----------------------------------------------------
-    # SWEEP
-    # -----------------------------------------------------
-
     if result.get("sweep"):
-
         return "SWEEP"
 
-    # -----------------------------------------------------
-    # DIRECTION
-    # -----------------------------------------------------
-
     if result.get("direction"):
-
         return "1H"
 
     return "WAIT"
@@ -553,44 +383,44 @@ def get_result_stage(result):
 # LIQUIDITY
 # =========================================================
 
-def format_levels(
-    levels,
-    price,
-):
+def _level_price(level):
+    try:
+        return float(
+            level.get(
+                "price",
+                level.get("level"),
+            )
+        )
+    except Exception:
+        return None
+
+
+def format_levels(levels, price):
 
     if not levels:
-
-        return (
-            "💧 Крупная ликвидность "
-            "не найдена."
-        )
+        return "💧 Крупная ликвидность не найдена."
 
     try:
-
         current = float(price)
-
     except Exception:
-
         current = 0.0
 
-    lines = []
+    above = []
+    below = []
 
     for level in levels:
 
-        try:
+        lp = _level_price(level)
 
-            lp = float(
-                level.get(
-                    "price",
-                    level.get(
-                        "level"
-                    ),
-                )
-            )
-
-        except Exception:
-
+        if lp is None:
             continue
+
+        position = str(
+            level.get(
+                "position",
+                "",
+            )
+        ).upper()
 
         side = str(
             level.get(
@@ -599,111 +429,172 @@ def format_levels(
             )
         ).upper()
 
-        touches = level.get(
-            "touches",
-            1,
-        )
+        # -------------------------------------------------
+        # Position имеет приоритет.
+        # -------------------------------------------------
 
-        strength = level.get(
-            "strength",
-            0,
-        )
+        if position == "ABOVE":
+            above.append((lp, level))
+            continue
 
-        distance = (
+        if position == "BELOW":
+            below.append((lp, level))
+            continue
 
-            abs(lp - current)
-            / current
-            * 100
+        # -------------------------------------------------
+        # Совместимость со старой market.py.
+        # -------------------------------------------------
 
-            if current
+        if current and lp > current:
+            above.append((lp, level))
 
-            else 0
+        elif current and lp < current:
+            below.append((lp, level))
 
-        )
+        elif side == "SHORT":
+            above.append((lp, level))
 
-        if side == "SHORT":
+        elif side == "LONG":
+            below.append((lp, level))
 
-            icon = "🔴"
+    above.sort(
+        key=lambda x: x[0]
+    )
 
-            label = (
-                "BSL / SHORT SWEEP"
+    below.sort(
+        key=lambda x: x[0],
+        reverse=True,
+    )
+
+    lines = []
+
+    # =====================================================
+    # BSL
+    # =====================================================
+
+    lines.append(
+        "🔴 <b>BSL — ЛИКВИДНОСТЬ СВЕРХУ</b>"
+    )
+
+    if above:
+
+        for lp, level in above[:6]:
+
+            touches = level.get(
+                "touches",
+                1,
             )
 
-        else:
-
-            icon = "🟢"
-
-            label = (
-                "SSL / LONG SWEEP"
+            strength = level.get(
+                "strength",
+                0,
             )
+
+            distance = (
+                abs(lp - current)
+                / current
+                * 100
+                if current
+                else 0
+            )
+
+            lines.append(
+                f"🔴 <b>{format_price(lp)}</b> "
+                f"— +{distance:.2f}%"
+            )
+
+            lines.append(
+                f"   touches: {touches} | "
+                f"strength: {strength}"
+            )
+
+    else:
 
         lines.append(
-
-            f"{icon} "
-            f"<b>{format_price(lp)}</b> "
-            f"— {label}\n"
-            f"   touches: {touches} | "
-            f"strength: {strength} | "
-            f"distance: {distance:.2f}%"
-
+            "   — нет свежего major BSL"
         )
 
-    if not lines:
+    lines.append("")
 
-        return "💧 Крупная ликвидность не найдена."
+    # =====================================================
+    # SSL
+    # =====================================================
+
+    lines.append(
+        "🟢 <b>SSL — ЛИКВИДНОСТЬ СНИЗУ</b>"
+    )
+
+    if below:
+
+        for lp, level in below[:6]:
+
+            touches = level.get(
+                "touches",
+                1,
+            )
+
+            strength = level.get(
+                "strength",
+                0,
+            )
+
+            distance = (
+                abs(lp - current)
+                / current
+                * 100
+                if current
+                else 0
+            )
+
+            lines.append(
+                f"🟢 <b>{format_price(lp)}</b> "
+                f"— -{distance:.2f}%"
+            )
+
+            lines.append(
+                f"   touches: {touches} | "
+                f"strength: {strength}"
+            )
+
+    else:
+
+        lines.append(
+            "   — нет свежего major SSL"
+        )
 
     return "\n".join(lines)
 
 
 # =========================================================
-# MARKET ANALYSIS
+# ANALYSIS
 # =========================================================
 
 def build_analysis(symbol):
 
-    data = get_market_data(
-        symbol
-    )
+    data = get_market_data(symbol)
 
     if not data:
-
         raise Exception(
             f"Нет данных для {symbol}"
         )
 
     price = data["price"]
 
-    candles_d1 = data[
-        "candles_d1"
-    ]
-
-    candles_w1 = data[
-        "candles_w1"
-    ]
-
-    candles_1h = data[
-        "candles_1h"
-    ]
-
-    candles_15m = data[
-        "candles_15m"
-    ]
-
-    candles_5m = data[
-        "candles_5m"
-    ]
+    candles_d1 = data["candles_d1"]
+    candles_w1 = data["candles_w1"]
+    candles_1h = data["candles_1h"]
+    candles_15m = data["candles_15m"]
+    candles_5m = data["candles_5m"]
 
     # =====================================================
     # MAJOR LIQUIDITY
     # =====================================================
 
-    major_levels = (
-        find_major_liquidity(
-            candles_1h,
-            price,
-            max_levels=20,
-            include_swept=True,
-        )
+    major_levels = find_major_liquidity(
+        candles_1h,
+        price,
+        max_levels=20,
+        include_swept=True,
     )
 
     # =====================================================
@@ -713,9 +604,7 @@ def build_analysis(symbol):
     context = analyze(
 
         candles_1h=candles_1h,
-
         candles_15m=candles_15m,
-
         candles_5m=candles_5m,
 
         current_price=price,
@@ -725,7 +614,6 @@ def build_analysis(symbol):
         sweep=None,
 
         candles_d1=candles_d1,
-
         candles_w1=candles_w1,
 
     )
@@ -735,7 +623,7 @@ def build_analysis(symbol):
     )
 
     # =====================================================
-    # DIRECTIONAL SWEEP
+    # SWEEP
     # =====================================================
 
     sweep = None
@@ -746,13 +634,9 @@ def build_analysis(symbol):
     }:
 
         sweep = detect_sweep(
-
             candles_1h,
-
             price,
-
             direction,
-
         )
 
     # =====================================================
@@ -762,9 +646,7 @@ def build_analysis(symbol):
     result = analyze(
 
         candles_1h=candles_1h,
-
         candles_15m=candles_15m,
-
         candles_5m=candles_5m,
 
         current_price=price,
@@ -774,7 +656,6 @@ def build_analysis(symbol):
         sweep=sweep,
 
         candles_d1=candles_d1,
-
         candles_w1=candles_w1,
 
     )
@@ -783,20 +664,18 @@ def build_analysis(symbol):
     # COMPATIBILITY
     # =====================================================
 
-    if result.get(
-        "confirmation_5m"
-    ) and not result.get(
-        "confirmation"
+    if (
+        result.get("confirmation_5m")
+        and not result.get("confirmation")
     ):
 
         result["confirmation"] = (
             result["confirmation_5m"]
         )
 
-    if result.get(
-        "trigger_5m"
-    ) and not result.get(
-        "confirmation"
+    if (
+        result.get("trigger_5m")
+        and not result.get("confirmation")
     ):
 
         result["confirmation"] = (
@@ -804,7 +683,7 @@ def build_analysis(symbol):
         )
 
     # =====================================================
-    # ATTACH DATA
+    # ATTACH
     # =====================================================
 
     result.update({
@@ -835,6 +714,10 @@ def build_analysis(symbol):
     return result
 
 
+# =========================================================
+# SCANNING
+# =========================================================
+
 def scan_one_coin(
     coin,
     symbol,
@@ -843,13 +726,8 @@ def scan_one_coin(
     try:
 
         return (
-
             coin,
-
-            build_analysis(
-                symbol
-            ),
-
+            build_analysis(symbol),
         )
 
     except Exception as exc:
@@ -859,17 +737,11 @@ def scan_one_coin(
         )
 
         return (
-
             coin,
-
             {
-
                 "error": str(exc),
-
                 "symbol": symbol,
-
             },
-
         )
 
 
@@ -882,25 +754,20 @@ def scan_all_coins():
     ) as executor:
 
         futures = {
-
             executor.submit(
                 scan_one_coin,
                 coin,
                 symbol,
             ): coin
-
             for coin, symbol
             in COINS.items()
-
         }
 
         for future in as_completed(
             futures
         ):
 
-            coin = futures[
-                future
-            ]
+            coin = futures[future]
 
             try:
 
@@ -913,21 +780,14 @@ def scan_all_coins():
             except Exception as exc:
 
                 results[coin] = {
-
                     "error": str(exc),
-
                     "symbol": COINS[coin],
-
                 }
 
     return {
-
         coin: results[coin]
-
         for coin in COINS
-
         if coin in results
-
     }
 
 
@@ -942,18 +802,13 @@ async def scan_all_coins_async():
 # READY
 # =========================================================
 
-def find_ready_setups(
-    results,
-):
+def find_ready_setups(results):
 
     ready = []
 
     for coin, result in results.items():
 
-        if result.get(
-            "error"
-        ):
-
+        if result.get("error"):
             continue
 
         stage = get_result_stage(
@@ -961,34 +816,30 @@ def find_ready_setups(
         )
 
         if stage != "READY":
-
             continue
-
-        score = result.get(
-            "score",
-            0,
-        )
 
         try:
 
-            score = float(score)
+            score = float(
+                result.get(
+                    "score",
+                    0,
+                )
+            )
 
         except Exception:
 
             score = 0
 
         if score < MIN_SCORE_READY:
-
             continue
 
         ready.append(
-
             (
                 score,
                 coin,
                 result,
             )
-
         )
 
     ready.sort(
@@ -999,23 +850,17 @@ def find_ready_setups(
     return ready
 
 
-def find_first_ready(
-    results,
-):
+def find_first_ready(results):
 
     ready = find_ready_setups(
         results
     )
 
-    if not ready:
-
-        return None
-
-    return ready[0]
+    return ready[0] if ready else None
 
 
 # =========================================================
-# CALLBACK SAFE EDIT
+# SAFE EDIT
 # =========================================================
 
 async def safe_edit_message(
@@ -1027,13 +872,9 @@ async def safe_edit_message(
     try:
 
         await query.edit_message_text(
-
             text=text,
-
             parse_mode="HTML",
-
             reply_markup=reply_markup,
-
         )
 
         return True
@@ -1041,14 +882,13 @@ async def safe_edit_message(
     except BadRequest as exc:
 
         if "Message is not modified" in str(exc):
-
             return False
 
         raise
 
 
 # =========================================================
-# DASHBOARD KEYBOARD
+# KEYBOARD
 # =========================================================
 
 def dashboard_keyboard():
@@ -1056,59 +896,47 @@ def dashboard_keyboard():
     return InlineKeyboardMarkup([
 
         [
-
             InlineKeyboardButton(
                 "🔄 Обновить",
                 callback_data="refresh",
             ),
-
             InlineKeyboardButton(
                 "🎯 Активный сетап",
                 callback_data="active",
             ),
-
         ],
 
         [
-
             InlineKeyboardButton(
                 "📡 Радар",
                 callback_data="radar",
             ),
-
             InlineKeyboardButton(
                 "❓ Почему WAIT?",
                 callback_data="why",
             ),
-
         ],
 
         [
-
             InlineKeyboardButton(
                 "💧 Ликвидность",
                 callback_data="levels",
             ),
-
             InlineKeyboardButton(
                 "📒 Журнал",
                 callback_data="journal",
             ),
-
         ],
 
         [
-
             InlineKeyboardButton(
                 "📈 SOL",
                 callback_data="sol",
             ),
-
             InlineKeyboardButton(
                 "📊 Статус",
                 callback_data="status",
             ),
-
         ],
 
     ])
@@ -1127,22 +955,16 @@ def build_dashboard_message():
     if not results:
 
         return (
-
-            "🧠 <b>TRADEMIND 6.1.0</b>\n\n"
-
+            "🧠 <b>TRADEMIND 6.1.1</b>\n\n"
             "📡 Monitor: <b>ONLINE</b>\n"
-
             "📊 Market: <b>Binance Spot</b>\n\n"
-
             "⏳ Данные ещё собираются.\n\n"
-
             "Нажми 🔄 <b>Обновить</b>."
-
         )
 
     lines = [
 
-        "🧠 <b>TRADEMIND 6.1.0</b>",
+        "🧠 <b>TRADEMIND 6.1.1</b>",
 
         "",
 
@@ -1172,14 +994,10 @@ def build_dashboard_message():
             {},
         )
 
-        if result.get(
-            "error"
-        ):
+        if result.get("error"):
 
             lines.append(
-
                 f"❌ <b>{coin}</b> — ERROR"
-
             )
 
             continue
@@ -1198,61 +1016,40 @@ def build_dashboard_message():
         )
 
         direction_text = (
-
             f" · {direction}"
-
             if direction
-
             else ""
-
         )
 
         lines.append(
-
             f"{stage_icon(stage)} "
             f"<b>{coin}</b> — "
             f"{stage_text(stage)}"
             f"{direction_text} · "
             f"{score}/100"
-
         )
 
         if stage == "READY":
 
             try:
-
-                score_num = float(
-                    score
-                )
-
+                score_num = float(score)
             except Exception:
-
                 score_num = 0
 
             if (
-
                 best is None
-
                 or score_num > best[0]
-
             ):
 
                 best = (
-
                     score_num,
-
                     coin,
-
                     result,
-
                 )
 
     lines += [
-
         "",
-
         "━━━━━━━━━━━━━━━━━━",
-
     ]
 
     if best:
@@ -1331,41 +1128,27 @@ def build_active_setup_message():
     if not results:
 
         return (
-
             "🎯 <b>АКТИВНЫЙ СЕТАП</b>\n\n"
-
             "⏳ Данных пока нет."
-
         )
 
     candidates = []
 
     stage_priority = {
-
         "READY": 6,
-
         "5M": 5,
-
         "15M": 4,
-
         "SWEEP": 3,
-
+        "SWEPT": 3,
         "1H": 2,
-
         "D1": 1,
-
         "WAIT": 0,
-
         "NO_TRADE": 0,
-
     }
 
     for coin, result in results.items():
 
-        if result.get(
-            "error"
-        ):
-
+        if result.get("error"):
             continue
 
         stage = get_result_stage(
@@ -1386,32 +1169,22 @@ def build_active_setup_message():
             score = 0
 
         candidates.append(
-
             (
-
                 stage_priority.get(
                     stage,
                     0,
                 ),
-
                 score,
-
                 coin,
-
                 result,
-
             )
-
         )
 
     if not candidates:
 
         return (
-
             "🎯 <b>АКТИВНЫЙ СЕТАП</b>\n\n"
-
             "⏳ Активных сетапов нет."
-
         )
 
     candidates.sort(
@@ -1427,9 +1200,7 @@ def build_active_setup_message():
     )
 
     direction = (
-        result.get(
-            "direction"
-        )
+        result.get("direction")
         or "—"
     )
 
@@ -1465,6 +1236,7 @@ def build_active_setup_message():
             stage in {
                 "1H",
                 "SWEEP",
+                "SWEPT",
                 "15M",
                 "5M",
                 "READY",
@@ -1475,6 +1247,7 @@ def build_active_setup_message():
             "1H",
             stage in {
                 "SWEEP",
+                "SWEPT",
                 "15M",
                 "5M",
                 "READY",
@@ -1484,6 +1257,7 @@ def build_active_setup_message():
         (
             "💧 Major Sweep",
             stage in {
+                "SWEPT",
                 "15M",
                 "5M",
                 "READY",
@@ -1589,11 +1363,8 @@ def build_why_wait_message():
     if not results:
 
         return (
-
             "❓ <b>ПОЧЕМУ WAIT?</b>\n\n"
-
             "⏳ Нет данных."
-
         )
 
     lines = [
@@ -1620,6 +1391,9 @@ def build_why_wait_message():
         "SWEEP":
             "Major liquidity найдена. Ждём sweep.",
 
+        "SWEPT":
+            "Sweep снял major liquidity. Ждём 15M.",
+
         "15M":
             "Sweep есть. Ждём 15M confirmation.",
 
@@ -1644,10 +1418,7 @@ def build_why_wait_message():
             {},
         )
 
-        if result.get(
-            "error"
-        ):
-
+        if result.get("error"):
             continue
 
         stage = get_result_stage(
@@ -1669,16 +1440,11 @@ def build_why_wait_message():
             continue
 
         reason = (
-
-            result.get(
-                "reason"
-            )
-
+            result.get("reason")
             or reasons.get(
                 stage,
                 "Нет полного подтверждения.",
             )
-
         )
 
         lines += [
@@ -1727,16 +1493,14 @@ def build_why_wait_message():
 
 
 # =========================================================
-# MARKET MESSAGE
+# MARKET
 # =========================================================
 
-def build_market_message(
-    results,
-):
+def build_market_message(results):
 
     lines = [
 
-        "📊 <b>TRADEMIND 6.1.0 — РЫНОК</b>",
+        "📊 <b>TRADEMIND 6.1.1 — РЫНОК</b>",
 
         "",
 
@@ -1744,17 +1508,12 @@ def build_market_message(
 
     for coin in COINS:
 
-        result = results.get(
-            coin
-        )
+        result = results.get(coin)
 
         if not result:
-
             continue
 
-        if result.get(
-            "error"
-        ):
+        if result.get("error"):
 
             lines += [
 
@@ -1768,9 +1527,7 @@ def build_market_message(
 
             continue
 
-        price = result.get(
-            "price"
-        )
+        price = result.get("price")
 
         stage = get_result_stage(
             result
@@ -1799,10 +1556,8 @@ def build_market_message(
         if direction:
 
             lines.append(
-
                 f"📐 Direction: "
                 f"<b>{direction}</b>"
-
             )
 
         levels = result.get(
@@ -1814,51 +1569,68 @@ def build_market_message(
 
             try:
 
-                nearest = min(
+                current_price = float(
+                    price
+                )
 
-                    levels,
+                above = []
+                below = []
 
-                    key=lambda x:
+                for level in levels:
 
-                    abs(
+                    lp = _level_price(
+                        level
+                    )
 
-                        float(
-                            x.get(
-                                "price",
-                                x.get(
-                                    "level"
-                                ),
-                            )
+                    if lp is None:
+                        continue
+
+                    position = str(
+                        level.get(
+                            "position",
+                            "",
                         )
+                    ).upper()
 
-                        - float(price)
+                    if position == "ABOVE":
+                        above.append(lp)
 
-                    ),
+                    elif position == "BELOW":
+                        below.append(lp)
 
-                )
+                    elif lp > current_price:
+                        above.append(lp)
 
-                lines.append(
+                    elif lp < current_price:
+                        below.append(lp)
 
-                    "💧 Ближайшая major "
-                    "liquidity: "
-                    f"<b>"
-                    f"{format_price(nearest.get('price', nearest.get('level')))}"
-                    f"</b>"
+                if above:
 
-                )
+                    above.sort()
+
+                    lines.append(
+                        "🔴 BSL: "
+                        f"<b>{format_price(above[0])}</b>"
+                    )
+
+                if below:
+
+                    below.sort(
+                        reverse=True
+                    )
+
+                    lines.append(
+                        "🟢 SSL: "
+                        f"<b>{format_price(below[0])}</b>"
+                    )
 
             except Exception:
-
                 pass
 
         lines += [
-
             "",
-
             "────────────",
-
             "",
-
         ]
 
     lines += [
@@ -1881,20 +1653,22 @@ def build_market_message(
 
 
 # =========================================================
-# LEVELS MESSAGE
+# LEVELS
 # =========================================================
 
-def build_levels_message(
-    results,
-):
+def build_levels_message(results):
 
     lines = [
 
-        "💧 <b>TRADEMIND 6.1.0 — MAJOR LIQUIDITY</b>",
+        "💧 <b>TRADEMIND 6.1.1 — MAJOR LIQUIDITY</b>",
 
         "",
 
         "Только крупные 1H уровни.",
+
+        "🔴 BSL — сверху.",
+
+        "🟢 SSL — снизу.",
 
         "Снятая ликвидность не является "
         "свежей целью.",
@@ -1910,19 +1684,17 @@ def build_levels_message(
         )
 
         if (
-
             not result
-
             or result.get("error")
-
         ):
-
             continue
 
         lines += [
 
             f"💠 <b>{coin}</b> "
             f"{format_price(result.get('price'))}",
+
+            "",
 
             format_levels(
 
@@ -1931,9 +1703,7 @@ def build_levels_message(
                     [],
                 ),
 
-                result.get(
-                    "price"
-                ),
+                result.get("price"),
 
             ),
 
@@ -1949,12 +1719,10 @@ def build_levels_message(
 
 
 # =========================================================
-# SEARCH MESSAGE
+# SEARCH
 # =========================================================
 
-def build_search_message(
-    results,
-):
+def build_search_message(results):
 
     ready = find_ready_setups(
         results
@@ -1998,7 +1766,7 @@ def build_search_message(
 
                 "",
 
-                "✅ D1/W1",
+                "✅ D1 / W1",
 
                 "✅ 1H",
 
@@ -2047,9 +1815,7 @@ def build_search_message(
         if not result:
             continue
 
-        if result.get(
-            "error"
-        ):
+        if result.get("error"):
             continue
 
         stage = get_result_stage(
@@ -2066,13 +1832,9 @@ def build_search_message(
         )
 
         direction_text = (
-
             f" | {direction}"
-
             if direction
-
             else ""
-
         )
 
         lines.append(
@@ -2112,35 +1874,24 @@ def build_search_message(
 
 
 # =========================================================
-# SOL MESSAGE
+# SOL
 # =========================================================
 
-def build_sol_message(
-    result,
-):
+def build_sol_message(result):
 
     if not result:
 
         return (
-
             "📈 <b>SOL</b>\n\n"
-
             "⏳ Нет данных.\n"
-
             "Нажми 🔄 Обновить."
-
         )
 
-    if result.get(
-        "error"
-    ):
+    if result.get("error"):
 
         return (
-
             "❌ <b>SOL</b>\n\n"
-
             "Ошибка получения данных."
-
         )
 
     stage = get_result_stage(
@@ -2149,7 +1900,7 @@ def build_sol_message(
 
     lines = [
 
-        "📈 <b>TRADEMIND 6.1.0 — SOL</b>",
+        "📈 <b>TRADEMIND 6.1.1 — SOL</b>",
 
         "",
 
@@ -2164,15 +1915,11 @@ def build_sol_message(
 
     ]
 
-    if result.get(
-        "direction"
-    ):
+    if result.get("direction"):
 
         lines.append(
-
             f"📐 Direction: "
             f"<b>{result.get('direction')}</b>"
-
         )
 
     lines += [
@@ -2188,17 +1935,17 @@ def build_sol_message(
                 [],
             ),
 
-            result.get(
-                "price"
-            ),
+            result.get("price"),
 
         ),
 
     ]
 
-    sweep = result.get(
-        "sweep"
-    )
+    # =====================================================
+    # SWEEP
+    # =====================================================
+
+    sweep = result.get("sweep")
 
     if sweep:
 
@@ -2219,6 +1966,10 @@ def build_sol_message(
 
         ]
 
+    # =====================================================
+    # 15M
+    # =====================================================
+
     if result.get(
         "confirmation_15m"
     ):
@@ -2237,20 +1988,14 @@ def build_sol_message(
 
         ]
 
+    # =====================================================
+    # 5M
+    # =====================================================
+
     confirmation_5m = (
-
-        result.get(
-            "confirmation_5m"
-        )
-
-        or result.get(
-            "trigger_5m"
-        )
-
-        or result.get(
-            "confirmation"
-        )
-
+        result.get("confirmation_5m")
+        or result.get("trigger_5m")
+        or result.get("confirmation")
     )
 
     if confirmation_5m:
@@ -2267,9 +2012,11 @@ def build_sol_message(
 
         ]
 
-    if result.get(
-        "entry"
-    ) is not None:
+    # =====================================================
+    # SETUP
+    # =====================================================
+
+    if result.get("entry") is not None:
 
         lines += [
 
@@ -2293,9 +2040,11 @@ def build_sol_message(
 
             "",
 
-            "TP = next major liquidity",
+            "🎯 TP = next major unswept liquidity",
 
-            "RR ≥ 1:2",
+            "🛡 SL = за sweep extreme + buffer",
+
+            "📊 RR ≥ 1:2",
 
             "",
 
@@ -2331,9 +2080,7 @@ async def send_to_subscribers(
     text,
 ):
 
-    subscribers = (
-        load_subscribers()
-    )
+    subscribers = load_subscribers()
 
     if not subscribers:
         return
@@ -2355,10 +2102,8 @@ async def send_to_subscribers(
         except Exception as exc:
 
             print(
-
                 f"TELEGRAM SEND ERROR "
                 f"{chat_id}: {exc}"
-
             )
 
 
@@ -2366,47 +2111,34 @@ async def send_to_subscribers(
 # MONITOR KEYS
 # =========================================================
 
-def sweep_key(
-    coin,
-    sweep,
-):
+def sweep_key(coin, sweep):
 
     if not sweep:
         return None
 
     return (
-
         f"{coin}:"
         f"{sweep.get('direction')}:"
         f"{sweep.get('level')}:"
         f"{sweep.get('extreme')}:"
         f"{sweep.get('time')}:"
         f"{sweep.get('sweep_index')}"
-
     )
 
 
-def ready_key(
-    coin,
-    result,
-):
+def ready_key(coin, result):
 
     return (
-
         f"{coin}:"
         f"{result.get('direction')}:"
         f"{result.get('entry')}:"
         f"{result.get('sl')}:"
         f"{result.get('tp')}:"
         f"{result.get('rr')}"
-
     )
 
 
-def confirmation_key(
-    coin,
-    result,
-):
+def confirmation_key(coin, result):
 
     confirmation = result.get(
         "confirmation_15m"
@@ -2416,38 +2148,30 @@ def confirmation_key(
         return None
 
     timestamp = (
-
         result.get(
             "confirmation_15m_time"
         )
-
         or result.get(
             "m15_confirmation_time"
         )
-
         or result.get(
             "confirmation_time_15m"
         )
-
     )
 
     return (
-
         f"{coin}:"
         f"{result.get('direction')}:"
         f"{timestamp}:"
         f"{str(confirmation)[:150]}"
-
     )
 
 
 # =========================================================
-# MONITOR JOB
+# MONITOR
 # =========================================================
 
-async def monitor_job(
-    application
-):
+async def monitor_job(application):
 
     state = load_state()
 
@@ -2479,33 +2203,24 @@ async def monitor_job(
 
     for coin, result in results.items():
 
-        if result.get(
-            "error"
-        ):
-
+        if result.get("error"):
             continue
 
-        sweep = result.get(
-            "sweep"
-        )
+        sweep = result.get("sweep")
 
         if not sweep:
-
             continue
 
         key = sweep_key(
             coin,
-            sweep,
+            sweep
         )
 
         previous = state[
             "last_sweep_keys"
-        ].get(
-            coin
-        )
+        ].get(coin)
 
         if key == previous:
-
             continue
 
         state[
@@ -2514,7 +2229,7 @@ async def monitor_job(
 
         text = "\n".join([
 
-            "🚨 <b>TRADEMIND 6.1.0 — SWEEP</b>",
+            "🚨 <b>TRADEMIND 6.1.1 — SWEEP</b>",
 
             "",
 
@@ -2532,9 +2247,9 @@ async def monitor_job(
 
             "",
 
-            "✅ Major liquidity taken.",
+            "✅ Major liquidity снята.",
 
-            "⏳ Ждём 15M confirmation.",
+            "⏳ Переходим к 15M confirmation.",
 
             "❌ Вход пока запрещён.",
 
@@ -2546,15 +2261,12 @@ async def monitor_job(
         )
 
     # =====================================================
-    # 15M CONFIRMATION
+    # 15M ALERT
     # =====================================================
 
     for coin, result in results.items():
 
-        if result.get(
-            "error"
-        ):
-
+        if result.get("error"):
             continue
 
         confirmation = result.get(
@@ -2562,26 +2274,21 @@ async def monitor_job(
         )
 
         if not confirmation:
-
             continue
 
         key = confirmation_key(
             coin,
-            result,
+            result
         )
 
         if not key:
-
             continue
 
         previous = state[
             "last_15m_keys"
-        ].get(
-            coin
-        )
+        ].get(coin)
 
         if key == previous:
-
             continue
 
         state[
@@ -2590,7 +2297,7 @@ async def monitor_job(
 
         text = "\n".join([
 
-            "🟡 <b>TRADEMIND 6.1.0 — 15M CONFIRMATION</b>",
+            "🟡 <b>TRADEMIND 6.1.1 — 15M CONFIRMATION</b>",
 
             "",
 
@@ -2617,7 +2324,7 @@ async def monitor_job(
         )
 
     # =====================================================
-    # READY SETUPS
+    # READY
     # =====================================================
 
     ready_setups = find_ready_setups(
@@ -2632,30 +2339,19 @@ async def monitor_job(
 
         return
 
-    # -----------------------------------------------------
-    # SEND EVERY NEW READY SETUP
-    # -----------------------------------------------------
-
     for score, coin, result in ready_setups:
 
         key = ready_key(
             coin,
-            result,
+            result
         )
 
         previous = state[
             "last_ready_keys"
-        ].get(
-            coin
-        )
+        ].get(coin)
 
         if key == previous:
-
             continue
-
-        # -------------------------------------------------
-        # MARK BEFORE SEND
-        # -------------------------------------------------
 
         state[
             "last_ready_keys"
@@ -2669,13 +2365,9 @@ async def monitor_job(
             state
         )
 
-        # -------------------------------------------------
-        # READY ALERT
-        # -------------------------------------------------
-
         text = "\n".join([
 
-            "🟢 <b>TRADEMIND 6.1.0 — READY</b>",
+            "🟢 <b>TRADEMIND 6.1.1 — READY</b>",
 
             "",
 
@@ -2722,6 +2414,8 @@ async def monitor_job(
 
             "🎯 TP = next major unswept liquidity",
 
+            "🛡 SL = за sweep extreme + buffer",
+
             "",
 
             "🟢 <b>МОЖНО ВХОДИТЬ</b>",
@@ -2735,18 +2429,14 @@ async def monitor_job(
 
 
 # =========================================================
-# ASYNC MONITOR LOOP
+# MONITOR LOOP
 # =========================================================
 
-async def monitor_loop(
-    application
-):
+async def monitor_loop(application):
 
     print(
-
-        "TradeMind 6.1.0 background monitor started. "
+        "TradeMind 6.1.1 background monitor started. "
         f"Interval: {CHECK_INTERVAL}s"
-
     )
 
     while True:
@@ -2777,7 +2467,7 @@ async def monitor_loop(
 
 
 # =========================================================
-# /START
+# COMMANDS
 # =========================================================
 
 async def start_command(
@@ -2796,10 +2486,6 @@ async def start_command(
     )
 
 
-# =========================================================
-# /DASHBOARD
-# =========================================================
-
 async def dashboard_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2816,18 +2502,12 @@ async def dashboard_command(
     )
 
 
-# =========================================================
-# /MARKET
-# =========================================================
-
 async def market_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    results, _ = (
-        get_cached_results()
-    )
+    results, _ = get_cached_results()
 
     if not results:
 
@@ -2852,18 +2532,12 @@ async def market_command(
     )
 
 
-# =========================================================
-# /LEVELS
-# =========================================================
-
 async def levels_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    results, _ = (
-        get_cached_results()
-    )
+    results, _ = get_cached_results()
 
     if not results:
 
@@ -2888,18 +2562,12 @@ async def levels_command(
     )
 
 
-# =========================================================
-# /SEARCH
-# =========================================================
-
 async def search_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    results, _ = (
-        get_cached_results()
-    )
+    results, _ = get_cached_results()
 
     if not results:
 
@@ -2924,18 +2592,12 @@ async def search_command(
     )
 
 
-# =========================================================
-# /SOL
-# =========================================================
-
 async def sol_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    results, _ = (
-        get_cached_results()
-    )
+    results, _ = get_cached_results()
 
     result = results.get(
         "SOL"
@@ -2944,11 +2606,8 @@ async def sol_command(
     if not result:
 
         result = await asyncio.to_thread(
-
             build_analysis,
-
             COINS["SOL"],
-
         )
 
         results["SOL"] = result
@@ -2969,10 +2628,6 @@ async def sol_command(
 
     )
 
-
-# =========================================================
-# /SUBSCRIBE
-# =========================================================
 
 async def subscribe_command(
     update: Update,
@@ -3016,10 +2671,6 @@ async def subscribe_command(
     )
 
 
-# =========================================================
-# /UNSUBSCRIBE
-# =========================================================
-
 async def unsubscribe_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3055,7 +2706,7 @@ async def unsubscribe_command(
 
 
 # =========================================================
-# STATUS TEXT
+# STATUS
 # =========================================================
 
 def build_status_message():
@@ -3066,7 +2717,7 @@ def build_status_message():
 
     return "\n".join([
 
-        "📊 <b>TRADEMIND 6.1.0 — STATUS</b>",
+        "📊 <b>TRADEMIND 6.1.1 — STATUS</b>",
 
         "",
 
@@ -3076,7 +2727,7 @@ def build_status_message():
         "Market: "
         "<b>Binance Spot</b>",
 
-        f"BingX: "
+        "BingX: "
         f"<b>{'AVAILABLE' if BINGX_AVAILABLE else 'OFF'}</b>",
 
         "",
@@ -3099,18 +2750,18 @@ def build_status_message():
 
         f"Coins: <b>{len(COINS)}/9</b>",
 
+        "Liquidity: <b>BSL + SSL</b>",
+
         "TP: <b>ONE</b>",
 
         "Target: <b>NEXT MAJOR LIQUIDITY</b>",
+
+        "SL: <b>SWEEP + 0.20%</b>",
 
         "RR: <b>MINIMUM 1:2</b>",
 
     ])
 
-
-# =========================================================
-# /STATUS
-# =========================================================
 
 async def status_command(
     update: Update,
@@ -3142,11 +2793,8 @@ def build_journal_message():
     if not journal:
 
         return (
-
             "📒 <b>TRADEMIND JOURNAL</b>\n\n"
-
             "Журнал пока пуст."
-
         )
 
     lines = [
@@ -3191,10 +2839,6 @@ def build_journal_message():
     return "\n".join(lines)
 
 
-# =========================================================
-# /JOURNAL
-# =========================================================
-
 async def journal_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3212,7 +2856,7 @@ async def journal_command(
 
 
 # =========================================================
-# CALLBACK HANDLER
+# CALLBACKS
 # =========================================================
 
 async def callback_handler(
@@ -3226,9 +2870,9 @@ async def callback_handler(
 
     action = query.data
 
-    # =====================================================
-    # MAIN DASHBOARD
-    # =====================================================
+    # -----------------------------------------------------
+    # START
+    # -----------------------------------------------------
 
     if action == "start":
 
@@ -3244,9 +2888,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # REFRESH
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "refresh":
 
@@ -3293,9 +2937,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # RADAR
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "radar":
 
@@ -3311,9 +2955,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # ACTIVE
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "active":
 
@@ -3329,9 +2973,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
-    # WHY WAIT
-    # =====================================================
+    # -----------------------------------------------------
+    # WHY
+    # -----------------------------------------------------
 
     if action == "why":
 
@@ -3347,9 +2991,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # MARKET
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "market":
 
@@ -3381,9 +3025,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # LEVELS
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "levels":
 
@@ -3415,9 +3059,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # SEARCH
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "search":
 
@@ -3449,9 +3093,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # SOL
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "sol":
 
@@ -3492,9 +3136,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # STATUS
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "status":
 
@@ -3510,9 +3154,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # SUBSCRIBE
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "subscribe":
 
@@ -3554,9 +3198,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # UNSUBSCRIBE
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "unsubscribe":
 
@@ -3590,9 +3234,9 @@ async def callback_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # JOURNAL
-    # =====================================================
+    # -----------------------------------------------------
 
     if action == "journal":
 
@@ -3613,9 +3257,7 @@ async def callback_handler(
 # POST INIT
 # =========================================================
 
-async def post_init(
-    application,
-):
+async def post_init(application):
 
     application.create_task(
 
@@ -3626,7 +3268,7 @@ async def post_init(
     )
 
     print(
-        "TradeMind 6.1.0 background monitor launched."
+        "TradeMind 6.1.1 background monitor launched."
     )
 
 
@@ -3639,24 +3281,15 @@ def main():
     if not TOKEN:
 
         raise RuntimeError(
-
             "BOT_TOKEN environment variable "
             "is not set."
-
         )
 
     application = (
-
         Application.builder()
-
         .token(TOKEN)
-
-        .post_init(
-            post_init
-        )
-
+        .post_init(post_init)
         .build()
-
     )
 
     # =====================================================
@@ -3664,93 +3297,73 @@ def main():
     # =====================================================
 
     application.add_handler(
-
         CommandHandler(
             "start",
             start_command,
         )
-
     )
 
     application.add_handler(
-
         CommandHandler(
             "dashboard",
             dashboard_command,
         )
-
     )
 
     application.add_handler(
-
         CommandHandler(
             "market",
             market_command,
         )
-
     )
 
     application.add_handler(
-
         CommandHandler(
             "levels",
             levels_command,
         )
-
     )
 
     application.add_handler(
-
         CommandHandler(
             "search",
             search_command,
         )
-
     )
 
     application.add_handler(
-
         CommandHandler(
             "sol",
             sol_command,
         )
-
     )
 
     application.add_handler(
-
         CommandHandler(
             "subscribe",
             subscribe_command,
         )
-
     )
 
     application.add_handler(
-
         CommandHandler(
             "unsubscribe",
             unsubscribe_command,
         )
-
     )
 
     application.add_handler(
-
         CommandHandler(
             "status",
             status_command,
         )
-
     )
 
     application.add_handler(
-
         CommandHandler(
             "journal",
             journal_command,
         )
-
     )
 
     # =====================================================
@@ -3758,11 +3371,9 @@ def main():
     # =====================================================
 
     application.add_handler(
-
         CallbackQueryHandler(
             callback_handler
         )
-
     )
 
     # =====================================================
@@ -3770,7 +3381,7 @@ def main():
     # =====================================================
 
     print(
-        "TradeMind 6.1.0 started."
+        "TradeMind 6.1.1 started."
     )
 
     print(
@@ -3800,7 +3411,15 @@ def main():
     )
 
     print(
+        "Liquidity: BSL + SSL"
+    )
+
+    print(
         "TP: next major unswept liquidity"
+    )
+
+    print(
+        "SL: sweep extreme + 0.20%"
     )
 
     print(
@@ -3815,5 +3434,4 @@ def main():
 # =========================================================
 
 if __name__ == "__main__":
-
     main()
