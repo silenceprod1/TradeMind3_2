@@ -1,22 +1,53 @@
 import requests
 import time
 
+
+# ============================================================
+# TRADEMIND MARKET 6.1.0
+# ============================================================
+
+MARKET_VERSION = "6.1.0"
+
 BASE_URL = "https://api.binance.com/api/v3"
 
 DEFAULT_SYMBOL = "SOLUSDT"
 
 REQUEST_TIMEOUT = 10
 
+
+# ============================================================
+# LIQUIDITY CONFIG
+# ============================================================
+
+# Допустимое расстояние между swing-high / swing-low
+# для объединения их в один кластер.
 LEVEL_CLUSTER_PCT = 0.35
+
+# Минимальное количество касаний,
+# чтобы уровень считался MAJOR.
 MIN_MAJOR_TOUCHES = 2
-MAX_MAJOR_LEVELS = 6
+
+# Внутреннее количество уровней.
+# Наружу можно вернуть больше 6, чтобы стратегия
+# всегда могла найти следующий TP.
+MAX_MAJOR_LEVELS = 20
+
+# Сколько 1H свечей анализируем.
 LIQUIDITY_LOOKBACK = 120
 
-SWEEP_LOOKBACK_1H = 4
+# Сколько последних 1H свечей проверяем на Sweep.
+SWEEP_LOOKBACK_1H = 6
+
+# Минимальная глубина Sweep.
 MIN_SWEEP_DEPTH_PCT = 0.08
 
 
+# ============================================================
+# HTTP
+# ============================================================
+
 def _get(path, params):
+
     response = requests.get(
         BASE_URL + path,
         params=params,
@@ -27,6 +58,10 @@ def _get(path, params):
 
     return response.json()
 
+
+# ============================================================
+# PRICE
+# ============================================================
 
 def get_price(symbol=DEFAULT_SYMBOL):
 
@@ -39,6 +74,10 @@ def get_price(symbol=DEFAULT_SYMBOL):
 
     return float(data["price"])
 
+
+# ============================================================
+# KLINES
+# ============================================================
 
 def get_klines(
     symbol=DEFAULT_SYMBOL,
@@ -69,6 +108,10 @@ def get_klines(
             "close_time": int(row[6]),
         })
 
+    # --------------------------------------------------------
+    # Remove currently forming candle.
+    # --------------------------------------------------------
+
     if len(candles) > 1:
 
         now_ms = int(
@@ -76,10 +119,15 @@ def get_klines(
         )
 
         if candles[-1]["close_time"] > now_ms:
+
             candles = candles[:-1]
 
     return candles
 
+
+# ============================================================
+# FULL MARKET DATA
+# ============================================================
 
 def get_market_data(
     symbol=DEFAULT_SYMBOL,
@@ -88,6 +136,7 @@ def get_market_data(
     price = get_price(symbol)
 
     return {
+
         "symbol": symbol,
 
         "price": price,
@@ -124,10 +173,17 @@ def get_market_data(
     }
 
 
+# ============================================================
+# SWING HIGH
+# ============================================================
+
 def _local_swing_high(
     candles,
     index,
 ):
+
+    if not candles:
+        return False
 
     if index <= 0:
         return False
@@ -147,10 +203,17 @@ def _local_swing_high(
     )
 
 
+# ============================================================
+# SWING LOW
+# ============================================================
+
 def _local_swing_low(
     candles,
     index,
 ):
+
+    if not candles:
+        return False
 
     if index <= 0:
         return False
@@ -170,6 +233,10 @@ def _local_swing_low(
     )
 
 
+# ============================================================
+# PERCENT DISTANCE
+# ============================================================
+
 def _pct_distance(
     a,
     b,
@@ -188,6 +255,10 @@ def _pct_distance(
     )
 
 
+# ============================================================
+# CLUSTER LIQUIDITY
+# ============================================================
+
 def _cluster_levels(items):
 
     if not items:
@@ -201,9 +272,9 @@ def _cluster_levels(items):
     ):
 
         side_items = [
-            x
-            for x in items
-            if x["type"] == side
+            item
+            for item in items
+            if item["type"] == side
         ]
 
         side_items.sort(
@@ -228,19 +299,23 @@ def _cluster_levels(items):
                     <= LEVEL_CLUSTER_PCT
                 ):
 
-                    cluster["members"].append(
-                        item
-                    )
+                    cluster[
+                        "members"
+                    ].append(item)
 
                     cluster["price"] = (
                         sum(
                             x["price"]
                             for x
-                            in cluster["members"]
+                            in cluster[
+                                "members"
+                            ]
                         )
                         /
                         len(
-                            cluster["members"]
+                            cluster[
+                                "members"
+                            ]
                         )
                     )
 
@@ -256,10 +331,15 @@ def _cluster_levels(items):
             if not placed:
 
                 clusters.append({
+
                     "type": side,
+
                     "price": item["price"],
+
                     "members": [item],
+
                     "last_index": item["index"],
+
                 })
 
         result.extend(
@@ -268,6 +348,73 @@ def _cluster_levels(items):
 
     return result
 
+
+# ============================================================
+# DETECT IF CLUSTER WAS SWEPT
+# ============================================================
+
+def _cluster_sweep_info(
+    data,
+    cluster,
+):
+
+    price = cluster["price"]
+
+    last_index = cluster["last_index"]
+
+    sweep_candle = None
+
+    sweep_index = None
+
+    # IMPORTANT:
+    # We look chronologically after the last
+    # member of the cluster.
+
+    for i in range(
+        last_index + 1,
+        len(data),
+    ):
+
+        candle = data[i]
+
+        if cluster["type"] == "HIGH":
+
+            if candle["high"] > price:
+
+                sweep_candle = candle
+
+                sweep_index = i
+
+                break
+
+        else:
+
+            if candle["low"] < price:
+
+                sweep_candle = candle
+
+                sweep_index = i
+
+                break
+
+    if sweep_candle is None:
+
+        return {
+            "swept": False,
+            "sweep_candle": None,
+            "sweep_index": None,
+        }
+
+    return {
+        "swept": True,
+        "sweep_candle": sweep_candle,
+        "sweep_index": sweep_index,
+    }
+
+
+# ============================================================
+# FIND MAJOR LIQUIDITY
+# ============================================================
 
 def find_major_liquidity(
     candles_1h,
@@ -282,9 +429,24 @@ def find_major_liquidity(
     ):
         return []
 
+    current_price = float(
+        current_price
+    )
+
+    # --------------------------------------------------------
+    # Use latest 1H history.
+    # --------------------------------------------------------
+
     data = candles_1h[
         -LIQUIDITY_LOOKBACK:
     ]
+
+    if len(data) < 3:
+        return []
+
+    # --------------------------------------------------------
+    # Collect raw swing points.
+    # --------------------------------------------------------
 
     raw = []
 
@@ -299,10 +461,15 @@ def find_major_liquidity(
         ):
 
             raw.append({
+
                 "type": "HIGH",
+
                 "price": data[i]["high"],
+
                 "index": i,
+
                 "time": data[i]["open_time"],
+
             })
 
         if _local_swing_low(
@@ -311,11 +478,23 @@ def find_major_liquidity(
         ):
 
             raw.append({
+
                 "type": "LOW",
+
                 "price": data[i]["low"],
+
                 "index": i,
+
                 "time": data[i]["open_time"],
+
             })
+
+    if not raw:
+        return []
+
+    # --------------------------------------------------------
+    # Cluster nearby swing points.
+    # --------------------------------------------------------
 
     clusters = _cluster_levels(
         raw
@@ -331,48 +510,74 @@ def find_major_liquidity(
             cluster["members"]
         )
 
-        last_index = cluster[
-            "last_index"
+        # ----------------------------------------------------
+        # Major filter.
+        # ----------------------------------------------------
+
+        if touches < MIN_MAJOR_TOUCHES:
+            continue
+
+        # ----------------------------------------------------
+        # Sweep status.
+        # ----------------------------------------------------
+
+        sweep_info = _cluster_sweep_info(
+            data,
+            cluster,
+        )
+
+        swept = sweep_info[
+            "swept"
         ]
 
-        swept = False
-        sweep_candle = None
+        sweep_candle = sweep_info[
+            "sweep_candle"
+        ]
 
-        for candle in data[
-            last_index + 1:
-        ]:
+        sweep_index = sweep_info[
+            "sweep_index"
+        ]
 
-            if cluster["type"] == "HIGH":
+        # ----------------------------------------------------
+        # If already swept, it is not fresh liquidity.
+        # ----------------------------------------------------
 
-                if candle["high"] > price:
-
-                    swept = True
-
-                    sweep_candle = candle
-
-                    break
-
-            else:
-
-                if candle["low"] < price:
-
-                    swept = True
-
-                    sweep_candle = candle
-
-                    break
-
-        if swept and not include_swept:
+        if (
+            swept
+            and not include_swept
+        ):
             continue
+
+        # ----------------------------------------------------
+        # Strength.
+        # ----------------------------------------------------
 
         strength = min(
             1.0,
             0.45
-            + 0.15 * max(
+            + 0.15
+            * max(
                 0,
                 touches - 1,
             ),
         )
+
+        # ----------------------------------------------------
+        # Latest member time.
+        # ----------------------------------------------------
+
+        latest_member = max(
+            cluster["members"],
+            key=lambda x: x["index"],
+        )
+
+        level_time = latest_member[
+            "time"
+        ]
+
+        # ====================================================
+        # HIGH / BSL
+        # ====================================================
 
         if (
             cluster["type"] == "HIGH"
@@ -380,24 +585,46 @@ def find_major_liquidity(
         ):
 
             candidates.append({
-                "price": round(price, 8),
-                "level": round(price, 8),
+
+                "price": round(
+                    price,
+                    8,
+                ),
+
+                "level": round(
+                    price,
+                    8,
+                ),
+
                 "type": "HIGH",
+
                 "side": "SHORT",
+
                 "liquidity_type":
                     "BSL / 1H major swing high",
+
                 "touches": touches,
+
                 "strength": round(
                     strength,
                     3,
                 ),
-                "time": cluster[
-                    "members"
-                ][-1]["time"],
+
+                "time": level_time,
+
                 "swept": swept,
+
                 "sweep_candle":
                     sweep_candle,
+
+                "sweep_index":
+                    sweep_index,
+
             })
+
+        # ====================================================
+        # LOW / SSL
+        # ====================================================
 
         if (
             cluster["type"] == "LOW"
@@ -405,33 +632,62 @@ def find_major_liquidity(
         ):
 
             candidates.append({
-                "price": round(price, 8),
-                "level": round(price, 8),
+
+                "price": round(
+                    price,
+                    8,
+                ),
+
+                "level": round(
+                    price,
+                    8,
+                ),
+
                 "type": "LOW",
+
                 "side": "LONG",
+
                 "liquidity_type":
                     "SSL / 1H major swing low",
+
                 "touches": touches,
+
                 "strength": round(
                     strength,
                     3,
                 ),
-                "time": cluster[
-                    "members"
-                ][-1]["time"],
+
+                "time": level_time,
+
                 "swept": swept,
+
                 "sweep_candle":
                     sweep_candle,
+
+                "sweep_index":
+                    sweep_index,
+
             })
+
+    # --------------------------------------------------------
+    # Sort by distance from current price.
+    #
+    # This is important for TP:
+    # the next major liquidity should be the
+    # nearest valid unswept major level.
+    # --------------------------------------------------------
 
     candidates.sort(
         key=lambda x: (
-            -x["touches"],
-            -x["strength"],
             _pct_distance(
                 x["price"],
                 current_price,
             ),
+
+            -x["touches"],
+
+            -x["strength"],
+
         )
     )
 
@@ -439,6 +695,119 @@ def find_major_liquidity(
         :max_levels
     ]
 
+
+# ============================================================
+# GET FRESH LIQUIDITY
+# ============================================================
+
+def get_fresh_liquidity(
+    candles_1h,
+    current_price,
+    max_levels=MAX_MAJOR_LEVELS,
+):
+
+    return find_major_liquidity(
+
+        candles_1h,
+
+        current_price,
+
+        max_levels=max_levels,
+
+        include_swept=False,
+
+    )
+
+
+# ============================================================
+# GET ALL MAJOR LIQUIDITY
+# ============================================================
+
+def get_all_major_liquidity(
+    candles_1h,
+    current_price,
+    max_levels=MAX_MAJOR_LEVELS,
+):
+
+    return find_major_liquidity(
+
+        candles_1h,
+
+        current_price,
+
+        max_levels=max_levels,
+
+        include_swept=True,
+
+    )
+
+
+# ============================================================
+# GET TARGET LIQUIDITY
+# ============================================================
+
+def get_target_liquidity(
+    candles_1h,
+    entry,
+    direction,
+    max_levels=MAX_MAJOR_LEVELS,
+):
+
+    entry = float(entry)
+
+    levels = get_fresh_liquidity(
+
+        candles_1h,
+
+        entry,
+
+        max_levels=max_levels,
+
+    )
+
+    candidates = []
+
+    for level in levels:
+
+        price = level["price"]
+
+        if level.get("swept") is True:
+            continue
+
+        if direction == "LONG":
+
+            if price > entry:
+
+                candidates.append(level)
+
+        elif direction == "SHORT":
+
+            if price < entry:
+
+                candidates.append(level)
+
+    if not candidates:
+        return None
+
+    if direction == "LONG":
+
+        candidates.sort(
+            key=lambda x: x["price"]
+        )
+
+    else:
+
+        candidates.sort(
+            key=lambda x: x["price"],
+            reverse=True,
+        )
+
+    return candidates[0]
+
+
+# ============================================================
+# DETECT SWEEP
+# ============================================================
 
 def detect_sweep(
     candles_1h,
@@ -455,11 +824,21 @@ def detect_sweep(
     ):
         return None
 
+    # --------------------------------------------------------
+    # We need ALL levels here because the level which
+    # produced the sweep is, by definition, already swept.
+    # --------------------------------------------------------
+
     levels = find_major_liquidity(
+
         candles_1h,
+
         current_price,
-        max_levels=50,
+
+        max_levels=MAX_MAJOR_LEVELS,
+
         include_swept=True,
+
     )
 
     if not levels:
@@ -469,121 +848,261 @@ def detect_sweep(
         -SWEEP_LOOKBACK_1H:
     ]
 
-    for level_data in levels:
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Check newest candles FIRST.
+    # --------------------------------------------------------
 
-        if (
-            level_data["side"]
-            != direction
-        ):
-            continue
+    for candle in reversed(data):
 
-        level = level_data["price"]
+        high = candle["high"]
 
-        for candle in data:
+        low = candle["low"]
 
-            high = candle["high"]
-            low = candle["low"]
+        open_price = candle["open"]
 
-            open_price = candle["open"]
-            close = candle["close"]
+        close = candle["close"]
 
-            if direction == "LONG":
+        # ====================================================
+        # LONG
+        # ====================================================
 
-                depth = level - low
+        if direction == "LONG":
+
+            for level_data in levels:
+
+                if (
+                    level_data["side"]
+                    != "LONG"
+                ):
+                    continue
+
+                level = level_data[
+                    "price"
+                ]
+
+                # ------------------------------------------------
+                # Sweep must actually take SSL.
+                # ------------------------------------------------
+
+                depth = (
+                    level - low
+                )
 
                 depth_pct = (
-                    depth / level * 100.0
+
+                    depth
+                    / level
+                    * 100.0
+
                     if level
                     else 0.0
+
                 )
 
                 swept = (
+
                     low < level
+
                     and depth_pct
                     >= MIN_SWEEP_DEPTH_PCT
+
                 )
 
+                # ------------------------------------------------
+                # Rejection:
+                # candle closes back above liquidity
+                # and is bullish.
+                # ------------------------------------------------
+
                 rejection = (
+
                     close > level
+
                     and close > open_price
+
                 )
 
                 if swept and rejection:
 
                     return {
+
                         "swept": True,
+
                         "direction": "LONG",
+
                         "level": level,
+
                         "extreme": low,
-                        "time": candle["open_time"],
+
+                        "time":
+                            candle[
+                                "open_time"
+                            ],
+
                         "strength":
-                            level_data["strength"],
+                            level_data[
+                                "strength"
+                            ],
+
                         "touches":
-                            level_data["touches"],
+                            level_data[
+                                "touches"
+                            ],
+
                         "liquidity_type":
-                            level_data["liquidity_type"],
-                        "type": "SSL SWEEP",
+                            level_data[
+                                "liquidity_type"
+                            ],
+
+                        "type":
+                            "SSL SWEEP",
+
                         "depth_pct":
                             round(
                                 depth_pct,
                                 4,
                             ),
+
                     }
 
-            else:
+        # ====================================================
+        # SHORT
+        # ====================================================
 
-                depth = high - level
+        else:
+
+            for level_data in levels:
+
+                if (
+                    level_data["side"]
+                    != "SHORT"
+                ):
+                    continue
+
+                level = level_data[
+                    "price"
+                ]
+
+                # ------------------------------------------------
+                # Sweep must actually take BSL.
+                # ------------------------------------------------
+
+                depth = (
+                    high - level
+                )
 
                 depth_pct = (
-                    depth / level * 100.0
+
+                    depth
+                    / level
+                    * 100.0
+
                     if level
                     else 0.0
+
                 )
 
                 swept = (
+
                     high > level
+
                     and depth_pct
                     >= MIN_SWEEP_DEPTH_PCT
+
                 )
 
+                # ------------------------------------------------
+                # Rejection:
+                # candle closes back below liquidity
+                # and is bearish.
+                # ------------------------------------------------
+
                 rejection = (
+
                     close < level
+
                     and close < open_price
+
                 )
 
                 if swept and rejection:
 
                     return {
+
                         "swept": True,
+
                         "direction": "SHORT",
+
                         "level": level,
+
                         "extreme": high,
-                        "time": candle["open_time"],
+
+                        "time":
+                            candle[
+                                "open_time"
+                            ],
+
                         "strength":
-                            level_data["strength"],
+                            level_data[
+                                "strength"
+                            ],
+
                         "touches":
-                            level_data["touches"],
+                            level_data[
+                                "touches"
+                            ],
+
                         "liquidity_type":
-                            level_data["liquidity_type"],
-                        "type": "BSL SWEEP",
+                            level_data[
+                                "liquidity_type"
+                            ],
+
+                        "type":
+                            "BSL SWEEP",
+
                         "depth_pct":
                             round(
                                 depth_pct,
                                 4,
                             ),
+
                     }
 
     return None
 
 
+# ============================================================
+# COMPATIBILITY ALIAS
+# ============================================================
+
 get_major_liquidity = find_major_liquidity
 
 
+# ============================================================
+# EXPORTS
+# ============================================================
+
 __all__ = [
+
+    "MARKET_VERSION",
+
     "get_price",
+
     "get_klines",
+
     "get_market_data",
+
     "find_major_liquidity",
+
     "get_major_liquidity",
+
+    "get_fresh_liquidity",
+
+    "get_all_major_liquidity",
+
+    "get_target_liquidity",
+
     "detect_sweep",
+
 ]
