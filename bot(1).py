@@ -8,7 +8,6 @@ import uuid
 import zlib
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 
 from telegram import (
     InlineKeyboardMarkup,
@@ -93,6 +92,7 @@ def save_json(filename, data):
             "w",
             encoding="utf-8",
         ) as file:
+
             json.dump(
                 data,
                 file,
@@ -113,7 +113,10 @@ def save_json(filename, data):
 # ============================================================
 
 def now_iso():
-    return datetime.utcnow().isoformat() + "Z"
+    return time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+        time.gmtime(),
+    )
 
 
 # ============================================================
@@ -144,6 +147,7 @@ def save_subscribers(data):
 # ============================================================
 
 def load_active_trades():
+
     data = load_json(
         ACTIVE_TRADES_FILE,
         [],
@@ -156,6 +160,7 @@ def load_active_trades():
 
 
 def save_active_trades(trades):
+
     save_json(
         ACTIVE_TRADES_FILE,
         trades,
@@ -167,6 +172,7 @@ def save_active_trades(trades):
 # ============================================================
 
 def load_journal():
+
     data = load_json(
         TRADE_JOURNAL_FILE,
         [],
@@ -179,6 +185,7 @@ def load_journal():
 
 
 def save_journal(journal):
+
     journal = journal[-500:]
 
     save_json(
@@ -192,6 +199,7 @@ def save_journal(journal):
 # ============================================================
 
 def load_pending_setups():
+
     data = load_json(
         PENDING_SETUPS_FILE,
         {},
@@ -204,6 +212,7 @@ def load_pending_setups():
 
 
 def save_pending_setups(data):
+
     save_json(
         PENDING_SETUPS_FILE,
         data,
@@ -211,15 +220,17 @@ def save_pending_setups(data):
 
 
 # ============================================================
-# PRICE FORMAT
+# PRICE
 # ============================================================
 
 def format_price(price):
+
     if price is None:
         return "N/A"
 
     try:
         price = float(price)
+
     except Exception:
         return "N/A"
 
@@ -233,28 +244,48 @@ def format_price(price):
 
 
 def format_rr(value):
+
     if value is None:
         return "N/A"
 
     try:
         return f"1:{float(value):.2f}"
+
     except Exception:
         return "N/A"
 
 
-def format_percent(value):
-    if value is None:
-        return "N/A"
+def calculate_pnl_percent(
+    entry,
+    exit_price,
+    direction,
+):
 
     try:
-        value = float(value)
+        entry = float(entry)
+        exit_price = float(exit_price)
 
-        sign = "+" if value > 0 else ""
+        if entry <= 0:
+            return None
 
-        return f"{sign}{value:.2f}%"
+        if direction == "LONG":
+            return (
+                (exit_price - entry)
+                / entry
+                * 100
+            )
+
+        if direction == "SHORT":
+            return (
+                (entry - exit_price)
+                / entry
+                * 100
+            )
 
     except Exception:
-        return "N/A"
+        return None
+
+    return None
 
 
 # ============================================================
@@ -262,7 +293,9 @@ def format_percent(value):
 # ============================================================
 
 def stage_text(stage):
+
     stages = {
+
         "READY":
             "🟢 МОЖНО ВХОДИТЬ",
 
@@ -290,6 +323,7 @@ def levels_text(
     levels,
     current_price,
 ):
+
     if not levels:
         return "нет крупных уровней"
 
@@ -298,6 +332,7 @@ def levels_text(
     for level in levels:
 
         try:
+
             level_price = float(
                 level["price"]
             )
@@ -324,7 +359,7 @@ def levels_text(
             f"{level.get('type', 'LEVEL')} "
             f"{format_price(level_price)} "
             f"• {distance:.2f}% "
-            f"• S{float(level.get('strength', 0)):.0f}"
+            f"• S{level.get('strength', 0):.0f}"
         )
 
     if not lines:
@@ -339,7 +374,9 @@ def levels_text(
 
 def build_analysis(symbol):
 
-    market = get_market_data(symbol)
+    market = get_market_data(
+        symbol
+    )
 
     price = market["price"]
 
@@ -378,13 +415,27 @@ def build_analysis(symbol):
     )
 
     result.update({
-        "symbol": symbol,
-        "price": price,
-        "major_levels": levels,
-        "sweep": sweep,
-        "candles_5m": market["candles_5m"],
-        "candles_1h": market["candles_1h"],
-        "candles_1m": market["candles_1m"],
+
+        "symbol":
+            symbol,
+
+        "price":
+            price,
+
+        "major_levels":
+            levels,
+
+        "sweep":
+            sweep,
+
+        "candles_5m":
+            market["candles_5m"],
+
+        "candles_1h":
+            market["candles_1h"],
+
+        "candles_1m":
+            market["candles_1m"],
     })
 
     return result
@@ -452,8 +503,10 @@ def scan_all():
 def market_message(results):
 
     lines = [
+
         f"📊 <b>TRADEMIND "
         f"{STRATEGY_VERSION} — РЫНОК</b>",
+
         "",
     ]
 
@@ -467,14 +520,17 @@ def market_message(results):
         if result.get("error"):
 
             lines.extend([
+
                 f"❌ <b>{coin}</b>: "
                 f"{result['error']}",
+
                 "",
             ])
 
             continue
 
         lines.extend([
+
             f"💠 <b>{coin}</b> "
             f"{format_price(result['price'])}",
 
@@ -494,10 +550,12 @@ def market_message(results):
         ])
 
     lines.extend([
+
         "1H → Major Liquidity → "
         "Sweep → 15M → 5M ILM",
 
         "❌ В середине движения не входим.",
+
     ])
 
     return "\n".join(lines)
@@ -510,7 +568,6 @@ def market_message(results):
 def coin_message(
     coin,
     result,
-    pending_id=None,
 ):
 
     if result.get("error"):
@@ -586,17 +643,24 @@ def coin_message(
     if stage == "SWEPT":
 
         lines.extend([
+
             "",
+
             "⏳ <b>ЖДЁМ 15M CONFIRMATION</b>",
+
             "❌ Вход запрещён.",
         ])
 
     elif stage == "15M_CONFIRMED":
 
         lines.extend([
+
             "",
+
             "✅ 15M подтверждение",
+
             "⏳ <b>ЖДЁМ 5M ILM</b>",
+
             "❌ Вход запрещён.",
         ])
 
@@ -640,8 +704,11 @@ def coin_message(
     else:
 
         lines.extend([
+
             "",
+
             "⏳ Ждём Major Liquidity → Sweep",
+
             "❌ В середине движения не входим.",
         ])
 
@@ -653,7 +720,9 @@ def coin_message(
     if reason:
 
         lines.extend([
+
             "",
+
             "Причина: " + str(reason),
         ])
 
@@ -669,6 +738,7 @@ def main_keyboard():
     return InlineKeyboardMarkup([
 
         [
+
             InlineKeyboardButton(
                 "📊 Рынок",
                 callback_data="market",
@@ -681,6 +751,7 @@ def main_keyboard():
         ],
 
         [
+
             InlineKeyboardButton(
                 "🔎 Поиск",
                 callback_data="search",
@@ -688,6 +759,7 @@ def main_keyboard():
         ],
 
         [
+
             InlineKeyboardButton(
                 "📒 Журнал",
                 callback_data="journal",
@@ -700,6 +772,7 @@ def main_keyboard():
         ],
 
         [
+
             InlineKeyboardButton(
                 "🔔 Включить",
                 callback_data="subscribe",
@@ -743,6 +816,7 @@ def chart_keyboard():
             "⬅️ Меню",
             callback_data="start",
         )
+
     ])
 
     return InlineKeyboardMarkup(
@@ -751,23 +825,27 @@ def chart_keyboard():
 
 
 def ready_keyboard(
-    setup_id,
+    trade_id,
 ):
 
     return InlineKeyboardMarkup([
 
         [
+
             InlineKeyboardButton(
                 "🟢 Я ЗАШЁЛ",
-                callback_data=f"enter_{setup_id}",
+                callback_data=f"enter_{trade_id}",
             ),
+
         ],
 
         [
+
             InlineKeyboardButton(
                 "📈 Открыть график",
-                callback_data=f"chart_{setup_id}",
+                callback_data="chart_ready",
             ),
+
         ],
 
     ])
@@ -778,519 +856,36 @@ def active_keyboard():
     return InlineKeyboardMarkup([
 
         [
+
             InlineKeyboardButton(
-                "📈 Графики",
-                callback_data="charts",
+                "📈 График сделки",
+                callback_data="active_chart",
             ),
+
         ],
 
         [
+
             InlineKeyboardButton(
                 "📒 Журнал",
                 callback_data="journal",
             ),
+
         ],
 
+        [
+
+            InlineKeyboardButton(
+                "⬅️ Меню",
+                callback_data="start",
+            ),
+
+        ],
     ])
 
 
 # ============================================================
-# SETUP ID
-# ============================================================
-
-def make_setup_id(
-    coin,
-    result,
-):
-
-    raw = "|".join([
-        str(coin),
-        str(result.get("direction")),
-        str(result.get("entry")),
-        str(result.get("sl")),
-        str(result.get("tp")),
-        str(result.get("rr")),
-        str(
-            (result.get("sweep") or {}).get(
-                "open_time"
-            )
-        ),
-        str(
-            result.get(
-                "confirmation_15m_time"
-            )
-        ),
-        str(
-            (result.get("ilm") or {}).get(
-                "trigger_time"
-            )
-        ),
-    ])
-
-    return (
-        uuid.uuid5(
-            uuid.NAMESPACE_DNS,
-            raw,
-        )
-        .hex[:16]
-    )
-
-
-# ============================================================
-# SAVE READY SETUP
-# ============================================================
-
-def save_ready_setup(
-    coin,
-    result,
-):
-
-    setup_id = make_setup_id(
-        coin,
-        result,
-    )
-
-    pending = load_pending_setups()
-
-    pending[setup_id] = {
-        "id": setup_id,
-        "coin": coin,
-        "symbol": result.get(
-            "symbol",
-            COINS.get(coin),
-        ),
-        "direction": result.get(
-            "direction"
-        ),
-        "entry": result.get(
-            "entry"
-        ),
-        "sl": result.get(
-            "sl"
-        ),
-        "tp": result.get(
-            "tp"
-        ),
-        "rr": result.get(
-            "rr"
-        ),
-        "score": result.get(
-            "score",
-            0,
-        ),
-        "created_at": now_iso(),
-
-        "sweep": result.get(
-            "sweep"
-        ),
-
-        "confirmation_15m_time":
-            result.get(
-                "confirmation_15m_time"
-            ),
-
-        "ilm":
-            result.get(
-                "ilm"
-            ),
-    }
-
-    save_pending_setups(
-        pending
-    )
-
-    return setup_id
-
-
-# ============================================================
-# FIND ACTIVE TRADE
-# ============================================================
-
-def find_active_trade(
-    coin,
-):
-
-    trades = load_active_trades()
-
-    for trade in trades:
-
-        if (
-            trade.get("status")
-            == "OPEN"
-            and trade.get("coin")
-            == coin
-        ):
-
-            return trade
-
-    return None
-
-
-# ============================================================
-# OPEN TRADE
-# ============================================================
-
-def open_trade_from_setup(
-    setup,
-    chat_id,
-):
-
-    trades = load_active_trades()
-
-    existing = find_active_trade(
-        setup["coin"]
-    )
-
-    if existing:
-        return existing, False
-
-    trade_id = (
-        uuid.uuid4()
-        .hex[:16]
-    )
-
-    trade = {
-
-        "id": trade_id,
-
-        "setup_id":
-            setup["id"],
-
-        "coin":
-            setup["coin"],
-
-        "symbol":
-            setup["symbol"],
-
-        "direction":
-            setup["direction"],
-
-        "entry":
-            float(setup["entry"]),
-
-        "sl":
-            float(setup["sl"]),
-
-        "tp":
-            float(setup["tp"]),
-
-        "rr":
-            float(setup["rr"])
-            if setup.get("rr") is not None
-            else None,
-
-        "score":
-            setup.get("score", 0),
-
-        "status":
-            "OPEN",
-
-        "opened_at":
-            now_iso(),
-
-        "chat_id":
-            chat_id,
-
-        "signal_source":
-            "TradeMind READY",
-
-        "signal_created_at":
-            setup.get("created_at"),
-
-        "last_price":
-            None,
-
-        "exit_price":
-            None,
-
-        "closed_at":
-            None,
-
-        "result":
-            None,
-
-        "pnl_pct":
-            None,
-    }
-
-    trades.append(
-        trade
-    )
-
-    save_active_trades(
-        trades
-    )
-
-    return trade, True
-
-
-# ============================================================
-# PNL
-# ============================================================
-
-def calculate_pnl_pct(
-    trade,
-    exit_price,
-):
-
-    try:
-
-        entry = float(
-            trade["entry"]
-        )
-
-        exit_price = float(
-            exit_price
-        )
-
-        direction = trade.get(
-            "direction"
-        )
-
-        if direction == "LONG":
-
-            return (
-                (
-                    exit_price
-                    - entry
-                )
-                / entry
-                * 100
-            )
-
-        if direction == "SHORT":
-
-            return (
-                (
-                    entry
-                    - exit_price
-                )
-                / entry
-                * 100
-            )
-
-    except Exception:
-        pass
-
-    return None
-
-
-# ============================================================
-# CLOSE TRADE
-# ============================================================
-
-def close_trade(
-    trade_id,
-    result,
-    exit_price,
-):
-
-    trades = load_active_trades()
-
-    closed_trade = None
-
-    updated = []
-
-    for trade in trades:
-
-        if trade.get("id") != trade_id:
-
-            updated.append(
-                trade
-            )
-
-            continue
-
-        if trade.get("status") != "OPEN":
-
-            updated.append(
-                trade
-            )
-
-            continue
-
-        trade["status"] = "CLOSED"
-
-        trade["result"] = result
-
-        trade["exit_price"] = float(
-            exit_price
-        )
-
-        trade["closed_at"] = now_iso()
-
-        trade["pnl_pct"] = (
-            calculate_pnl_pct(
-                trade,
-                exit_price,
-            )
-        )
-
-        closed_trade = dict(
-            trade
-        )
-
-        # Closed trades are not kept
-        # in active_trades.json.
-        continue
-
-    save_active_trades(
-        updated
-    )
-
-    if closed_trade:
-
-        journal = load_journal()
-
-        journal.append(
-            closed_trade
-        )
-
-        save_journal(
-            journal
-        )
-
-    return closed_trade
-
-
-# ============================================================
-# JOURNAL TEXT
-# ============================================================
-
-def journal_message():
-
-    journal = load_journal()
-
-    if not journal:
-
-        return (
-            "📒 <b>ЖУРНАЛ</b>\n\n"
-            "Сделок пока нет."
-        )
-
-    lines = [
-        "📒 <b>TRADEMIND — ЖУРНАЛ</b>",
-        "",
-    ]
-
-    for trade in journal[-10:][::-1]:
-
-        result = trade.get(
-            "result",
-            "?",
-        )
-
-        icon = (
-            "✅"
-            if result == "TP"
-            else "❌"
-            if result == "SL"
-            else "⚠️"
-        )
-
-        lines.extend([
-
-            (
-                f"{icon} <b>"
-                f"{trade.get('coin')}"
-                f" {trade.get('direction')}"
-                f"</b>"
-            ),
-
-            (
-                f"Entry: "
-                f"{format_price(trade.get('entry'))}"
-            ),
-
-            (
-                f"Exit: "
-                f"{format_price(trade.get('exit_price'))}"
-            ),
-
-            (
-                f"Результат: "
-                f"<b>{result}</b>"
-            ),
-
-            (
-                f"PnL: "
-                f"<b>{format_percent(trade.get('pnl_pct'))}</b>"
-            ),
-
-            "",
-        ])
-
-    return "\n".join(lines)
-
-
-# ============================================================
-# ACTIVE TEXT
-# ============================================================
-
-def active_message():
-
-    trades = load_active_trades()
-
-    open_trades = [
-        x
-        for x in trades
-        if x.get("status") == "OPEN"
-    ]
-
-    if not open_trades:
-
-        return (
-            "📌 <b>АКТИВНЫЕ СДЕЛКИ</b>\n\n"
-            "Нет активных сделок."
-        )
-
-    lines = [
-        "📌 <b>TRADEMIND — АКТИВНЫЕ СДЕЛКИ</b>",
-        "",
-    ]
-
-    for trade in open_trades:
-
-        lines.extend([
-
-            (
-                f"💠 <b>{trade.get('coin')}</b> "
-                f"{trade.get('direction')}"
-            ),
-
-            (
-                f"Entry: "
-                f"{format_price(trade.get('entry'))}"
-            ),
-
-            (
-                f"SL: "
-                f"{format_price(trade.get('sl'))}"
-            ),
-
-            (
-                f"TP: "
-                f"{format_price(trade.get('tp'))}"
-            ),
-
-            (
-                f"RR: "
-                f"{format_rr(trade.get('rr'))}"
-            ),
-
-            (
-                f"Цена: "
-                f"{format_price(trade.get('last_price'))}"
-            ),
-
-            "",
-        ])
-
-    return "\n".join(lines)
-
-
-# ============================================================
-# PNG HELPERS
+# PNG
 # ============================================================
 
 def png_chunk(
@@ -1337,7 +932,9 @@ def make_png(
         b"\x89PNG\r\n\x1a\n"
 
         + png_chunk(
+
             b"IHDR",
+
             struct.pack(
                 ">IIBBBBB",
                 width,
@@ -1351,7 +948,9 @@ def make_png(
         )
 
         + png_chunk(
+
             b"IDAT",
+
             zlib.compress(
                 raw,
                 6,
@@ -1382,9 +981,7 @@ def create_canvas(
             background * width
         )
 
-        for _ in range(
-            height
-        )
+        for _ in range(height)
     ]
 
 
@@ -1398,18 +995,16 @@ def put_pixel(
     if y < 0 or y >= len(pixels):
         return
 
-    width = len(
-        pixels[0]
-    ) // 3
+    width = len(pixels[0]) // 3
 
     if x < 0 or x >= width:
         return
 
     index = x * 3
 
-    pixels[y][
-        index:index + 3
-    ] = bytes(color)
+    pixels[y][index:index + 3] = bytes(
+        color
+    )
 
 
 def draw_line(
@@ -1517,10 +1112,6 @@ def chart_png(
 
     values = []
 
-    # --------------------------------------------------------
-    # Candle values
-    # --------------------------------------------------------
-
     for candle in candles:
 
         try:
@@ -1536,10 +1127,6 @@ def chart_png(
         except Exception:
             continue
 
-    # --------------------------------------------------------
-    # Liquidity
-    # --------------------------------------------------------
-
     for level in levels:
 
         try:
@@ -1548,23 +1135,8 @@ def chart_png(
                 float(level["price"])
             )
 
-            # Include zone boundaries.
-            if level.get("zone_low") is not None:
-                values.append(
-                    float(level["zone_low"])
-                )
-
-            if level.get("zone_high") is not None:
-                values.append(
-                    float(level["zone_high"])
-                )
-
         except Exception:
             continue
-
-    # --------------------------------------------------------
-    # Result levels
-    # --------------------------------------------------------
 
     for key in (
         "price",
@@ -1572,7 +1144,6 @@ def chart_png(
         "sl",
         "tp",
         "exit_price",
-        "sweep_extreme",
     ):
 
         if result.get(key) is not None:
@@ -1584,11 +1155,7 @@ def chart_png(
                 )
 
             except Exception:
-                continue
-
-    # --------------------------------------------------------
-    # Trade levels
-    # --------------------------------------------------------
+                pass
 
     if trade:
 
@@ -1597,7 +1164,6 @@ def chart_png(
             "sl",
             "tp",
             "exit_price",
-            "last_price",
         ):
 
             if trade.get(key) is not None:
@@ -1605,25 +1171,20 @@ def chart_png(
                 try:
 
                     values.append(
-                        float(
-                            trade[key]
-                        )
+                        float(trade[key])
                     )
 
                 except Exception:
-                    continue
+                    pass
 
     if not values:
 
-        try:
-
-            current = float(
-                result["price"]
+        current = float(
+            result.get(
+                "price",
+                1,
             )
-
-        except Exception:
-
-            current = 1.0
+        )
 
         values = [
             current - 1,
@@ -1634,8 +1195,7 @@ def chart_png(
     high = max(values)
 
     padding = (
-        (high - low)
-        * 0.08
+        (high - low) * 0.08
         or 1
     )
 
@@ -1682,10 +1242,6 @@ def chart_png(
             * chart_height
         )
 
-    # --------------------------------------------------------
-    # GRID
-    # --------------------------------------------------------
-
     grid_color = (
         45,
         52,
@@ -1699,9 +1255,7 @@ def chart_png(
 
         yy = (
             top
-            + chart_height
-            * i
-            // 8
+            + chart_height * i // 8
         )
 
         draw_line(
@@ -1745,7 +1299,6 @@ def chart_png(
                 90,
             )
 
-        # Main level.
         draw_line(
             pixels,
             left,
@@ -1756,146 +1309,116 @@ def chart_png(
             2,
         )
 
-        # Zone boundaries.
-        try:
-
-            zone_low = float(
-                level["zone_low"]
-            )
-
-            zone_high = float(
-                level["zone_high"]
-            )
-
-            draw_line(
-                pixels,
-                left,
-                y(zone_low),
-                width - right,
-                y(zone_low),
-                color,
-                1,
-            )
-
-            draw_line(
-                pixels,
-                left,
-                y(zone_high),
-                width - right,
-                y(zone_high),
-                color,
-                1,
-            )
-
-        except Exception:
-            pass
-
     # --------------------------------------------------------
     # CANDLES
     # --------------------------------------------------------
 
-    spacing = (
-        chart_width
-        / max(
-            len(candles),
-            1,
-        )
-    )
+    if candles:
 
-    candle_width = max(
-        3,
-        int(
-            spacing * 0.55
-        ),
-    )
-
-    for i, candle in enumerate(
-        candles
-    ):
-
-        try:
-
-            open_price = float(
-                candle["open"]
+        spacing = (
+            chart_width
+            / max(
+                len(candles),
+                1,
             )
-
-            high_price = float(
-                candle["high"]
-            )
-
-            low_price = float(
-                candle["low"]
-            )
-
-            close_price = float(
-                candle["close"]
-            )
-
-        except Exception:
-            continue
-
-        xx = int(
-            left
-            + (
-                i + 0.5
-            )
-            * spacing
         )
 
-        if close_price >= open_price:
-
-            color = (
-                50,
-                210,
-                130,
-            )
-
-        else:
-
-            color = (
-                235,
-                80,
-                90,
-            )
-
-        # Wick.
-        draw_line(
-            pixels,
-            xx,
-            y(high_price),
-            xx,
-            y(low_price),
-            color,
-            1,
+        candle_width = max(
+            3,
+            int(
+                spacing * 0.55
+            ),
         )
 
-        # Body.
-        body_top = min(
-            y(open_price),
-            y(close_price),
-        )
-
-        body_bottom = max(
-            y(open_price),
-            y(close_price),
-        )
-
-        for X in range(
-            xx - candle_width // 2,
-            xx + candle_width // 2 + 1,
+        for i, candle in enumerate(
+            candles
         ):
 
-            for Y in range(
-                body_top,
-                body_bottom + 1,
+            try:
+
+                open_price = float(
+                    candle["open"]
+                )
+
+                high_price = float(
+                    candle["high"]
+                )
+
+                low_price = float(
+                    candle["low"]
+                )
+
+                close_price = float(
+                    candle["close"]
+                )
+
+            except Exception:
+                continue
+
+            x = int(
+                left
+                + (
+                    i + 0.5
+                )
+                * spacing
+            )
+
+            if close_price >= open_price:
+
+                candle_color = (
+                    50,
+                    210,
+                    130,
+                )
+
+            else:
+
+                candle_color = (
+                    235,
+                    80,
+                    90,
+                )
+
+            # Wick
+
+            draw_line(
+                pixels,
+                x,
+                y(high_price),
+                x,
+                y(low_price),
+                candle_color,
+                1,
+            )
+
+            # Body
+
+            body_top = min(
+                y(open_price),
+                y(close_price),
+            )
+
+            body_bottom = max(
+                y(open_price),
+                y(close_price),
+            )
+
+            for xx in range(
+                x - candle_width // 2,
+                x + candle_width // 2 + 1,
             ):
 
-                put_pixel(
-                    pixels,
-                    X,
-                    Y,
-                    color,
-                )
+                for yy in range(
+                    body_top,
+                    body_bottom + 1,
+                ):
+
+                    put_pixel(
+                        pixels,
+                        xx,
+                        yy,
+                        candle_color,
+                    )
 
     # --------------------------------------------------------
     # CURRENT PRICE
@@ -1927,18 +1450,6 @@ def chart_png(
                 2,
             )
 
-            draw_marker(
-                pixels,
-                width - right - 5,
-                y(current_price),
-                (
-                    80,
-                    170,
-                    255,
-                ),
-                6,
-            )
-
         except Exception:
             pass
 
@@ -1952,57 +1463,45 @@ def chart_png(
 
     if sweep:
 
-        try:
+        for key in (
+            "level",
+            "extreme",
+        ):
 
-            sweep_level = float(
-                sweep["level"]
+            value = sweep.get(
+                key
             )
 
-            draw_line(
-                pixels,
-                left,
-                y(sweep_level),
-                width - right,
-                y(sweep_level),
-                (
-                    255,
-                    170,
-                    40,
-                ),
-                3,
-            )
+            if value is None:
+                continue
 
-        except Exception:
-            pass
+            try:
 
-        try:
+                draw_line(
+                    pixels,
+                    left,
+                    y(float(value)),
+                    width - right,
+                    y(float(value)),
+                    (
+                        255,
+                        170,
+                        40,
+                    ),
+                    3,
+                )
 
-            sweep_extreme = float(
-                sweep["extreme"]
-            )
-
-            draw_marker(
-                pixels,
-                width - right - 80,
-                y(sweep_extreme),
-                (
-                    255,
-                    170,
-                    40,
-                ),
-                8,
-            )
-
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     # --------------------------------------------------------
-    # RESULT TRADE LEVELS
+    # TRADE LEVELS
     # --------------------------------------------------------
 
     trade_source = trade or result
 
-    level_colors = {
+    trade_colors = {
+
         "entry": (
             255,
             215,
@@ -2022,13 +1521,13 @@ def chart_png(
         ),
 
         "exit_price": (
-            255,
-            255,
+            180,
+            100,
             255,
         ),
     }
 
-    for key, color in level_colors.items():
+    for key, color in trade_colors.items():
 
         value = trade_source.get(
             key
@@ -2039,9 +1538,7 @@ def chart_png(
 
         try:
 
-            value = float(
-                value
-            )
+            value = float(value)
 
             draw_line(
                 pixels,
@@ -2053,8 +1550,24 @@ def chart_png(
                 3,
             )
 
+            # Marker справа
+
+            marker_x = (
+                width
+                - right
+                - 10
+            )
+
+            draw_marker(
+                pixels,
+                marker_x,
+                y(value),
+                color,
+                7,
+            )
+
         except Exception:
-            continue
+            pass
 
     # --------------------------------------------------------
     # EXIT MARKER
@@ -2066,17 +1579,25 @@ def chart_png(
 
         try:
 
-            exit_price = float(
-                trade["exit_price"]
+            exit_y = y(
+                float(
+                    trade["exit_price"]
+                )
+            )
+
+            exit_x = (
+                width
+                - right
+                - 40
             )
 
             draw_marker(
                 pixels,
-                width - right - 35,
-                y(exit_price),
+                exit_x,
+                exit_y,
                 (
-                    255,
-                    255,
+                    180,
+                    100,
                     255,
                 ),
                 10,
@@ -2101,15 +1622,18 @@ def chart_png(
 async def send_chart(
     message,
     coin,
+    result=None,
     trade=None,
 ):
 
     try:
 
-        result = await asyncio.to_thread(
-            build_analysis,
-            COINS[coin],
-        )
+        if result is None:
+
+            result = await asyncio.to_thread(
+                build_analysis,
+                COINS[coin],
+            )
 
         image = chart_png(
             result,
@@ -2125,25 +1649,50 @@ async def send_chart(
 
         if trade:
 
-            caption += (
-                "\n\n📌 <b>АКТИВНАЯ СДЕЛКА</b>"
-                "\n"
-                f"Entry: <b>{format_price(trade.get('entry'))}</b>"
-                "\n"
-                f"SL: <b>{format_price(trade.get('sl'))}</b>"
-                "\n"
-                f"TP: <b>{format_price(trade.get('tp'))}</b>"
+            pnl = calculate_pnl_percent(
+                trade.get("entry"),
+                trade.get("exit_price"),
+                trade.get("direction"),
             )
 
+            caption += (
+
+                "\n\n"
+                "📌 <b>СДЕЛКА</b>\n"
+                f"Entry: <b>{format_price(trade.get('entry'))}</b>\n"
+                f"SL: <b>{format_price(trade.get('sl'))}</b>\n"
+                f"TP: <b>{format_price(trade.get('tp'))}</b>\n"
+                f"RR: <b>{format_rr(trade.get('rr'))}</b>"
+            )
+
+            if trade.get(
+                "exit_price"
+            ) is not None:
+
+                caption += (
+
+                    "\n"
+                    f"Exit: <b>{format_price(trade.get('exit_price'))}</b>"
+                )
+
+            if pnl is not None:
+
+                caption += (
+                    "\n"
+                    f"PnL: <b>{pnl:+.2f}%</b>"
+                )
+
         await message.reply_photo(
+
             photo=InputFile(
                 image,
-                filename=(
-                    f"{coin.lower()}_5m.png"
-                ),
+                filename=f"{coin.lower()}_5m.png",
             ),
+
             caption=caption,
+
             parse_mode="HTML",
+
             reply_markup=chart_keyboard(),
         )
 
@@ -2164,9 +1713,9 @@ async def broadcast(
     reply_markup=None,
 ):
 
-    chats = subscribers()
+    ids = subscribers()
 
-    if not chats:
+    if not ids:
         return
 
     await asyncio.gather(
@@ -2179,7 +1728,7 @@ async def broadcast(
                 reply_markup=reply_markup,
             )
 
-            for chat_id in chats
+            for chat_id in ids
         ),
 
         return_exceptions=True,
@@ -2187,118 +1736,634 @@ async def broadcast(
 
 
 # ============================================================
-# READY BROADCAST
+# PENDING SETUP CREATION
 # ============================================================
 
-async def broadcast_ready(
-    app,
+def create_pending_setup(
     coin,
     result,
 ):
 
-    setup_id = save_ready_setup(
-        coin,
-        result,
+    if result.get(
+        "stage"
+    ) != "READY":
+
+        return None
+
+    entry = result.get(
+        "entry"
     )
 
-    text = (
-        "🚨 <b>TRADEMIND — МОЖНО ВХОДИТЬ</b>\n\n"
-
-        f"💠 <b>{coin}</b>\n"
-
-        f"📐 <b>{result.get('direction')}</b>\n\n"
-
-        f"⭐ Score: <b>{result.get('score', 0)}/100</b>\n\n"
-
-        f"💰 Entry: <b>{format_price(result.get('entry'))}</b>\n"
-
-        f"🛑 SL: <b>{format_price(result.get('sl'))}</b>\n"
-
-        f"🎯 TP: <b>{format_price(result.get('tp'))}</b>\n"
-
-        f"📊 RR: <b>{format_rr(result.get('rr'))}</b>\n\n"
-
-        "🎯 TP = следующая свежая major liquidity.\n\n"
-
-        "🟢 <b>Сигнал зафиксирован.</b>\n"
-        "Нажми кнопку только если реально вошёл."
+    sl = result.get(
+        "sl"
     )
 
-    await broadcast(
-        app,
-        text,
-        ready_keyboard(
-            setup_id
-        ),
+    tp = result.get(
+        "tp"
     )
 
+    rr_value = result.get(
+        "rr"
+    )
 
-# ============================================================
-# SWEEP BROADCAST
-# ============================================================
+    direction = result.get(
+        "direction"
+    )
 
-async def broadcast_sweep(
-    app,
-    coin,
-    result,
-):
+    if any(
+        x is None
+        for x in (
+            entry,
+            sl,
+            tp,
+            rr_value,
+            direction,
+        )
+    ):
+
+        return None
 
     sweep = result.get(
         "sweep"
     ) or {}
 
-    text = (
-        "🔎 <b>TRADEMIND — SWEEP</b>\n\n"
+    ilm = result.get(
+        "ilm"
+    ) or {}
 
-        f"💠 <b>{coin}</b>\n"
-
-        f"📐 {result.get('direction')}\n\n"
-
-        "💧 <b>Крупная ликвидность снята.</b>\n\n"
-
-        f"Уровень: <b>{format_price(sweep.get('level'))}</b>\n"
-
-        f"Экстремум: <b>{format_price(sweep.get('extreme'))}</b>\n\n"
-
-        "⏳ <b>ЖДЁМ 15M CONFIRMATION</b>\n"
-
-        "❌ Вход пока запрещён."
+    # Стабильный ID сигнала.
+    raw_id = (
+        f"{coin}|"
+        f"{direction}|"
+        f"{entry}|"
+        f"{sl}|"
+        f"{tp}|"
+        f"{sweep.get('open_time')}|"
+        f"{ilm.get('trigger_time')}"
     )
 
-    await broadcast(
-        app,
-        text,
-    )
+    setup_id = uuid.uuid5(
+        uuid.NAMESPACE_DNS,
+        raw_id,
+    ).hex[:12]
+
+    setup = {
+
+        "id":
+            setup_id,
+
+        "coin":
+            coin,
+
+        "symbol":
+            result.get(
+                "symbol"
+            ),
+
+        "direction":
+            direction,
+
+        "entry":
+            float(entry),
+
+        "sl":
+            float(sl),
+
+        "tp":
+            float(tp),
+
+        "rr":
+            float(rr_value),
+
+        "score":
+            int(
+                result.get(
+                    "score",
+                    0,
+                )
+            ),
+
+        "created_at":
+            now_iso(),
+
+        "sweep":
+            sweep,
+
+        "ilm":
+            ilm,
+
+        "status":
+            "PENDING",
+
+    }
+
+    return setup
 
 
-# ============================================================
-# 15M BROADCAST
-# ============================================================
-
-async def broadcast_15m(
-    app,
+def save_ready_setup(
     coin,
     result,
 ):
 
-    text = (
-        "🟡 <b>TRADEMIND — 15M CONFIRMATION</b>\n\n"
-
-        f"💠 <b>{coin}</b>\n"
-
-        f"📐 {result.get('direction')}\n\n"
-
-        "✅ Sweep\n"
-        "✅ 15M confirmation\n\n"
-
-        "⏳ <b>ЖДЁМ 5M ILM</b>\n"
-
-        "❌ Вход пока запрещён."
+    setup = create_pending_setup(
+        coin,
+        result,
     )
 
-    await broadcast(
-        app,
-        text,
+    if setup is None:
+        return None
+
+    pending = load_pending_setups()
+
+    pending[setup["id"]] = setup
+
+    # Не держим бесконечный мусор.
+    if len(pending) > 200:
+
+        items = sorted(
+            pending.items(),
+            key=lambda x: x[1].get(
+                "created_at",
+                "",
+            ),
+        )
+
+        pending = dict(
+            items[-200:]
+        )
+
+    save_pending_setups(
+        pending
+    )
+
+    return setup
+
+
+# ============================================================
+# ENTER TRADE
+# ============================================================
+
+def activate_trade(
+    setup,
+    chat_id,
+):
+
+    active = load_active_trades()
+
+    # Уже существует?
+    for trade in active:
+
+        if (
+            trade.get("setup_id")
+            == setup["id"]
+            and trade.get("status")
+            == "OPEN"
+        ):
+
+            return trade, False
+
+    trade_id = uuid.uuid4().hex[:12]
+
+    trade = {
+
+        "id":
+            trade_id,
+
+        "setup_id":
+            setup["id"],
+
+        "chat_id":
+            chat_id,
+
+        "coin":
+            setup["coin"],
+
+        "symbol":
+            setup["symbol"],
+
+        "direction":
+            setup["direction"],
+
+        # ФИКСИРУЕМ сигнал.
+        "entry":
+            setup["entry"],
+
+        "sl":
+            setup["sl"],
+
+        "tp":
+            setup["tp"],
+
+        "rr":
+            setup["rr"],
+
+        "score":
+            setup.get(
+                "score",
+                0,
+            ),
+
+        "opened_at":
+            now_iso(),
+
+        "status":
+            "OPEN",
+
+        "last_price":
+            setup["entry"],
+
+        "entry_source":
+            "TradeMind READY signal",
+
+    }
+
+    active.append(
+        trade
+    )
+
+    save_active_trades(
+        active
+    )
+
+    pending = load_pending_setups()
+
+    if setup["id"] in pending:
+
+        pending[setup["id"]][
+            "status"
+        ] = "ENTERED"
+
+        save_pending_setups(
+            pending
+        )
+
+    return trade, True
+
+
+# ============================================================
+# CLOSE TRADE
+# ============================================================
+
+def close_trade(
+    trade,
+    exit_price,
+    result_type,
+):
+
+    active = load_active_trades()
+
+    target = None
+
+    for item in active:
+
+        if item.get(
+            "id"
+        ) == trade.get(
+            "id"
+        ):
+
+            target = item
+            break
+
+    if target is None:
+        return None
+
+    target["status"] = (
+        result_type
+    )
+
+    target["exit_price"] = float(
+        exit_price
+    )
+
+    target["closed_at"] = now_iso()
+
+    target["pnl_percent"] = (
+        calculate_pnl_percent(
+            target.get("entry"),
+            exit_price,
+            target.get("direction"),
+        )
+    )
+
+    save_active_trades(
+        active
+    )
+
+    journal = load_journal()
+
+    journal_entry = dict(
+        target
+    )
+
+    journal_entry["result"] = (
+        result_type
+    )
+
+    journal.append(
+        journal_entry
+    )
+
+    save_journal(
+        journal
+    )
+
+    return target
+
+
+# ============================================================
+# ACTIVE TRADE CHECK
+# ============================================================
+
+def check_trade_price(
+    trade,
+    price,
+):
+
+    try:
+
+        price = float(price)
+
+        entry = float(
+            trade["entry"]
+        )
+
+        sl = float(
+            trade["sl"]
+        )
+
+        tp = float(
+            trade["tp"]
+        )
+
+        direction = trade[
+            "direction"
+        ]
+
+    except Exception:
+
+        return None
+
+    if direction == "LONG":
+
+        # TP priority only when
+        # price is clearly above TP.
+        if price >= tp:
+
+            return (
+                "TP",
+                price,
+            )
+
+        if price <= sl:
+
+            return (
+                "SL",
+                price,
+            )
+
+    elif direction == "SHORT":
+
+        if price <= tp:
+
+            return (
+                "TP",
+                price,
+            )
+
+        if price >= sl:
+
+            return (
+                "SL",
+                price,
+            )
+
+    return None
+
+
+# ============================================================
+# MONITOR ACTIVE TRADES
+# ============================================================
+
+async def monitor_active_trades(
+    app,
+    results,
+):
+
+    active = load_active_trades()
+
+    if not active:
+        return
+
+    changed = False
+
+    for trade in list(
+        active
+    ):
+
+        if trade.get(
+            "status"
+        ) != "OPEN":
+
+            continue
+
+        coin = trade.get(
+            "coin"
+        )
+
+        result = results.get(
+            coin
+        )
+
+        if not result or result.get(
+            "error"
+        ):
+
+            continue
+
+        price = result.get(
+            "price"
+        )
+
+        if price is None:
+            continue
+
+        trade["last_price"] = float(
+            price
+        )
+
+        check = check_trade_price(
+            trade,
+            price,
+        )
+
+        if not check:
+            changed = True
+            continue
+
+        result_type, exit_price = (
+            check
+        )
+
+        closed = close_trade(
+            trade,
+            exit_price,
+            result_type,
+        )
+
+        if closed is None:
+            continue
+
+        changed = True
+
+        pnl = closed.get(
+            "pnl_percent"
+        )
+
+        if result_type == "TP":
+
+            icon = "✅"
+
+            title = "TP ДОСТИГНУТ"
+
+        else:
+
+            icon = "❌"
+
+            title = "SL ДОСТИГНУТ"
+
+        pnl_text = (
+            f"{pnl:+.2f}%"
+            if pnl is not None
+            else "N/A"
+        )
+
+        text = (
+
+            f"{icon} <b>TRADEMIND — "
+            f"{title}</b>\n\n"
+
+            f"💠 {closed.get('coin')}\n"
+
+            f"📐 {closed.get('direction')}\n\n"
+
+            f"Entry: <b>"
+            f"{format_price(closed.get('entry'))}"
+            f"</b>\n"
+
+            f"Exit: <b>"
+            f"{format_price(closed.get('exit_price'))}"
+            f"</b>\n"
+
+            f"SL: <b>"
+            f"{format_price(closed.get('sl'))}"
+            f"</b>\n"
+
+            f"TP: <b>"
+            f"{format_price(closed.get('tp'))}"
+            f"</b>\n\n"
+
+            f"📊 RR: <b>"
+            f"{format_rr(closed.get('rr'))}"
+            f"</b>\n"
+
+            f"📈 PnL: <b>"
+            f"{pnl_text}"
+            f"</b>"
+        )
+
+        chat_id = closed.get(
+            "chat_id"
+        )
+
+        if chat_id:
+
+            try:
+
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode="HTML",
+                )
+
+                await send_chart(
+                    app.bot,
+                    closed.get("coin"),
+                    result=result,
+                    trade=closed,
+                )
+
+            except Exception as exc:
+
+                print(
+                    "TRADE CLOSE MESSAGE ERROR",
+                    exc,
+                )
+
+        else:
+
+            await broadcast(
+                app,
+                text,
+            )
+
+    if changed:
+
+        # Удаляем закрытые сделки
+        # из активного списка.
+        active = [
+            x
+            for x in load_active_trades()
+            if x.get("status") == "OPEN"
+        ]
+
+        save_active_trades(
+            active
+        )
+
+
+# ============================================================
+# READY MESSAGE
+# ============================================================
+
+def ready_message(
+    coin,
+    result,
+    setup,
+):
+
+    return (
+
+        "🚨 <b>TRADEMIND — "
+        "МОЖНО ВХОДИТЬ</b>\n\n"
+
+        f"💠 {coin}\n"
+
+        f"📐 <b>{result.get('direction')}</b>\n"
+
+        f"⭐ {result.get('score', 0)}/100\n\n"
+
+        f"💰 Entry: <b>"
+        f"{format_price(setup.get('entry'))}"
+        f"</b>\n"
+
+        f"🛑 SL: <b>"
+        f"{format_price(setup.get('sl'))}"
+        f"</b>\n"
+
+        f"🎯 TP: <b>"
+        f"{format_price(setup.get('tp'))}"
+        f"</b>\n"
+
+        f"📊 RR: <b>"
+        f"{format_rr(setup.get('rr'))}"
+        f"</b>\n\n"
+
+        "🎯 TP = следующая свежая "
+        "major liquidity.\n\n"
+
+        "🟢 <b>Если вошёл по этому сигналу — "
+        "нажми кнопку ниже.</b>"
     )
 
 
@@ -2313,24 +2378,17 @@ async def start(
 
     await update.message.reply_text(
 
-        f"🤖 <b>TRADEMIND {STRATEGY_VERSION}</b>\n\n"
+        f"🤖 <b>TRADEMIND "
+        f"{STRATEGY_VERSION}</b>\n\n"
 
         "9 монет • Binance Spot\n\n"
 
         "<b>1H → Major Liquidity → "
         "Sweep → 15M → 5M ILM → Entry</b>\n\n"
 
-        "📐 1H — главное направление\n"
-
-        "D1/W1 — отключены\n"
-
-        "📊 Дневной лимит сделок — отключён\n"
-
-        "⚡ BingX auto — OFF\n\n"
-
-        "Бот даёт сигнал.\n"
-        "После 🟢 «Я ЗАШЁЛ» TradeMind "
-        "сам отслеживает TP/SL.",
+        "D1/W1: отключены\n"
+        "Дневной лимит: отключён\n"
+        "BingX auto: OFF",
 
         parse_mode="HTML",
 
@@ -2382,27 +2440,26 @@ async def search_cmd(
 
         if result.get(
             "stage"
-        ) != "READY":
+        ) == "READY":
 
-            continue
-
-        if result.get(
-            "score",
-            0,
-        ) < MIN_SCORE_READY:
-
-            continue
-
-        ready.append(
-            (
+            if (
                 result.get(
                     "score",
                     0,
-                ),
-                coin,
-                result,
-            )
-        )
+                )
+                >= MIN_SCORE_READY
+            ):
+
+                ready.append(
+                    (
+                        result.get(
+                            "score",
+                            0,
+                        ),
+                        coin,
+                        result,
+                    )
+                )
 
     if not ready:
 
@@ -2421,29 +2478,39 @@ async def search_cmd(
 
         return
 
-    ready.sort(
+    # Берём READY с максимальным score
+    # только для отображения поиска.
+    _, coin, result = max(
+        ready,
         key=lambda x: x[0],
-        reverse=True,
     )
 
-    _, coin, result = ready[0]
-
-    setup_id = save_ready_setup(
+    setup = save_ready_setup(
         coin,
         result,
     )
 
+    if setup is None:
+
+        await update.message.reply_text(
+            "❌ Не удалось сохранить READY setup.",
+            reply_markup=main_keyboard(),
+        )
+
+        return
+
     await update.message.reply_text(
 
-        coin_message(
+        ready_message(
             coin,
             result,
+            setup,
         ),
 
         parse_mode="HTML",
 
         reply_markup=ready_keyboard(
-            setup_id
+            setup["id"]
         ),
     )
 
@@ -2467,52 +2534,9 @@ async def chart_cmd(
 
         coin = context.args[0].upper()
 
-    trade = find_active_trade(
-        coin
-    )
-
     await send_chart(
         update.message,
         coin,
-        trade,
-    )
-
-
-# ============================================================
-# ACTIVE COMMAND
-# ============================================================
-
-async def active_cmd(
-    update,
-    context,
-):
-
-    await update.message.reply_text(
-
-        active_message(),
-
-        parse_mode="HTML",
-
-        reply_markup=active_keyboard(),
-    )
-
-
-# ============================================================
-# JOURNAL COMMAND
-# ============================================================
-
-async def journal_cmd(
-    update,
-    context,
-):
-
-    await update.message.reply_text(
-
-        journal_message(),
-
-        parse_mode="HTML",
-
-        reply_markup=main_keyboard(),
     )
 
 
@@ -2520,7 +2544,7 @@ async def journal_cmd(
 # SUBSCRIBE
 # ============================================================
 
-async def subscribe_cmd(
+async def sub_cmd(
     update,
     context,
 ):
@@ -2553,26 +2577,197 @@ async def subscribe_cmd(
 # UNSUBSCRIBE
 # ============================================================
 
-async def unsubscribe_cmd(
+async def unsub_cmd(
     update,
     context,
 ):
 
     chat_id = update.effective_chat.id
 
-    data = [
+    save_subscribers([
+
         x
         for x in subscribers()
         if x != chat_id
-    ]
 
-    save_subscribers(
-        data
-    )
+    ])
 
     await update.message.reply_text(
 
         "🔕 <b>Уведомления выключены.</b>",
+
+        parse_mode="HTML",
+
+        reply_markup=main_keyboard(),
+    )
+
+
+# ============================================================
+# ACTIVE
+# ============================================================
+
+async def active_cmd(
+    update,
+    context,
+):
+
+    active = load_active_trades()
+
+    active = [
+
+        x
+        for x in active
+        if x.get("status") == "OPEN"
+
+    ]
+
+    if not active:
+
+        await update.message.reply_text(
+
+            "📌 <b>Активных сделок нет.</b>",
+
+            parse_mode="HTML",
+
+            reply_markup=main_keyboard(),
+        )
+
+        return
+
+    lines = [
+        "📌 <b>АКТИВНЫЕ СДЕЛКИ</b>",
+        "",
+    ]
+
+    for trade in active:
+
+        lines.extend([
+
+            f"💠 <b>{trade.get('coin')}</b> "
+            f"{trade.get('direction')}",
+
+            (
+                f"Entry: "
+                f"<b>{format_price(trade.get('entry'))}</b>"
+            ),
+
+            (
+                f"SL: "
+                f"<b>{format_price(trade.get('sl'))}</b>"
+            ),
+
+            (
+                f"TP: "
+                f"<b>{format_price(trade.get('tp'))}</b>"
+            ),
+
+            (
+                f"RR: "
+                f"<b>{format_rr(trade.get('rr'))}</b>"
+            ),
+
+            (
+                f"Цена: "
+                f"<b>{format_price(trade.get('last_price'))}</b>"
+            ),
+
+            "",
+        ])
+
+    await update.message.reply_text(
+
+        "\n".join(lines),
+
+        parse_mode="HTML",
+
+        reply_markup=active_keyboard(),
+    )
+
+
+# ============================================================
+# JOURNAL
+# ============================================================
+
+async def journal_cmd(
+    update,
+    context,
+):
+
+    journal = load_journal()
+
+    if not journal:
+
+        await update.message.reply_text(
+
+            "📒 <b>Журнал пока пуст.</b>",
+
+            parse_mode="HTML",
+
+            reply_markup=main_keyboard(),
+        )
+
+        return
+
+    last = journal[-10:]
+
+    lines = [
+        "📒 <b>TRADEMIND — ЖУРНАЛ</b>",
+        "",
+    ]
+
+    for trade in reversed(
+        last
+    ):
+
+        result_type = trade.get(
+            "result",
+            trade.get(
+                "status",
+                "?",
+            ),
+        )
+
+        icon = (
+            "✅"
+            if result_type == "TP"
+            else "❌"
+            if result_type == "SL"
+            else "⚪"
+        )
+
+        pnl = trade.get(
+            "pnl_percent"
+        )
+
+        pnl_text = (
+            f"{pnl:+.2f}%"
+            if pnl is not None
+            else "N/A"
+        )
+
+        lines.extend([
+
+            f"{icon} <b>"
+            f"{trade.get('coin')}"
+            f"</b> "
+            f"{trade.get('direction')}",
+
+            f"{result_type} • "
+            f"PnL {pnl_text}",
+
+            (
+                f"Entry "
+                f"{format_price(trade.get('entry'))}"
+                f" → "
+                f"{format_price(trade.get('exit_price'))}"
+            ),
+
+            "",
+        ])
+
+    await update.message.reply_text(
+
+        "\n".join(lines),
 
         parse_mode="HTML",
 
@@ -2591,38 +2786,37 @@ async def status_cmd(
 
     active = load_active_trades()
 
-    open_count = len([
+    active_count = len([
+
         x
         for x in active
         if x.get("status") == "OPEN"
+
     ])
 
     journal = load_journal()
 
     await update.message.reply_text(
 
-        f"📊 <b>TRADEMIND {STRATEGY_VERSION}</b>\n\n"
+        f"📊 <b>TRADEMIND "
+        f"{STRATEGY_VERSION}</b>\n\n"
 
-        f"⏱ Сканирование: "
+        f"Сканирование: "
         f"{CHECK_INTERVAL} сек.\n"
 
-        f"💠 Монет: {len(COINS)}\n"
+        f"Монет: "
+        f"{len(COINS)}\n"
 
-        f"📌 Активных сделок: "
-        f"{open_count}\n"
+        f"Активных сделок: "
+        f"{active_count}\n"
 
-        f"📒 В журнале: "
+        f"Сделок в журнале: "
         f"{len(journal)}\n\n"
 
-        "📐 1H — основной timeframe\n"
-
-        "D1/W1 — OFF\n"
-
-        "💰 Binance Spot — ON\n"
-
-        "⚡ BingX auto — OFF\n"
-
-        "📅 Дневной лимит — OFF",
+        "Направление: <b>1H</b>\n"
+        "D1/W1: OFF\n"
+        "Дневной лимит: OFF\n"
+        "BingX auto: OFF",
 
         parse_mode="HTML",
 
@@ -2631,168 +2825,990 @@ async def status_cmd(
 
 
 # ============================================================
-# PRICE CHECK FOR ACTIVE TRADES
+# MONITOR
 # ============================================================
 
-def check_trade_hit(
-    trade,
-    price,
-):
-
-    try:
-
-        price = float(price)
-
-        entry = float(
-            trade["entry"]
-        )
-
-        sl = float(
-            trade["sl"]
-        )
-
-        tp = float(
-            trade["tp"]
-        )
-
-        direction = trade.get(
-            "direction"
-        )
-
-    except Exception:
-
-        return None
-
-    # --------------------------------------------------------
-    # LONG
-    # --------------------------------------------------------
-
-    if direction == "LONG":
-
-        if price >= tp:
-            return "TP"
-
-        if price <= sl:
-            return "SL"
-
-    # --------------------------------------------------------
-    # SHORT
-    # --------------------------------------------------------
-
-    elif direction == "SHORT":
-
-        if price <= tp:
-            return "TP"
-
-        if price >= sl:
-            return "SL"
-
-    return None
-
-
-# ============================================================
-# ACTIVE TRADE MONITOR
-# ============================================================
-
-async def monitor_active_trades(
+async def monitor(
     app,
-    results,
 ):
 
-    trades = load_active_trades()
+    last_signal = {}
 
-    if not trades:
+    while True:
+
+        started = (
+            asyncio.get_running_loop()
+            .time()
+        )
+
+        try:
+
+            results = await asyncio.to_thread(
+                scan_all
+            )
+
+            # ------------------------------------------------
+            # ACTIVE TRADES
+            # ------------------------------------------------
+
+            await monitor_active_trades(
+                app,
+                results,
+            )
+
+            # ------------------------------------------------
+            # SIGNALS
+            # ------------------------------------------------
+
+            for coin, result in results.items():
+
+                if result.get(
+                    "error"
+                ):
+                    continue
+
+                stage = result.get(
+                    "stage"
+                )
+
+                sweep = (
+                    result.get(
+                        "sweep"
+                    )
+                    or {}
+                )
+
+                ilm = (
+                    result.get(
+                        "ilm"
+                    )
+                    or {}
+                )
+
+                signal_key = (
+
+                    f"{coin}:"
+                    f"{stage}:"
+                    f"{result.get('direction')}:"
+                    f"{sweep.get('open_time')}:"
+                    f"{result.get('confirmation_15m_time')}:"
+                    f"{ilm.get('trigger_time')}:"
+                    f"{result.get('entry')}:"
+                    f"{result.get('sl')}:"
+                    f"{result.get('tp')}"
+                )
+
+                if (
+                    signal_key
+                    == last_signal.get(
+                        coin
+                    )
+                ):
+
+                    continue
+
+                last_signal[
+                    coin
+                ] = signal_key
+
+                # ------------------------------------------------
+                # SWEEP
+                # ------------------------------------------------
+
+                if stage == "SWEPT":
+
+                    text = (
+
+                        "🔎 <b>TRADEMIND — SWEEP</b>\n\n"
+
+                        f"💠 {coin}\n"
+
+                        f"📐 "
+                        f"<b>{result.get('direction')}</b>\n\n"
+
+                        "💧 Крупная ликвидность снята.\n"
+
+                        f"💰 Цена: "
+                        f"<b>{format_price(result.get('price'))}</b>\n\n"
+
+                        "⏳ <b>ЖДЁМ 15M CONFIRMATION</b>\n"
+
+                        "❌ Вход запрещён."
+                    )
+
+                    await broadcast(
+                        app,
+                        text,
+                    )
+
+                # ------------------------------------------------
+                # 15M
+                # ------------------------------------------------
+
+                elif stage == "15M_CONFIRMED":
+
+                    text = (
+
+                        "🟡 <b>TRADEMIND — "
+                        "15M CONFIRMATION</b>\n\n"
+
+                        f"💠 {coin}\n"
+
+                        f"📐 "
+                        f"<b>{result.get('direction')}</b>\n\n"
+
+                        "✅ Sweep\n"
+                        "✅ 15M confirmation\n\n"
+
+                        "⏳ <b>ЖДЁМ 5M ILM</b>\n"
+
+                        "❌ Вход запрещён."
+                    )
+
+                    await broadcast(
+                        app,
+                        text,
+                    )
+
+                # ------------------------------------------------
+                # READY
+                # ------------------------------------------------
+
+                elif (
+                    stage == "READY"
+                    and result.get(
+                        "score",
+                        0,
+                    ) >= MIN_SCORE_READY
+                ):
+
+                    setup = save_ready_setup(
+                        coin,
+                        result,
+                    )
+
+                    if setup is None:
+                        continue
+
+                    text = ready_message(
+                        coin,
+                        result,
+                        setup,
+                    )
+
+                    await broadcast(
+
+                        app,
+
+                        text,
+
+                        reply_markup=ready_keyboard(
+                            setup["id"]
+                        ),
+                    )
+
+        except Exception as exc:
+
+            print(
+                "MONITOR ERROR",
+                exc,
+            )
+
+        elapsed = (
+            asyncio.get_running_loop()
+            .time()
+            - started
+        )
+
+        await asyncio.sleep(
+            max(
+                1,
+                CHECK_INTERVAL - elapsed,
+            )
+        )
+
+
+# ============================================================
+# CALLBACKS
+# ============================================================
+
+async def callbacks(
+    update,
+    context,
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    data = query.data
+
+    # ========================================================
+    # MENU
+    # ========================================================
+
+    if data == "start":
+
+        await query.edit_message_text(
+
+            f"🤖 <b>TRADEMIND "
+            f"{STRATEGY_VERSION}</b>\n\n"
+
+            "1H → Major Liquidity → "
+            "Sweep → 15M → 5M ILM\n\n"
+
+            "D1/W1: OFF\n"
+            "Дневной лимит: OFF",
+
+            parse_mode="HTML",
+
+            reply_markup=main_keyboard(),
+        )
+
         return
 
-    changed = False
+    # ========================================================
+    # MARKET
+    # ========================================================
 
-    for trade in trades:
+    if data == "market":
 
-        if trade.get(
+        results = await asyncio.to_thread(
+            scan_all
+        )
+
+        await query.edit_message_text(
+
+            market_message(
+                results
+            ),
+
+            parse_mode="HTML",
+
+            reply_markup=main_keyboard(),
+        )
+
+        return
+
+    # ========================================================
+    # SEARCH
+    # ========================================================
+
+    if data == "search":
+
+        results = await asyncio.to_thread(
+            scan_all
+        )
+
+        ready = []
+
+        for coin, result in results.items():
+
+            if (
+                result.get(
+                    "stage"
+                ) == "READY"
+                and result.get(
+                    "score",
+                    0,
+                ) >= MIN_SCORE_READY
+            ):
+
+                ready.append(
+                    (
+                        result.get(
+                            "score",
+                            0,
+                        ),
+                        coin,
+                        result,
+                    )
+                )
+
+        if not ready:
+
+            await query.edit_message_text(
+
+                "🔎 <b>ГОТОВОГО СЕТАПА НЕТ</b>\n\n"
+
+                "Ждём:\n"
+                "1H → Major Liquidity → "
+                "Sweep → 15M → 5M ILM.",
+
+                parse_mode="HTML",
+
+                reply_markup=main_keyboard(),
+            )
+
+            return
+
+        _, coin, result = max(
+            ready,
+            key=lambda x: x[0],
+        )
+
+        setup = save_ready_setup(
+            coin,
+            result,
+        )
+
+        if setup is None:
+
+            await query.edit_message_text(
+                "❌ Не удалось сохранить setup."
+            )
+
+            return
+
+        await query.edit_message_text(
+
+            ready_message(
+                coin,
+                result,
+                setup,
+            ),
+
+            parse_mode="HTML",
+
+            reply_markup=ready_keyboard(
+                setup["id"]
+            ),
+        )
+
+        return
+
+    # ========================================================
+    # ENTER
+    # ========================================================
+
+    if data.startswith(
+        "enter_"
+    ):
+
+        setup_id = data.split(
+            "_",
+            1,
+        )[1]
+
+        pending = load_pending_setups()
+
+        setup = pending.get(
+            setup_id
+        )
+
+        if not setup:
+
+            await query.edit_message_text(
+
+                "⚠️ <b>Этот сигнал больше "
+                "не найден.</b>\n\n"
+                "Возможно, он устарел.",
+
+                parse_mode="HTML",
+
+                reply_markup=main_keyboard(),
+            )
+
+            return
+
+        if setup.get(
             "status"
-        ) != "OPEN":
+        ) == "ENTERED":
 
-            continue
+            active = load_active_trades()
+
+            existing = next(
+
+                (
+                    x
+                    for x in active
+                    if x.get(
+                        "setup_id"
+                    )
+                    == setup_id
+                    and x.get(
+                        "status"
+                    )
+                    == "OPEN"
+                ),
+
+                None,
+            )
+
+            if existing:
+
+                await query.edit_message_text(
+
+                    "🟢 <b>Эта сделка уже активна.</b>\n\n"
+
+                    f"💠 {existing.get('coin')}\n"
+                    f"📐 {existing.get('direction')}\n\n"
+
+                    f"Entry: <b>"
+                    f"{format_price(existing.get('entry'))}"
+                    f"</b>\n"
+
+                    f"SL: <b>"
+                    f"{format_price(existing.get('sl'))}"
+                    f"</b>\n"
+
+                    f"TP: <b>"
+                    f"{format_price(existing.get('tp'))}"
+                    f"</b>\n"
+
+                    f"RR: <b>"
+                    f"{format_rr(existing.get('rr'))}"
+                    f"</b>",
+
+                    parse_mode="HTML",
+
+                    reply_markup=active_keyboard(),
+                )
+
+                return
+
+        trade, created = activate_trade(
+            setup,
+            query.message.chat_id,
+        )
+
+        if not created:
+
+            await query.edit_message_text(
+
+                "🟢 <b>Сделка уже активна.</b>",
+
+                parse_mode="HTML",
+
+                reply_markup=active_keyboard(),
+            )
+
+            return
+
+        await query.edit_message_text(
+
+            "🟢 <b>СДЕЛКА ПРИНЯТА</b>\n\n"
+
+            f"💠 {trade.get('coin')}\n"
+
+            f"📐 <b>{trade.get('direction')}</b>\n\n"
+
+            f"Entry: <b>"
+            f"{format_price(trade.get('entry'))}"
+            f"</b>\n"
+
+            f"SL: <b>"
+            f"{format_price(trade.get('sl'))}"
+            f"</b>\n"
+
+            f"TP: <b>"
+            f"{format_price(trade.get('tp'))}"
+            f"</b>\n"
+
+            f"RR: <b>"
+            f"{format_rr(trade.get('rr'))}"
+            f"</b>\n\n"
+
+            "⏳ <b>Сделка активна.</b>\n"
+            "Binance Spot используется для мониторинга цены.",
+
+            parse_mode="HTML",
+
+            reply_markup=active_keyboard(),
+        )
+
+        return
+
+    # ========================================================
+    # CHARTS
+    # ========================================================
+
+    if data == "charts":
+
+        await query.edit_message_text(
+
+            "📈 <b>Выбери монету:</b>",
+
+            parse_mode="HTML",
+
+            reply_markup=chart_keyboard(),
+        )
+
+        return
+
+    # ========================================================
+    # READY CHART
+    # ========================================================
+
+    if data == "chart_ready":
+
+        await query.message.reply_text(
+            "📈 Выбери монету:",
+            reply_markup=chart_keyboard(),
+        )
+
+        return
+
+    # ========================================================
+    # CHART COIN
+    # ========================================================
+
+    if data.startswith(
+        "chart_"
+    ):
+
+        coin = data.split(
+            "_",
+            1,
+        )[1]
+
+        if coin not in COINS:
+            return
+
+        await send_chart(
+            query.message,
+            coin,
+        )
+
+        return
+
+    # ========================================================
+    # ACTIVE
+    # ========================================================
+
+    if data == "active":
+
+        active = load_active_trades()
+
+        active = [
+
+            x
+            for x in active
+            if x.get(
+                "status"
+            ) == "OPEN"
+
+        ]
+
+        if not active:
+
+            await query.edit_message_text(
+
+                "📌 <b>Активных сделок нет.</b>",
+
+                parse_mode="HTML",
+
+                reply_markup=main_keyboard(),
+            )
+
+            return
+
+        lines = [
+            "📌 <b>АКТИВНЫЕ СДЕЛКИ</b>",
+            "",
+        ]
+
+        for trade in active:
+
+            lines.extend([
+
+                f"💠 <b>{trade.get('coin')}</b> "
+                f"{trade.get('direction')}",
+
+                f"Entry: "
+                f"<b>{format_price(trade.get('entry'))}</b>",
+
+                f"SL: "
+                f"<b>{format_price(trade.get('sl'))}</b>",
+
+                f"TP: "
+                f"<b>{format_price(trade.get('tp'))}</b>",
+
+                f"RR: "
+                f"<b>{format_rr(trade.get('rr'))}</b>",
+
+                f"Цена: "
+                f"<b>{format_price(trade.get('last_price'))}</b>",
+
+                "",
+            ])
+
+        await query.edit_message_text(
+
+            "\n".join(lines),
+
+            parse_mode="HTML",
+
+            reply_markup=active_keyboard(),
+        )
+
+        return
+
+    # ========================================================
+    # ACTIVE CHART
+    # ========================================================
+
+    if data == "active_chart":
+
+        active = load_active_trades()
+
+        active = [
+
+            x
+            for x in active
+            if x.get(
+                "status"
+            ) == "OPEN"
+
+        ]
+
+        if not active:
+
+            await query.edit_message_text(
+
+                "📌 <b>Активных сделок нет.</b>",
+
+                parse_mode="HTML",
+
+                reply_markup=main_keyboard(),
+            )
+
+            return
+
+        trade = active[0]
 
         coin = trade.get(
-            "coin"
+            "coin",
+            "SOL",
         )
 
-        result = results.get(
+        await send_chart(
+            query.message,
             coin,
-            {},
+            trade=trade,
         )
 
-        if result.get("error"):
-            continue
+        return
 
-        price = result.get(
-            "price"
+    # ========================================================
+    # JOURNAL
+    # ========================================================
+
+    if data == "journal":
+
+        journal = load_journal()
+
+        if not journal:
+
+            await query.edit_message_text(
+
+                "📒 <b>Журнал пока пуст.</b>",
+
+                parse_mode="HTML",
+
+                reply_markup=main_keyboard(),
+            )
+
+            return
+
+        last = journal[-10:]
+
+        lines = [
+            "📒 <b>TRADEMIND — ЖУРНАЛ</b>",
+            "",
+        ]
+
+        for trade in reversed(
+            last
+        ):
+
+            result_type = trade.get(
+                "result",
+                trade.get(
+                    "status",
+                    "?",
+                ),
+            )
+
+            icon = (
+
+                "✅"
+                if result_type == "TP"
+                else "❌"
+                if result_type == "SL"
+                else "⚪"
+            )
+
+            pnl = trade.get(
+                "pnl_percent"
+            )
+
+            pnl_text = (
+
+                f"{pnl:+.2f}%"
+                if pnl is not None
+                else "N/A"
+            )
+
+            lines.extend([
+
+                f"{icon} <b>"
+                f"{trade.get('coin')}"
+                f"</b> "
+                f"{trade.get('direction')}",
+
+                f"{result_type} • "
+                f"PnL {pnl_text}",
+
+                (
+                    f"Entry "
+                    f"{format_price(trade.get('entry'))}"
+                    f" → "
+                    f"{format_price(trade.get('exit_price'))}"
+                ),
+
+                "",
+            ])
+
+        await query.edit_message_text(
+
+            "\n".join(lines),
+
+            parse_mode="HTML",
+
+            reply_markup=main_keyboard(),
         )
 
-        if price is None:
-            continue
+        return
 
-        trade["last_price"] = float(
-            price
+    # ========================================================
+    # SUBSCRIBE
+    # ========================================================
+
+    if data == "subscribe":
+
+        chat_id = query.message.chat_id
+
+        data_list = subscribers()
+
+        if chat_id not in data_list:
+
+            data_list.append(
+                chat_id
+            )
+
+            save_subscribers(
+                data_list
+            )
+
+        await query.edit_message_text(
+
+            "🔔 <b>Уведомления включены.</b>",
+
+            parse_mode="HTML",
+
+            reply_markup=main_keyboard(),
         )
 
-        hit = check_trade_hit(
-            trade,
-            price,
+        return
+
+    # ========================================================
+    # UNSUBSCRIBE
+    # ========================================================
+
+    if data == "unsubscribe":
+
+        chat_id = query.message.chat_id
+
+        save_subscribers([
+
+            x
+            for x in subscribers()
+            if x != chat_id
+
+        ])
+
+        await query.edit_message_text(
+
+            "🔕 <b>Уведомления выключены.</b>",
+
+            parse_mode="HTML",
+
+            reply_markup=main_keyboard(),
         )
 
-        if hit is None:
-            changed = True
-            continue
+        return
 
-        trade_id = trade.get(
-            "id"
+
+# ============================================================
+# POST INIT
+# ============================================================
+
+async def post_init(
+    application,
+):
+
+    commands = [
+
+        (
+            "start",
+            "Главное меню",
+        ),
+
+        (
+            "market",
+            "Рынок",
+        ),
+
+        (
+            "search",
+            "Поиск сетапа",
+        ),
+
+        (
+            "chart",
+            "График",
+        ),
+
+        (
+            "active",
+            "Активные сделки",
+        ),
+
+        (
+            "journal",
+            "Журнал",
+        ),
+
+        (
+            "status",
+            "Статус",
+        ),
+
+        (
+            "subscribe",
+            "Включить уведомления",
+        ),
+
+        (
+            "unsubscribe",
+            "Выключить уведомления",
+        ),
+    ]
+
+    await application.bot.set_my_commands([
+
+        BotCommand(
+            command,
+            description,
         )
 
-        closed = close_trade(
-            trade_id,
-            hit,
-            price,
+        for command, description
+        in commands
+
+    ])
+
+    application.create_task(
+        monitor(
+            application
+        )
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    if not TOKEN:
+
+        raise RuntimeError(
+            "BOT_TOKEN не найден"
         )
 
-        if not closed:
-            continue
+    application = (
+        Application
+        .builder()
+        .token(TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
-        changed = True
+    handlers = [
 
-        direction = closed.get(
-            "direction"
+        (
+            "start",
+            start,
+        ),
+
+        (
+            "market",
+            market_cmd,
+        ),
+
+        (
+            "search",
+            search_cmd,
+        ),
+
+        (
+            "chart",
+            chart_cmd,
+        ),
+
+        (
+            "active",
+            active_cmd,
+        ),
+
+        (
+            "journal",
+            journal_cmd,
+        ),
+
+        (
+            "status",
+            status_cmd,
+        ),
+
+        (
+            "subscribe",
+            sub_cmd,
+        ),
+
+        (
+            "unsubscribe",
+            unsub_cmd,
+        ),
+    ]
+
+    for command, handler in handlers:
+
+        application.add_handler(
+            CommandHandler(
+                command,
+                handler,
+            )
         )
 
-        pnl = closed.get(
-            "pnl_pct"
+    application.add_handler(
+        CallbackQueryHandler(
+            callbacks
         )
+    )
 
-        if hit == "TP":
+    print(
+        f"TradeMind {STRATEGY_VERSION} started"
+    )
 
-            icon = "✅"
+    application.run_polling()
 
-            title = "TP ДОСТИГНУТ"
 
-        elif hit == "SL":
+# ============================================================
+# RUN
+# ============================================================
 
-            icon = "❌"
+if __name__ == "__main__":
 
-            title = "SL ДОСТИГНУТ"
-
-        else:
-
-            icon = "⚠️"
-
-            title = hit
-
-        text = (
-            f"{icon} <b>TRADEMIND — {title}</b>\n\n"
-
-            f"💠 <b>{coin}</b>\n"
-
-            f"📐 {direction}\n\n"
-
-            f"Entry: "
-            f"<b
+    main()
