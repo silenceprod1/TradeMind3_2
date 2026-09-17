@@ -42,20 +42,71 @@ from strategy import (
 TOKEN = os.getenv("BOT_TOKEN")
 
 CHECK_INTERVAL = 15
-SCAN_WORKERS = 9
+
+# 19 монет → немного больше параллельных workers
+SCAN_WORKERS = 12
+
 MIN_SCORE_READY = 80
 MIN_RR = 2.0
 
+
+# ============================================================
+# COINS
+# ============================================================
+#
+# ВСЕ 19 МОНЕТ
+#
+# Стратегия для всех одинаковая:
+#
+# 1H
+# ↓
+# Major Liquidity
+# ↓
+# Sweep
+# ↓
+# 15M Confirmation
+# ↓
+# 5M ILM
+# ↓
+# Entry
+#
+# D1/W1 НЕ ИСПОЛЬЗУЮТСЯ.
+# ============================================================
+
 COINS = {
-    "SOL": "SOLUSDT",
-    "ETH": "ETHUSDT",
+    # ========================================================
+    # CORE
+    # ========================================================
+
     "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "SOL": "SOLUSDT",
     "BNB": "BNBUSDT",
     "XRP": "XRPUSDT",
+
+    # ========================================================
+    # ALT
+    # ========================================================
+
     "DOGE": "DOGEUSDT",
     "ADA": "ADAUSDT",
     "AVAX": "AVAXUSDT",
     "LINK": "LINKUSDT",
+
+    # ========================================================
+    # EXTENDED
+    # ========================================================
+
+    "HYPE": "HYPEUSDT",
+    "SUI": "SUIUSDT",
+    "TRX": "TRXUSDT",
+    "DOT": "DOTUSDT",
+    "LTC": "LTCUSDT",
+    "BCH": "BCHUSDT",
+    "NEAR": "NEARUSDT",
+    "APT": "APTUSDT",
+    "ARB": "ARBUSDT",
+    "OP": "OPUSDT",
 }
 
 
@@ -68,8 +119,6 @@ TRADE_JOURNAL_FILE = "trade_journal.json"
 ACTIVE_TRADES_FILE = "active_trades.json"
 PENDING_SETUPS_FILE = "pending_setups.json"
 
-# Главное:
-# здесь храним ПОСЛЕДНИЙ УЖЕ ОТПРАВЛЕННЫЙ READY
 NOTIFICATION_STATE_FILE = "notification_state.json"
 
 
@@ -572,6 +621,8 @@ def dashboard_message(
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
+        f"💠 Мониторинг: <b>{len(COINS)} монет</b>",
+        "",
     ]
 
     for coin in COINS:
@@ -841,10 +892,6 @@ def coin_message(
                 f"</b>"
             ),
         ])
-
-    # ВАЖНО:
-    # теперь эти стадии отображаются только
-    # в ручной карточке. Автоматически они НЕ отправляются.
 
     if stage == "WAIT":
         lines.extend([
@@ -3277,14 +3324,6 @@ async def monitor(app):
 
             # -----------------------------------------------
             # SIGNAL NOTIFICATIONS
-            #
-            # КРИТИЧЕСКИ ВАЖНО:
-            #
-            # SWEPT -> НЕ ОТПРАВЛЯЕМ
-            # 15M   -> НЕ ОТПРАВЛЯЕМ
-            # WAIT  -> НЕ ОТПРАВЛЯЕМ
-            #
-            # Только READY.
             # -----------------------------------------------
 
             state_changed = False
@@ -3299,8 +3338,6 @@ async def monitor(app):
                     "WAIT",
                 )
 
-                # Все промежуточные стадии
-                # полностью игнорируем.
                 if stage != "READY":
                     continue
 
@@ -3340,10 +3377,7 @@ async def monitor(app):
                     continue
 
                 # -------------------------------------------
-                # УНИКАЛЬНЫЙ ID СЕТАПА
-                #
-                # Если это тот же самый setup,
-                # уведомление НЕ повторяем.
+                # УНИКАЛЬНЫЙ ID
                 # -------------------------------------------
 
                 signal_key = (
@@ -4169,6 +4203,14 @@ def main():
 
     print(
         f"TradeMind {STRATEGY_VERSION} started"
+    )
+
+    print(
+        f"Monitoring {len(COINS)} coins:"
+    )
+
+    print(
+        ", ".join(COINS.keys())
     )
 
     application.run_polling()
