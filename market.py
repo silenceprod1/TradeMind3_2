@@ -1,21 +1,20 @@
 # ============================================================
-# TradeMind 7.1
+# TradeMind 7.2
 # market.py
 #
 # Binance Spot market data
 #
+# D1  -> Trend + Point A + Point B (согласно видео)
 # 1H  -> Main Structure -> Major Liquidity -> Sweep
 # 15M -> Confirmation + fallback liquidity
 # 5M  -> ILM
 # 1M  -> Local context
 #
-# Изменения vs 7.0:
-# - Добавлен третий источник уровней: ROUND (психологические
-#   круглые уровни). Используется только если 1H + 15M дают
-#   меньше MIN_LEVELS_PER_SIDE_1H с одной стороны.
-#   Это решает проблему, когда цена на исторических максимумах
-#   и BSL выше физически отсутствует.
-# - Каждый уровень по-прежнему имеет поле "source".
+# Изменения vs 7.1:
+# - Добавлен D1 анализ: тренд, точка A (старт движения),
+#   точка B (цель — противоположная ликвидность).
+# - d1_context возвращается в market_data.
+# - D1 свечи кэшируются с TTL 300 сек.
 # ============================================================
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ import requests
 # VERSION
 # ============================================================
 
-MARKET_VERSION = "7.1"
+MARKET_VERSION = "7.2"
 
 
 # ============================================================
@@ -78,6 +77,7 @@ COINS = {
 # LOOKBACK
 # ============================================================
 
+LOOKBACK_D1 = 60
 LOOKBACK_1H = 180
 LOOKBACK_15M = 200
 LOOKBACK_5M = 200
@@ -89,6 +89,7 @@ LOOKBACK_1M = 30
 # ============================================================
 
 KLINES_TTL = {
+    "1d": 300,
     "1h": 60,
     "15m": 30,
     "5m": 15,
@@ -108,6 +109,9 @@ SWING_RIGHT = 1
 
 SWING_LEFT_15M = 2
 SWING_RIGHT_15M = 1
+
+SWING_LEFT_D1 = 3
+SWING_RIGHT_D1 = 3
 
 
 # ============================================================
@@ -157,6 +161,14 @@ SWEPT_MIN_DEPTH_PCT = 0.15
 
 
 # ============================================================
+# D1 CONTEXT
+# ============================================================
+
+D1_SWING_LOOKBACK = 60
+D1_POINT_LOOKBACK = 30
+
+
+# ============================================================
 # LOCAL
 # ============================================================
 
@@ -185,7 +197,7 @@ def _get_session() -> requests.Session:
     if session is None:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "TradeMind/7.1",
+            "User-Agent": "TradeMind/7.2",
             "Accept": "application/json",
         })
 
@@ -422,6 +434,126 @@ def find_swing_lows_15m(candles):
     return _find_swings(candles, SWING_LEFT_15M, SWING_RIGHT_15M, "low")
 
 
+def find_swing_highs_d1(candles):
+    return _find_swings(candles, SWING_LEFT_D1, SWING_RIGHT_D1, "high")
+
+
+def find_swing_lows_d1(candles):
+    return _find_swings(candles, SWING_LEFT_D1, SWING_RIGHT_D1, "low")
+
+
+# ============================================================
+# D1 CONTEXT
+# ============================================================
+
+def _analyze_d1_context(candles_d1, price):
+    """
+    Определяет дневной тренд, точку A (старт движения) и
+    точку B (цель — противоположная ликвидность).
+    """
+
+    empty = {
+        "trend": "NEUTRAL",
+        "point_a": None,
+        "point_b": None,
+        "last_swing_high": None,
+        "last_swing_low": None,
+    }
+
+    if not candles_d1 or len(candles_d1) < 20:
+        return empty
+
+    confirmed = candles_d1[:-1]
+
+    if len(confirmed) < 15:
+        return empty
+
+    swing_highs = find_swing_highs_d1(confirmed)
+    swing_lows = find_swing_lows_d1(confirmed)
+
+    # ---------- Trend ----------
+
+    trend = "NEUTRAL"
+
+    if len(swing_highs) >= 3 and len(swing_lows) >= 3:
+
+        h1 = swing_highs[-3]["price"]
+        h2 = swing_highs[-2]["price"]
+        h3 = swing_highs[-1]["price"]
+
+        l1 = swing_lows[-3]["price"]
+        l2 = swing_lows[-2]["price"]
+        l3 = swing_lows[-1]["price"]
+
+        if h3 > h2 > h1 and l3 > l2 > l1:
+            trend = "LONG"
+        elif h3 < h2 < h1 and l3 < l2 < l1:
+            trend = "SHORT"
+
+    # Softer fallback
+    if trend == "NEUTRAL" and len(swing_highs) >= 2 and len(swing_lows) >= 2:
+        if (
+            swing_highs[-1]["price"] > swing_highs[-2]["price"]
+            and swing_lows[-1]["price"] > swing_lows[-2]["price"]
+        ):
+            trend = "LONG"
+        elif (
+            swing_highs[-1]["price"] < swing_highs[-2]["price"]
+            and swing_lows[-1]["price"] < swing_lows[-2]["price"]
+        ):
+            trend = "SHORT"
+
+    # ---------- Point A / Point B ----------
+
+    point_a = None
+    point_b = None
+
+    cutoff_index = len(confirmed) - D1_POINT_LOOKBACK
+
+    recent_lows = [
+        l for l in swing_lows if l["index"] >= cutoff_index
+    ]
+    recent_highs = [
+        h for h in swing_highs if h["index"] >= cutoff_index
+    ]
+
+    if trend == "LONG":
+        if recent_lows:
+            point_a = min(l["price"] for l in recent_lows)
+        elif swing_lows:
+            point_a = min(l["price"] for l in swing_lows[-5:])
+
+        highs_above = [
+            h["price"] for h in swing_highs if h["price"] > price
+        ]
+        if highs_above:
+            point_b = min(highs_above)
+
+    elif trend == "SHORT":
+        if recent_highs:
+            point_a = max(h["price"] for h in recent_highs)
+        elif swing_highs:
+            point_a = max(h["price"] for h in swing_highs[-5:])
+
+        lows_below = [
+            l["price"] for l in swing_lows if l["price"] < price
+        ]
+        if lows_below:
+            point_b = max(lows_below)
+
+    return {
+        "trend": trend,
+        "point_a": point_a,
+        "point_b": point_b,
+        "last_swing_high": (
+            swing_highs[-1]["price"] if swing_highs else None
+        ),
+        "last_swing_low": (
+            swing_lows[-1]["price"] if swing_lows else None
+        ),
+    }
+
+
 # ============================================================
 # CLUSTER
 # ============================================================
@@ -565,7 +697,7 @@ def calculate_strength(level, candles, candles_15m, max_age, base=48.0):
 
 
 # ============================================================
-# SELECT ZONES (generic)
+# SELECT ZONES
 # ============================================================
 
 def _select_zones(
@@ -665,30 +797,21 @@ def _select_zones(
 
 
 # ============================================================
-# ROUND NUMBER LEVELS
+# ROUND NUMBERS
 # ============================================================
 
 def _round_step(price):
-    """
-    Шаг круглых уровней зависит от порядка цены.
-    BTC 90000 -> 1000
-    ETH 2500  -> 100
-    SOL 106   -> 10
-    DOGE 0.18 -> 0.01
-    """
     if price <= 0:
         return 1.0
     exp = math.floor(math.log10(price)) - 1
     return 10 ** exp
 
 
-def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
-                             max_distance_pct=ROUND_MAX_DISTANCE_PCT):
-    """
-    Генерирует круглые уровни выше (side="BSL") или ниже (side="SSL")
-    текущей цены. Используется как fallback, когда swing-уровни
-    отсутствуют.
-    """
+def find_round_number_levels(
+    price, side,
+    max_count=ROUND_MAX_COUNT,
+    max_distance_pct=ROUND_MAX_DISTANCE_PCT,
+):
 
     if price <= 0:
         return []
@@ -700,7 +823,6 @@ def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
     results = []
 
     if side == "BSL":
-
         first = math.ceil(price / step) * step
         if first <= price:
             first += step
@@ -708,7 +830,6 @@ def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
         current = first
 
         for _ in range(max_count):
-
             dist = (current - price) / price * 100
             if dist > max_distance_pct:
                 break
@@ -727,16 +848,13 @@ def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
                 "age_1h": 0,
                 "source": "ROUND",
                 "status": "FRESH",
-                "swept": False,
-                "taken": False,
-                "used": False,
-                "consumed": False,
+                "swept": False, "taken": False,
+                "used": False, "consumed": False,
             })
 
             current += step
 
-    else:  # SSL
-
+    else:
         first = math.floor(price / step) * step
         if first >= price:
             first -= step
@@ -744,7 +862,6 @@ def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
         current = first
 
         for _ in range(max_count):
-
             dist = (price - current) / price * 100
             if dist > max_distance_pct:
                 break
@@ -763,10 +880,8 @@ def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
                 "age_1h": 0,
                 "source": "ROUND",
                 "status": "FRESH",
-                "swept": False,
-                "taken": False,
-                "used": False,
-                "consumed": False,
+                "swept": False, "taken": False,
+                "used": False, "consumed": False,
             })
 
             current -= step
@@ -779,10 +894,6 @@ def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
 # ============================================================
 
 def _merge_sources(sources, limit):
-    """
-    Объединяет списки уровней в порядке приоритета (1H → 15M → ROUND),
-    отбрасывая слишком близкие. Возвращает до limit уровней.
-    """
 
     merged = []
     seen_prices = []
@@ -824,8 +935,6 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
     if len(confirmed_1h) < 10:
         return {"BSL": [], "SSL": []}
 
-    # ---------- 1H ----------
-
     bsl_clusters_1h = cluster_levels(find_swing_highs(confirmed_1h))
     ssl_clusters_1h = cluster_levels(find_swing_lows(confirmed_1h))
 
@@ -840,8 +949,6 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
         "SSL", MIN_MAJOR_STRENGTH, MAX_LEVEL_AGE_1H,
         SWEEP_RECENT_LOOKBACK_1H, "1H",
     )
-
-    # ---------- 15M fallback ----------
 
     bsl_15m = []
     ssl_15m = []
@@ -876,8 +983,6 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
                     SWEEP_RECENT_LOOKBACK_15M, "15M",
                 )
 
-    # ---------- ROUND fallback ----------
-
     bsl_round = []
     ssl_round = []
 
@@ -887,12 +992,8 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
     if len(ssl_1h) + len(ssl_15m) < MIN_LEVELS_PER_SIDE_1H:
         ssl_round = find_round_number_levels(price, "SSL")
 
-    # ---------- Merge ----------
-
     bsl = _merge_sources([bsl_1h, bsl_15m, bsl_round], MAX_LEVELS_PER_SIDE)
     ssl = _merge_sources([ssl_1h, ssl_15m, ssl_round], MAX_LEVELS_PER_SIDE)
-
-    # ---------- Global limit ----------
 
     combined = [("BSL", x) for x in bsl] + [("SSL", x) for x in ssl]
 
@@ -1048,20 +1149,14 @@ def detect_sweep(candles_1h, price, direction, levels=None):
             for level in valid_levels:
 
                 level_price = float(level.get("price", 0))
-                if level_price <= 0:
-                    continue
-                if level_price >= price:
-                    continue
-                if low >= level_price:
-                    continue
+                if level_price <= 0: continue
+                if level_price >= price: continue
+                if low >= level_price: continue
 
                 depth_pct = (level_price - low) / level_price * 100.0
-                if depth_pct < MIN_SWEEP_DEPTH_PCT:
-                    continue
-                if close <= level_price:
-                    continue
-                if close <= open_price:
-                    continue
+                if depth_pct < MIN_SWEEP_DEPTH_PCT: continue
+                if close <= level_price: continue
+                if close <= open_price: continue
 
                 candidates.append((abs(level_price - low), level, depth_pct))
 
@@ -1095,20 +1190,14 @@ def detect_sweep(candles_1h, price, direction, levels=None):
             for level in valid_levels:
 
                 level_price = float(level.get("price", 0))
-                if level_price <= 0:
-                    continue
-                if level_price <= price:
-                    continue
-                if high <= level_price:
-                    continue
+                if level_price <= 0: continue
+                if level_price <= price: continue
+                if high <= level_price: continue
 
                 depth_pct = (high - level_price) / level_price * 100.0
-                if depth_pct < MIN_SWEEP_DEPTH_PCT:
-                    continue
-                if close >= level_price:
-                    continue
-                if close >= open_price:
-                    continue
+                if depth_pct < MIN_SWEEP_DEPTH_PCT: continue
+                if close >= level_price: continue
+                if close >= open_price: continue
 
                 candidates.append((abs(high - level_price), level, depth_pct))
 
@@ -1140,12 +1229,14 @@ def get_market_data(symbol="SOLUSDT"):
 
     symbol = _normalize_symbol(symbol)
 
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        f_d1 = ex.submit(get_klines, "1d", LOOKBACK_D1, symbol)
         f_1h = ex.submit(get_klines, "1h", LOOKBACK_1H, symbol)
         f_15m = ex.submit(get_klines, "15m", LOOKBACK_15M, symbol)
         f_5m = ex.submit(get_klines, "5m", LOOKBACK_5M, symbol)
         f_1m = ex.submit(get_klines, "1m", LOOKBACK_1M, symbol)
 
+        candles_d1 = f_d1.result()
         candles_1h = f_1h.result()
         candles_15m = f_15m.result()
         candles_5m = f_5m.result()
@@ -1161,20 +1252,29 @@ def get_market_data(symbol="SOLUSDT"):
         candles_1h, candles_15m, price,
     )
 
+    d1_context = _analyze_d1_context(candles_d1, price)
+
     return {
         "symbol": symbol,
         "price": price,
+
+        "candles_d1": candles_d1,
         "candles_1h": candles_1h,
         "candles_15m": candles_15m,
         "candles_5m": candles_5m,
         "candles_1m": candles_1m,
+
         "candles": {
+            "1d": candles_d1,
             "1h": candles_1h,
             "15m": candles_15m,
             "5m": candles_5m,
             "1m": candles_1m,
         },
+
         "major_liquidity": major_liquidity,
+        "d1_context": d1_context,
+
         "updated_at": time.time(),
         "market_version": MARKET_VERSION,
     }
@@ -1214,8 +1314,18 @@ def format_major_liquidity(data):
     symbol = data.get("symbol", "SOLUSDT")
     price = float(data.get("price", 0))
     liquidity = data.get("major_liquidity", {})
+    d1 = data.get("d1_context", {})
 
-    lines = [f"💠 {symbol}", f"💰 Цена: ${price:.6f}", ""]
+    lines = [
+        f"💠 {symbol}",
+        f"💰 Цена: ${price:.6f}",
+        "",
+        "📅 D1 CONTEXT",
+        f"Trend: {d1.get('trend', 'NEUTRAL')}",
+        f"Point A: {d1.get('point_a')}",
+        f"Point B: {d1.get('point_b')}",
+        "",
+    ]
 
     lines.append("🔴 MAJOR BSL")
     bsl = liquidity.get("BSL", [])
@@ -1227,12 +1337,10 @@ def format_major_liquidity(data):
                 f"{i}. ${level['price']:.6f} "
                 f"• {level['distance_pct']:.2f}% "
                 f"• S{level['strength']:.0f} "
-                f"• T{level['touches']} "
                 f"• {level.get('source', '?')}"
             )
 
     lines.append("")
-
     lines.append("🟢 MAJOR SSL")
     ssl = liquidity.get("SSL", [])
     if not ssl:
@@ -1243,7 +1351,6 @@ def format_major_liquidity(data):
                 f"{i}. ${level['price']:.6f} "
                 f"• {level['distance_pct']:.2f}% "
                 f"• S{level['strength']:.0f} "
-                f"• T{level['touches']} "
                 f"• {level.get('source', '?')}"
             )
 
@@ -1258,11 +1365,6 @@ def debug_symbol(symbol):
     print("=" * 60)
     print(f"TradeMind Market {MARKET_VERSION}")
     print(f"Symbol: {symbol}")
-    print(f"Major distance: {MIN_MAJOR_DISTANCE_PCT}%")
-    print(f"Min strength 1H: {MIN_MAJOR_STRENGTH}")
-    print(f"Min strength 15M: {MIN_MINOR_STRENGTH}")
-    print(f"Min strength ROUND: {MIN_ROUND_STRENGTH}")
-    print(f"Swept min depth: {SWEPT_MIN_DEPTH_PCT}%")
     print("=" * 60)
 
     try:
@@ -1279,8 +1381,6 @@ def debug_symbol(symbol):
 if __name__ == "__main__":
 
     print(f"TradeMind market.py {MARKET_VERSION}")
-    print("Binance Spot")
     print(f"Supported coins: {len(COINS)}")
     print("")
-
     debug_symbol("SOL")
