@@ -3,6 +3,7 @@ import io
 import json
 import os
 import struct
+import threading
 import time
 import uuid
 import zlib
@@ -43,60 +44,28 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 CHECK_INTERVAL = 15
 
-# 19 монет → немного больше параллельных workers
 SCAN_WORKERS = 12
 
 MIN_SCORE_READY = 80
 MIN_RR = 2.0
 
+SCAN_CACHE_TTL = 5.0
+
 
 # ============================================================
 # COINS
 # ============================================================
-#
-# ВСЕ 19 МОНЕТ
-#
-# Стратегия для всех одинаковая:
-#
-# 1H
-# ↓
-# Major Liquidity
-# ↓
-# Sweep
-# ↓
-# 15M Confirmation
-# ↓
-# 5M ILM
-# ↓
-# Entry
-#
-# D1/W1 НЕ ИСПОЛЬЗУЮТСЯ.
-# ============================================================
 
 COINS = {
-    # ========================================================
-    # CORE
-    # ========================================================
-
     "BTC": "BTCUSDT",
     "ETH": "ETHUSDT",
     "SOL": "SOLUSDT",
     "BNB": "BNBUSDT",
     "XRP": "XRPUSDT",
-
-    # ========================================================
-    # ALT
-    # ========================================================
-
     "DOGE": "DOGEUSDT",
     "ADA": "ADAUSDT",
     "AVAX": "AVAXUSDT",
     "LINK": "LINKUSDT",
-
-    # ========================================================
-    # EXTENDED
-    # ========================================================
-
     "HYPE": "HYPEUSDT",
     "SUI": "SUIUSDT",
     "TRX": "TRXUSDT",
@@ -118,8 +87,14 @@ SUBSCRIBERS_FILE = "subscribers.json"
 TRADE_JOURNAL_FILE = "trade_journal.json"
 ACTIVE_TRADES_FILE = "active_trades.json"
 PENDING_SETUPS_FILE = "pending_setups.json"
-
 NOTIFICATION_STATE_FILE = "notification_state.json"
+
+
+# ============================================================
+# STORAGE LOCK
+# ============================================================
+
+_storage_lock = threading.RLock()
 
 
 # ============================================================
@@ -135,14 +110,13 @@ def load_json(filename, default):
 
 
 def save_json(filename, data):
+    tmp = filename + ".tmp"
     try:
-        with open(filename, "w", encoding="utf-8") as file:
-            json.dump(
-                data,
-                file,
-                ensure_ascii=False,
-                indent=2,
-            )
+        with open(tmp, "w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp, filename)
     except Exception as exc:
         print("SAVE ERROR:", filename, exc)
 
@@ -152,10 +126,7 @@ def save_json(filename, data):
 # ============================================================
 
 def now_iso():
-    return time.strftime(
-        "%Y-%m-%dT%H:%M:%SZ",
-        time.gmtime(),
-    )
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def now_ms():
@@ -167,22 +138,15 @@ def now_ms():
 # ============================================================
 
 def subscribers():
-    data = load_json(
-        SUBSCRIBERS_FILE,
-        [],
-    )
-
+    data = load_json(SUBSCRIBERS_FILE, [])
     if not isinstance(data, list):
         return []
-
     return data
 
 
 def save_subscribers(data):
-    save_json(
-        SUBSCRIBERS_FILE,
-        data,
-    )
+    with _storage_lock:
+        save_json(SUBSCRIBERS_FILE, data)
 
 
 def is_subscribed(chat_id):
@@ -194,22 +158,15 @@ def is_subscribed(chat_id):
 # ============================================================
 
 def load_active_trades():
-    data = load_json(
-        ACTIVE_TRADES_FILE,
-        [],
-    )
-
+    data = load_json(ACTIVE_TRADES_FILE, [])
     if not isinstance(data, list):
         return []
-
     return data
 
 
 def save_active_trades(trades):
-    save_json(
-        ACTIVE_TRADES_FILE,
-        trades,
-    )
+    with _storage_lock:
+        save_json(ACTIVE_TRADES_FILE, trades)
 
 
 def user_active_trades(chat_id):
@@ -226,22 +183,27 @@ def user_active_trades(chat_id):
 # ============================================================
 
 def load_journal():
-    data = load_json(
-        TRADE_JOURNAL_FILE,
-        [],
-    )
-
+    data = load_json(TRADE_JOURNAL_FILE, [])
     if not isinstance(data, list):
         return []
-
     return data
 
 
 def save_journal(journal):
-    save_json(
-        TRADE_JOURNAL_FILE,
-        journal[-500:],
-    )
+    """
+    Храним до 500 сделок на каждого пользователя.
+    """
+    with _storage_lock:
+        by_user = {}
+        for entry in journal:
+            cid = entry.get("chat_id", 0)
+            by_user.setdefault(cid, []).append(entry)
+
+        trimmed = []
+        for cid, entries in by_user.items():
+            trimmed.extend(entries[-500:])
+
+        save_json(TRADE_JOURNAL_FILE, trimmed)
 
 
 def user_journal(chat_id):
@@ -257,22 +219,15 @@ def user_journal(chat_id):
 # ============================================================
 
 def load_pending_setups():
-    data = load_json(
-        PENDING_SETUPS_FILE,
-        {},
-    )
-
+    data = load_json(PENDING_SETUPS_FILE, {})
     if not isinstance(data, dict):
         return {}
-
     return data
 
 
 def save_pending_setups(data):
-    save_json(
-        PENDING_SETUPS_FILE,
-        data,
-    )
+    with _storage_lock:
+        save_json(PENDING_SETUPS_FILE, data)
 
 
 # ============================================================
@@ -280,22 +235,15 @@ def save_pending_setups(data):
 # ============================================================
 
 def load_notification_state():
-    data = load_json(
-        NOTIFICATION_STATE_FILE,
-        {},
-    )
-
+    data = load_json(NOTIFICATION_STATE_FILE, {})
     if not isinstance(data, dict):
         return {}
-
     return data
 
 
 def save_notification_state(data):
-    save_json(
-        NOTIFICATION_STATE_FILE,
-        data,
-    )
+    with _storage_lock:
+        save_json(NOTIFICATION_STATE_FILE, data)
 
 
 # ============================================================
@@ -323,18 +271,13 @@ def format_price(price):
 def format_rr(value):
     if value is None:
         return "N/A"
-
     try:
         return f"1:{float(value):.2f}"
     except Exception:
         return "N/A"
 
 
-def calculate_pnl_percent(
-    entry,
-    exit_price,
-    direction,
-):
+def calculate_pnl_percent(entry, exit_price, direction):
     try:
         entry = float(entry)
         exit_price = float(exit_price)
@@ -343,18 +286,10 @@ def calculate_pnl_percent(
             return None
 
         if direction == "LONG":
-            return (
-                (exit_price - entry)
-                / entry
-                * 100
-            )
+            return (exit_price - entry) / entry * 100
 
         if direction == "SHORT":
-            return (
-                (entry - exit_price)
-                / entry
-                * 100
-            )
+            return (entry - exit_price) / entry * 100
 
     except Exception:
         return None
@@ -365,35 +300,33 @@ def calculate_pnl_percent(
 def direction_icon(direction):
     if direction == "LONG":
         return "🟢"
-
     if direction == "SHORT":
         return "🔴"
-
     return "⚪"
 
 
+STAGE_ICONS = {
+    "READY": "🟢",
+    "SWEPT": "🟠",
+    "15M_CONFIRMED": "🟡",
+    "WAIT": "⏳",
+}
+
+
+STAGE_TEXTS = {
+    "READY": "🟢 МОЖНО ВХОДИТЬ",
+    "SWEPT": "🟠 SWEEP",
+    "15M_CONFIRMED": "🟡 15M CONFIRMED",
+    "WAIT": "⏳ ОЖИДАНИЕ",
+}
+
+
 def stage_icon(stage):
-    return {
-        "READY": "🟢",
-        "SWEPT": "🟠",
-        "15M_CONFIRMED": "🟡",
-        "WAIT": "⏳",
-    }.get(
-        stage,
-        "⏳",
-    )
+    return STAGE_ICONS.get(stage, "⏳")
 
 
 def stage_text(stage):
-    return {
-        "READY": "🟢 МОЖНО ВХОДИТЬ",
-        "SWEPT": "🟠 SWEEP",
-        "15M_CONFIRMED": "🟡 15M CONFIRMED",
-        "WAIT": "⏳ ОЖИДАНИЕ",
-    }.get(
-        stage,
-        "⏳ ОЖИДАНИЕ",
-    )
+    return STAGE_TEXTS.get(stage, "⏳ ОЖИДАНИЕ")
 
 
 # ============================================================
@@ -416,10 +349,7 @@ def strong_levels(levels):
     return levels[:6]
 
 
-def levels_text(
-    levels,
-    current_price,
-):
+def levels_text(levels, current_price):
     levels = strong_levels(levels)
 
     if not levels:
@@ -430,26 +360,17 @@ def levels_text(
     for level in levels:
         try:
             level_price = float(level["price"])
-
             distance = (
                 abs(level_price - current_price)
                 / current_price
                 * 100
             )
-
         except Exception:
             continue
 
-        level_type = level.get(
-            "type",
-            "LEVEL",
-        )
+        level_type = level.get("type", "LEVEL")
 
-        icon = (
-            "🔴"
-            if level_type == "BSL"
-            else "🟢"
-        )
+        icon = "🔴" if level_type == "BSL" else "🟢"
 
         lines.append(
             f"{icon} <b>{level_type}</b> "
@@ -483,9 +404,7 @@ def build_analysis(symbol):
         market["candles_1m"],
     )
 
-    direction = get_1h_direction(
-        market["candles_1h"]
-    )
+    direction = get_1h_direction(market["candles_1h"])
 
     sweep = None
 
@@ -522,40 +441,38 @@ def build_analysis(symbol):
 
 
 # ============================================================
-# SCANNER
+# SCANNER + CACHE
 # ============================================================
+
+_scan_cache = {
+    "results": None,
+    "timestamp": 0.0,
+}
+
 
 def scan_one(item):
     coin, symbol = item
 
     try:
-        return (
-            coin,
-            build_analysis(symbol),
-        )
-
+        return coin, build_analysis(symbol)
     except Exception as exc:
-        return (
-            coin,
-            {
-                "error": str(exc),
-                "symbol": symbol,
-            },
-        )
+        return coin, {"error": str(exc), "symbol": symbol}
 
 
 def scan_all():
+    now = time.time()
+
+    if (
+        _scan_cache["results"] is not None
+        and now - _scan_cache["timestamp"] < SCAN_CACHE_TTL
+    ):
+        return _scan_cache["results"]
+
     results = {}
 
-    with ThreadPoolExecutor(
-        max_workers=SCAN_WORKERS
-    ) as executor:
-
+    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as executor:
         futures = [
-            executor.submit(
-                scan_one,
-                item,
-            )
+            executor.submit(scan_one, item)
             for item in COINS.items()
         ]
 
@@ -563,23 +480,22 @@ def scan_all():
             coin, result = future.result()
             results[coin] = result
 
-    return {
-        coin: results.get(
-            coin,
-            {"error": "нет данных"},
-        )
+    final = {
+        coin: results.get(coin, {"error": "нет данных"})
         for coin in COINS
     }
+
+    _scan_cache["results"] = final
+    _scan_cache["timestamp"] = now
+
+    return final
 
 
 # ============================================================
 # DASHBOARD
 # ============================================================
 
-def dashboard_message(
-    results,
-    chat_id=None,
-):
+def dashboard_message(results, chat_id=None):
     ready = 0
     swept = 0
     confirmed = 0
@@ -588,22 +504,17 @@ def dashboard_message(
     active = 0
 
     if chat_id is not None:
-        active = len(
-            user_active_trades(chat_id)
-        )
+        active = len(user_active_trades(chat_id))
 
     for result in results.values():
         stage = result.get("stage")
 
         if stage == "READY":
             ready += 1
-
         elif stage == "SWEPT":
             swept += 1
-
         elif stage == "15M_CONFIRMED":
             confirmed += 1
-
         else:
             waiting += 1
 
@@ -626,35 +537,16 @@ def dashboard_message(
     ]
 
     for coin in COINS:
-        result = results.get(
-            coin,
-            {},
-        )
+        result = results.get(coin, {})
 
         if result.get("error"):
-            lines.append(
-                f"⚫ <b>{coin}</b> — ERROR"
-            )
+            lines.append(f"⚫ <b>{coin}</b> — ERROR")
             continue
 
-        price = format_price(
-            result.get("price")
-        )
-
-        direction = result.get(
-            "direction",
-            "NEUTRAL",
-        )
-
-        stage = result.get(
-            "stage",
-            "WAIT",
-        )
-
-        score = result.get(
-            "score",
-            0,
-        )
+        price = format_price(result.get("price"))
+        direction = result.get("direction", "NEUTRAL")
+        stage = result.get("stage", "WAIT")
+        score = result.get("score", 0)
 
         lines.append(
             f"{stage_icon(stage)} "
@@ -688,50 +580,23 @@ def dashboard_message(
 def dashboard_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(
-                "🔄 Обновить",
-                callback_data="dashboard",
-            ),
+            InlineKeyboardButton("🔄 Обновить", callback_data="dashboard"),
         ],
         [
-            InlineKeyboardButton(
-                "🟢 READY",
-                callback_data="filter_ready",
-            ),
-            InlineKeyboardButton(
-                "📌 ACTIVE",
-                callback_data="active",
-            ),
+            InlineKeyboardButton("🟢 READY", callback_data="filter_ready"),
+            InlineKeyboardButton("📌 ACTIVE", callback_data="active"),
         ],
         [
-            InlineKeyboardButton(
-                "📈 Графики",
-                callback_data="charts",
-            ),
-            InlineKeyboardButton(
-                "📊 Рынок",
-                callback_data="market",
-            ),
+            InlineKeyboardButton("📈 Графики", callback_data="charts"),
+            InlineKeyboardButton("📊 Рынок", callback_data="market"),
         ],
         [
-            InlineKeyboardButton(
-                "🔎 Сканер",
-                callback_data="search",
-            ),
-            InlineKeyboardButton(
-                "📒 Журнал",
-                callback_data="journal",
-            ),
+            InlineKeyboardButton("🔎 Сканер", callback_data="search"),
+            InlineKeyboardButton("📒 Журнал", callback_data="journal"),
         ],
         [
-            InlineKeyboardButton(
-                "🔔 Уведомления",
-                callback_data="notifications",
-            ),
-            InlineKeyboardButton(
-                "⚙️ Статус",
-                callback_data="status",
-            ),
+            InlineKeyboardButton("🔔 Уведомления", callback_data="notifications"),
+            InlineKeyboardButton("⚙️ Статус", callback_data="status"),
         ],
     ])
 
@@ -749,36 +614,22 @@ def ready_filter_message(results):
 
         if (
             result.get("stage") == "READY"
-            and result.get("score", 0)
-            >= MIN_SCORE_READY
+            and result.get("score", 0) >= MIN_SCORE_READY
             and result.get("rr") is not None
             and float(result.get("rr")) >= MIN_RR
         ):
-            ready.append(
-                (
-                    int(result.get("score", 0)),
-                    coin,
-                    result,
-                )
-            )
+            ready.append((int(result.get("score", 0)), coin, result))
 
     if not ready:
         return (
             "🟢 <b>READY СЕТАПОВ НЕТ</b>\n\n"
             "Сейчас нет полного торгового сетапа.\n\n"
-            "TradeMind продолжает мониторинг "
-            "в фоне."
+            "TradeMind продолжает мониторинг в фоне."
         )
 
-    ready.sort(
-        key=lambda x: x[0],
-        reverse=True,
-    )
+    ready.sort(key=lambda x: x[0], reverse=True)
 
-    lines = [
-        "🟢 <b>READY SETUPS</b>",
-        "",
-    ]
+    lines = ["🟢 <b>READY SETUPS</b>", ""]
 
     for score, coin, result in ready:
         lines.extend([
@@ -834,25 +685,15 @@ def ready_filter_keyboard(results=None):
 # COIN MESSAGE
 # ============================================================
 
-def coin_message(
-    coin,
-    result,
-):
+def coin_message(coin, result):
     if result.get("error"):
         return (
             f"❌ <b>{escape(coin)}</b>\n\n"
             f"{escape(str(result.get('error')))}"
         )
 
-    stage = result.get(
-        "stage",
-        "WAIT",
-    )
-
-    direction = result.get(
-        "direction",
-        "NEUTRAL",
-    )
+    stage = result.get("stage", "WAIT")
+    direction = result.get("direction", "NEUTRAL")
 
     lines = [
         f"💠 <b>{escape(coin)}</b>",
@@ -869,10 +710,7 @@ def coin_message(
         f"<b>{stage_text(stage)}</b>",
         "",
         "💧 <b>MAJOR LIQUIDITY</b>",
-        levels_text(
-            result.get("major_levels"),
-            result.get("price"),
-        ),
+        levels_text(result.get("major_levels"), result.get("price")),
     ]
 
     sweep = result.get("sweep")
@@ -881,16 +719,8 @@ def coin_message(
         lines.extend([
             "",
             "💧 <b>ВНУТРЕННИЙ SWEEP</b>",
-            (
-                f"Level: <b>"
-                f"{format_price(sweep.get('level'))}"
-                f"</b>"
-            ),
-            (
-                f"Extreme: <b>"
-                f"{format_price(sweep.get('extreme'))}"
-                f"</b>"
-            ),
+            f"Level: <b>{format_price(sweep.get('level'))}</b>",
+            f"Extreme: <b>{format_price(sweep.get('extreme'))}</b>",
         ])
 
     if stage == "WAIT":
@@ -938,10 +768,7 @@ def coin_message(
     reason = result.get("reason")
 
     if reason:
-        lines.extend([
-            "",
-            f"ℹ️ {escape(str(reason))}",
-        ])
+        lines.extend(["", f"ℹ️ {escape(str(reason))}"])
 
     return "\n".join(lines)
 
@@ -950,11 +777,7 @@ def coin_message(
 # COIN KEYBOARD
 # ============================================================
 
-def coin_keyboard(
-    coin,
-    result,
-    setup=None,
-):
+def coin_keyboard(coin, result, setup=None):
     rows = [
         [
             InlineKeyboardButton(
@@ -964,11 +787,7 @@ def coin_keyboard(
         ],
     ]
 
-    if (
-        result
-        and result.get("stage") == "READY"
-        and setup
-    ):
+    if result and result.get("stage") == "READY" and setup:
         rows.append([
             InlineKeyboardButton(
                 "🟢 Я ЗАШЁЛ",
@@ -1000,14 +819,9 @@ def coin_keyboard(
 
 def chart_keyboard():
     rows = []
-
     coins = list(COINS.keys())
 
-    for i in range(
-        0,
-        len(coins),
-        3,
-    ):
+    for i in range(0, len(coins), 3):
         rows.append([
             InlineKeyboardButton(
                 coin,
@@ -1030,28 +844,16 @@ def chart_keyboard():
 # READY SETUP
 # ============================================================
 
-def create_pending_setup(
-    coin,
-    result,
-):
+def create_pending_setup(coin, result):
     if result.get("stage") != "READY":
         return None
 
     if result.get("score", 0) < MIN_SCORE_READY:
         return None
 
-    required = (
-        "entry",
-        "sl",
-        "tp",
-        "rr",
-        "direction",
-    )
+    required = ("entry", "sl", "tp", "rr", "direction")
 
-    if any(
-        result.get(key) is None
-        for key in required
-    ):
+    if any(result.get(key) is None for key in required):
         return None
 
     try:
@@ -1078,20 +880,12 @@ def create_pending_setup(
         f"{ilm.get('trigger_time')}"
     )
 
-    setup_id = uuid.uuid5(
-        uuid.NAMESPACE_DNS,
-        raw_id,
-    ).hex[:12]
+    setup_id = uuid.uuid5(uuid.NAMESPACE_DNS, raw_id).hex[:12]
 
     pending = load_pending_setups()
-
     old = pending.get(setup_id)
 
-    created_at = (
-        old.get("created_at")
-        if old
-        else now_iso()
-    )
+    created_at = old.get("created_at") if old else now_iso()
 
     return {
         "id": setup_id,
@@ -1110,38 +904,24 @@ def create_pending_setup(
     }
 
 
-def save_ready_setup(
-    coin,
-    result,
-):
-    setup = create_pending_setup(
-        coin,
-        result,
-    )
+def save_ready_setup(coin, result):
+    setup = create_pending_setup(coin, result)
 
     if setup is None:
         return None
 
-    pending = load_pending_setups()
+    with _storage_lock:
+        pending = load_pending_setups()
+        pending[setup["id"]] = setup
 
-    pending[setup["id"]] = setup
+        if len(pending) > 300:
+            items = sorted(
+                pending.items(),
+                key=lambda item: item[1].get("created_at", ""),
+            )
+            pending = dict(items[-300:])
 
-    if len(pending) > 300:
-        items = sorted(
-            pending.items(),
-            key=lambda item: item[1].get(
-                "created_at",
-                "",
-            ),
-        )
-
-        pending = dict(
-            items[-300:]
-        )
-
-    save_pending_setups(
-        pending
-    )
+        save_pending_setups(pending)
 
     return setup
 
@@ -1150,47 +930,43 @@ def save_ready_setup(
 # ACTIVATE TRADE
 # ============================================================
 
-def activate_trade(
-    setup,
-    chat_id,
-):
-    active = load_active_trades()
+def activate_trade(setup, chat_id):
+    with _storage_lock:
+        active = load_active_trades()
 
-    for trade in active:
-        if (
-            trade.get("setup_id") == setup["id"]
-            and trade.get("chat_id") == chat_id
-            and trade.get("status") == "OPEN"
-        ):
-            return trade, False
+        for trade in active:
+            if (
+                trade.get("setup_id") == setup["id"]
+                and trade.get("chat_id") == chat_id
+                and trade.get("status") == "OPEN"
+            ):
+                return trade, False
 
-    trade_id = uuid.uuid4().hex[:12]
+        trade_id = uuid.uuid4().hex[:12]
+        current = float(setup["entry"])
 
-    current = float(setup["entry"])
+        trade = {
+            "id": trade_id,
+            "setup_id": setup["id"],
+            "chat_id": chat_id,
+            "coin": setup["coin"],
+            "symbol": setup["symbol"],
+            "direction": setup["direction"],
+            "entry": float(setup["entry"]),
+            "sl": float(setup["sl"]),
+            "tp": float(setup["tp"]),
+            "rr": float(setup["rr"]),
+            "score": int(setup.get("score", 0)),
+            "opened_at": now_iso(),
+            "opened_at_ms": now_ms(),
+            "status": "OPEN",
+            "last_price": current,
+            "last_check_ms": now_ms(),
+            "entry_source": "TradeMind READY snapshot",
+        }
 
-    trade = {
-        "id": trade_id,
-        "setup_id": setup["id"],
-        "chat_id": chat_id,
-        "coin": setup["coin"],
-        "symbol": setup["symbol"],
-        "direction": setup["direction"],
-        "entry": float(setup["entry"]),
-        "sl": float(setup["sl"]),
-        "tp": float(setup["tp"]),
-        "rr": float(setup["rr"]),
-        "score": int(setup.get("score", 0)),
-        "opened_at": now_iso(),
-        "opened_at_ms": now_ms(),
-        "status": "OPEN",
-        "last_price": current,
-        "last_check_ms": now_ms(),
-        "entry_source": "TradeMind READY snapshot",
-    }
-
-    active.append(trade)
-
-    save_active_trades(active)
+        active.append(trade)
+        save_active_trades(active)
 
     return trade, True
 
@@ -1199,44 +975,36 @@ def activate_trade(
 # CLOSE TRADE
 # ============================================================
 
-def close_trade(
-    trade,
-    exit_price,
-    result_type,
-):
-    active = load_active_trades()
+def close_trade(trade, exit_price, result_type):
+    with _storage_lock:
+        active = load_active_trades()
 
-    target = None
+        target = None
+        for item in active:
+            if item.get("id") == trade.get("id"):
+                target = item
+                break
 
-    for item in active:
-        if item.get("id") == trade.get("id"):
-            target = item
-            break
+        if target is None:
+            return None
 
-    if target is None:
-        return None
+        target["status"] = result_type
+        target["result"] = result_type
+        target["exit_price"] = float(exit_price)
+        target["closed_at"] = now_iso()
+        target["pnl_percent"] = calculate_pnl_percent(
+            target.get("entry"),
+            exit_price,
+            target.get("direction"),
+        )
 
-    target["status"] = result_type
-    target["result"] = result_type
-    target["exit_price"] = float(exit_price)
-    target["closed_at"] = now_iso()
+        save_active_trades(active)
 
-    target["pnl_percent"] = calculate_pnl_percent(
-        target.get("entry"),
-        exit_price,
-        target.get("direction"),
-    )
-
-    save_active_trades(active)
-
-    journal = load_journal()
-
-    journal_entry = dict(target)
-    journal_entry["result"] = result_type
-
-    journal.append(journal_entry)
-
-    save_journal(journal)
+        journal = load_journal()
+        journal_entry = dict(target)
+        journal_entry["result"] = result_type
+        journal.append(journal_entry)
+        save_journal(journal)
 
     return target
 
@@ -1245,35 +1013,17 @@ def close_trade(
 # PRICE CROSSING
 # ============================================================
 
-def level_between(
-    previous_price,
-    current_price,
-    level,
-):
+def level_between(previous_price, current_price, level):
     try:
-        low = min(
-            float(previous_price),
-            float(current_price),
-        )
-
-        high = max(
-            float(previous_price),
-            float(current_price),
-        )
-
+        low = min(float(previous_price), float(current_price))
+        high = max(float(previous_price), float(current_price))
         level = float(level)
-
         return low <= level <= high
-
     except Exception:
         return False
 
 
-def check_trade_price(
-    trade,
-    previous_price,
-    current_price,
-):
+def check_trade_price(trade, previous_price, current_price):
     try:
         current_price = float(current_price)
         previous_price = float(previous_price)
@@ -1286,60 +1036,36 @@ def check_trade_price(
         return None
 
     if direction == "LONG":
-
         tp_crossed = (
             current_price >= tp
-            or level_between(
-                previous_price,
-                current_price,
-                tp,
-            )
+            or level_between(previous_price, current_price, tp)
         )
-
         sl_crossed = (
             current_price <= sl
-            or level_between(
-                previous_price,
-                current_price,
-                sl,
-            )
+            or level_between(previous_price, current_price, sl)
         )
 
         if tp_crossed and sl_crossed:
             return ("AMBIGUOUS", current_price)
-
         if tp_crossed:
             return ("TP", current_price)
-
         if sl_crossed:
             return ("SL", current_price)
 
     elif direction == "SHORT":
-
         tp_crossed = (
             current_price <= tp
-            or level_between(
-                previous_price,
-                current_price,
-                tp,
-            )
+            or level_between(previous_price, current_price, tp)
         )
-
         sl_crossed = (
             current_price >= sl
-            or level_between(
-                previous_price,
-                current_price,
-                sl,
-            )
+            or level_between(previous_price, current_price, sl)
         )
 
         if tp_crossed and sl_crossed:
             return ("AMBIGUOUS", current_price)
-
         if tp_crossed:
             return ("TP", current_price)
-
         if sl_crossed:
             return ("SL", current_price)
 
@@ -1350,41 +1076,23 @@ def check_trade_price(
 # RESOLVE 1M CROSS
 # ============================================================
 
-def resolve_crossed_levels_1m(
-    trade,
-    candles_1m,
-    from_ms,
-    to_ms,
-):
+def resolve_crossed_levels_1m(trade, candles_1m, from_ms, to_ms):
     relevant = []
 
     for candle in candles_1m or []:
         try:
-            open_time = int(
-                candle["open_time"]
-            )
+            open_time = int(candle["open_time"])
+            close_time = int(candle["close_time"])
 
-            close_time = int(
-                candle["close_time"]
-            )
-
-            if (
-                close_time >= from_ms
-                and open_time <= to_ms
-            ):
+            if close_time >= from_ms and open_time <= to_ms:
                 relevant.append(candle)
-
         except Exception:
             continue
 
-    relevant.sort(
-        key=lambda x: int(
-            x["open_time"]
-        )
-    )
-
     if not relevant:
-        return "AMBIGUOUS"
+        return "NO_DATA"
+
+    relevant.sort(key=lambda x: int(x["open_time"]))
 
     direction = trade.get("direction")
 
@@ -1392,10 +1100,9 @@ def resolve_crossed_levels_1m(
         sl = float(trade["sl"])
         tp = float(trade["tp"])
     except Exception:
-        return "AMBIGUOUS"
+        return "NO_DATA"
 
     for candle in relevant:
-
         try:
             high = float(candle["high"])
             low = float(candle["low"])
@@ -1411,14 +1118,12 @@ def resolve_crossed_levels_1m(
 
         if hit_sl and hit_tp:
             return "AMBIGUOUS"
-
         if hit_tp:
             return "TP"
-
         if hit_sl:
             return "SL"
 
-    return "AMBIGUOUS"
+    return "NO_DATA"
 
 
 # ============================================================
@@ -1426,30 +1131,21 @@ def resolve_crossed_levels_1m(
 # ============================================================
 
 def trade_close_message(trade):
-    result_type = trade.get(
-        "result",
-        trade.get("status"),
-    )
+    result_type = trade.get("result", trade.get("status"))
 
     if result_type == "TP":
         icon = "✅"
         title = "TP ДОСТИГНУТ"
-
     elif result_type == "SL":
         icon = "❌"
         title = "SL ДОСТИГНУТ"
-
     else:
         icon = "⚪"
         title = "РЕЗУЛЬТАТ НЕОПРЕДЕЛЁН"
 
     pnl = trade.get("pnl_percent")
 
-    pnl_text = (
-        f"{float(pnl):+.2f}%"
-        if pnl is not None
-        else "N/A"
-    )
+    pnl_text = f"{float(pnl):+.2f}%" if pnl is not None else "N/A"
 
     return (
         f"{icon} <b>TRADEMIND — {title}</b>\n\n"
@@ -1465,22 +1161,52 @@ def trade_close_message(trade):
 
 
 # ============================================================
+# SAFE SEND
+# ============================================================
+
+async def safe_send_message(app, chat_id, text, **kwargs):
+    for attempt in range(3):
+        try:
+            return await app.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                **kwargs,
+            )
+        except Exception as exc:
+            if attempt == 2:
+                print("SEND FAILED:", exc)
+                raise
+            await asyncio.sleep(1.5 * (attempt + 1))
+
+
+async def safe_send_photo(app, chat_id, photo, **kwargs):
+    for attempt in range(3):
+        try:
+            return await app.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                **kwargs,
+            )
+        except Exception as exc:
+            if attempt == 2:
+                print("SEND PHOTO FAILED:", exc)
+                raise
+            await asyncio.sleep(1.5 * (attempt + 1))
+
+
+# ============================================================
 # ACTIVE MONITOR
 # ============================================================
 
-async def monitor_active_trades(
-    app,
-    results,
-):
+async def monitor_active_trades(app, results):
     active = load_active_trades()
-
     if not active:
         return
 
-    changed = False
+    active_snapshot = [dict(t) for t in active]
+    to_close = []
 
-    for trade in list(active):
-
+    for trade in active_snapshot:
         if trade.get("status") != "OPEN":
             continue
 
@@ -1491,111 +1217,86 @@ async def monitor_active_trades(
             continue
 
         current_price = result.get("price")
-
         if current_price is None:
             continue
 
         try:
-            current_price = float(
-                current_price
-            )
+            current_price = float(current_price)
         except Exception:
             continue
 
         previous_price = float(
-            trade.get(
-                "last_price",
-                trade.get("entry"),
-            )
+            trade.get("last_price", trade.get("entry"))
         )
 
         previous_check_ms = int(
-            trade.get(
-                "last_check_ms",
-                trade.get(
-                    "opened_at_ms",
-                    now_ms(),
-                ),
-            )
+            trade.get("last_check_ms", trade.get("opened_at_ms", now_ms()))
         )
-
         current_check_ms = now_ms()
 
-        check = check_trade_price(
-            trade,
-            previous_price,
-            current_price,
-        )
+        check = check_trade_price(trade, previous_price, current_price)
 
         if check is None:
             trade["last_price"] = current_price
             trade["last_check_ms"] = current_check_ms
-            changed = True
             continue
 
         result_type, exit_price = check
 
         if result_type == "AMBIGUOUS":
-            result_type = resolve_crossed_levels_1m(
+            resolved = resolve_crossed_levels_1m(
                 trade,
-                result.get(
-                    "candles_1m",
-                    [],
-                ),
+                result.get("candles_1m", []),
                 previous_check_ms,
                 current_check_ms,
             )
 
-        closed = close_trade(
-            trade,
-            exit_price,
-            result_type,
-        )
+            if resolved == "NO_DATA":
+                trade["last_price"] = current_price
+                trade["last_check_ms"] = current_check_ms
+                continue
 
+            result_type = resolved
+
+        to_close.append((trade, result_type, exit_price))
+
+    # Один раз сохраняем обновлённые OPEN-сделки
+    save_active_trades([
+        t for t in active_snapshot if t.get("status") == "OPEN"
+    ])
+
+    # Закрываем найденные сделки
+    for trade, result_type, exit_price in to_close:
+        closed = close_trade(trade, exit_price, result_type)
         if closed is None:
             continue
 
-        changed = True
-
         chat_id = closed.get("chat_id")
-
         if not chat_id:
             continue
 
-        try:
-            await app.bot.send_message(
-                chat_id=chat_id,
-                text=trade_close_message(
-                    closed
-                ),
-                parse_mode="HTML",
-                reply_markup=trade_close_keyboard(
-                    closed
-                ),
-            )
+        coin = closed.get("coin")
+        result = results.get(coin)
 
-            await send_chart_to_chat(
+        try:
+            await safe_send_message(
                 app,
                 chat_id,
-                coin,
-                result=result,
-                trade=closed,
+                trade_close_message(closed),
+                parse_mode="HTML",
+                reply_markup=trade_close_keyboard(closed),
             )
-
         except Exception as exc:
-            print(
-                "TRADE CLOSE NOTIFY ERROR:",
-                exc,
-            )
+            print("TRADE CLOSE MESSAGE ERROR:", exc)
 
-    if changed:
-        active = [
-            trade
-            for trade in load_active_trades()
-            if trade.get("status") == "OPEN"
-        ]
-
-        save_active_trades(active)
+        try:
+            if result:
+                await send_chart_to_chat(
+                    app, chat_id, coin,
+                    result=result, trade=closed,
+                )
+        except Exception as exc:
+            print("TRADE CLOSE CHART ERROR:", exc)
 
 
 # ============================================================
@@ -1603,10 +1304,7 @@ async def monitor_active_trades(
 # ============================================================
 
 def trade_close_keyboard(trade):
-    trade_id = trade.get(
-        "id",
-        "",
-    )
+    trade_id = trade.get("id", "")
 
     return InlineKeyboardMarkup([
         [
@@ -1632,12 +1330,8 @@ def trade_close_keyboard(trade):
 # ACTIVE MESSAGE
 # ============================================================
 
-def active_message(
-    chat_id,
-):
-    trades = user_active_trades(
-        chat_id
-    )
+def active_message(chat_id):
+    trades = user_active_trades(chat_id)
 
     if not trades:
         return (
@@ -1645,41 +1339,20 @@ def active_message(
             "Нажми «🟢 Я ЗАШЁЛ» на READY-сигнале."
         )
 
-    lines = [
-        "📌 <b>ACTIVE TRADES</b>",
-        "",
-    ]
+    lines = ["📌 <b>ACTIVE TRADES</b>", ""]
 
     for trade in trades:
-
         coin = trade.get("coin")
         direction = trade.get("direction")
+        current = trade.get("last_price", trade.get("entry"))
+        entry = float(trade.get("entry"))
 
-        current = trade.get(
-            "last_price",
-            trade.get("entry"),
-        )
-
-        entry = float(
-            trade.get("entry")
-        )
-
-        pnl = calculate_pnl_percent(
-            entry,
-            current,
-            direction,
-        )
-
-        pnl_text = (
-            f"{pnl:+.2f}%"
-            if pnl is not None
-            else "N/A"
-        )
+        pnl = calculate_pnl_percent(entry, current, direction)
+        pnl_text = f"{pnl:+.2f}%" if pnl is not None else "N/A"
 
         lines.extend([
             f"💠 <b>{escape(str(coin))}</b>",
-            f"📐 {direction_icon(direction)} "
-            f"<b>{direction}</b>",
+            f"📐 {direction_icon(direction)} <b>{direction}</b>",
             "",
             f"💰 Entry: <b>{format_price(entry)}</b>",
             f"📍 Price: <b>{format_price(current)}</b>",
@@ -1696,19 +1369,14 @@ def active_message(
 
 
 def active_keyboard(chat_id):
-    trades = user_active_trades(
-        chat_id
-    )
-
+    trades = user_active_trades(chat_id)
     rows = []
 
     for trade in trades:
         trade_id = trade.get("id")
-
         rows.append([
             InlineKeyboardButton(
-                f"📈 {trade.get('coin')} "
-                f"{trade.get('direction')}",
+                f"📈 {trade.get('coin')} {trade.get('direction')}",
                 callback_data=f"active_trade_{trade_id}",
             ),
         ])
@@ -1740,9 +1408,7 @@ def active_keyboard(chat_id):
 # ============================================================
 
 def journal_message(chat_id):
-    journal = user_journal(
-        chat_id
-    )
+    journal = user_journal(chat_id)
 
     if not journal:
         return (
@@ -1752,41 +1418,19 @@ def journal_message(chat_id):
 
     total = len(journal)
 
-    tp = len([
-        x
-        for x in journal
-        if x.get("result") == "TP"
-    ])
-
-    sl = len([
-        x
-        for x in journal
-        if x.get("result") == "SL"
-    ])
-
-    ambiguous = len([
-        x
-        for x in journal
-        if x.get("result") == "AMBIGUOUS"
-    ])
+    tp = len([x for x in journal if x.get("result") == "TP"])
+    sl = len([x for x in journal if x.get("result") == "SL"])
+    ambiguous = len([x for x in journal if x.get("result") == "AMBIGUOUS"])
 
     resolved = tp + sl
-
-    win_rate = (
-        tp / resolved * 100
-        if resolved
-        else 0
-    )
+    win_rate = (tp / resolved * 100) if resolved else 0
 
     pnl_values = [
         float(x["pnl_percent"])
         for x in journal
         if x.get("pnl_percent") is not None
     ]
-
-    total_pnl = sum(
-        pnl_values
-    )
+    total_pnl = sum(pnl_values)
 
     lines = [
         "📒 <b>TRADEMIND JOURNAL</b>",
@@ -1806,32 +1450,12 @@ def journal_message(chat_id):
         "",
     ]
 
-    for trade in reversed(
-        journal[-10:]
-    ):
-        result_type = trade.get(
-            "result",
-            "?",
-        )
+    for trade in reversed(journal[-10:]):
+        result_type = trade.get("result", "?")
+        icon = {"TP": "✅", "SL": "❌", "AMBIGUOUS": "⚪"}.get(result_type, "❔")
 
-        icon = {
-            "TP": "✅",
-            "SL": "❌",
-            "AMBIGUOUS": "⚪",
-        }.get(
-            result_type,
-            "❔",
-        )
-
-        pnl = trade.get(
-            "pnl_percent"
-        )
-
-        pnl_text = (
-            f"{float(pnl):+.2f}%"
-            if pnl is not None
-            else "N/A"
-        )
+        pnl = trade.get("pnl_percent")
+        pnl_text = f"{float(pnl):+.2f}%" if pnl is not None else "N/A"
 
         lines.append(
             f"{icon} <b>{escape(str(trade.get('coin')))}</b> "
@@ -1846,20 +1470,11 @@ def journal_message(chat_id):
 def journal_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(
-                "🔄 Обновить",
-                callback_data="journal",
-            ),
+            InlineKeyboardButton("🔄 Обновить", callback_data="journal"),
         ],
         [
-            InlineKeyboardButton(
-                "📌 Active",
-                callback_data="active",
-            ),
-            InlineKeyboardButton(
-                "🧠 Dashboard",
-                callback_data="dashboard",
-            ),
+            InlineKeyboardButton("📌 Active", callback_data="active"),
+            InlineKeyboardButton("🧠 Dashboard", callback_data="dashboard"),
         ],
     ])
 
@@ -1868,11 +1483,7 @@ def journal_keyboard():
 # READY MESSAGE
 # ============================================================
 
-def ready_message(
-    coin,
-    result,
-    setup,
-):
+def ready_message(coin, result, setup):
     return (
         "🚨 <b>TRADEMIND — READY</b>\n\n"
         f"💠 <b>{escape(str(coin))}</b>\n"
@@ -1918,54 +1529,32 @@ def ready_keyboard(setup):
 # READY CHART
 # ============================================================
 
-async def send_ready_chart(
-    app,
-    chat_id,
-    coin,
-    result,
-    setup,
-):
-    try:
-        image = chart_png(
-            result,
-            trade=None,
-        )
+async def send_ready_chart(app, chat_id, coin, result, setup):
+    caption = ready_message(coin, result, setup)
 
+    try:
+        image = await asyncio.to_thread(chart_png, result, None)
         image.seek(0)
 
-        caption = ready_message(
-            coin,
-            result,
-            setup,
-        )
-
-        await app.bot.send_photo(
-            chat_id=chat_id,
-            photo=InputFile(
-                image,
-                filename=f"{coin.lower()}_ready.png",
-            ),
+        await safe_send_photo(
+            app,
+            chat_id,
+            InputFile(image, filename=f"{coin.lower()}_ready.png"),
             caption=caption,
             parse_mode="HTML",
-            reply_markup=ready_keyboard(
-                setup
-            ),
+            reply_markup=ready_keyboard(setup),
         )
 
     except Exception as exc:
-        print(
-            "READY CHART ERROR:",
-            exc,
-        )
+        print("READY CHART ERROR:", exc)
 
         try:
-            await app.bot.send_message(
-                chat_id=chat_id,
-                text=caption,
+            await safe_send_message(
+                app,
+                chat_id,
+                caption,
                 parse_mode="HTML",
-                reply_markup=ready_keyboard(
-                    setup
-                ),
+                reply_markup=ready_keyboard(setup),
             )
         except Exception:
             pass
@@ -1983,11 +1572,7 @@ async def send_photo_to_chat(
     trade=None,
     reply_markup=None,
 ):
-    image = chart_png(
-        result,
-        trade=trade,
-    )
-
+    image = await asyncio.to_thread(chart_png, result, trade)
     image.seek(0)
 
     if trade:
@@ -2015,84 +1600,45 @@ async def send_photo_to_chat(
 
         if trade.get("status") != "OPEN":
             caption += (
-                "\n"
-                f"Exit: <b>{format_price(trade.get('exit_price'))}</b>"
+                f"\nExit: <b>{format_price(trade.get('exit_price'))}</b>"
             )
 
         if pnl is not None:
-            caption += (
-                "\n"
-                f"PnL: <b>{pnl:+.2f}%</b>"
-            )
+            caption += f"\nPnL: <b>{pnl:+.2f}%</b>"
 
     else:
-        caption = coin_message(
-            coin,
-            result,
-        )
+        caption = coin_message(coin, result)
 
     if reply_markup is None:
         reply_markup = chart_keyboard()
 
-    await app.bot.send_photo(
-        chat_id=chat_id,
-        photo=InputFile(
-            image,
-            filename=f"{coin.lower()}_trademind.png",
-        ),
+    await safe_send_photo(
+        app,
+        chat_id,
+        InputFile(image, filename=f"{coin.lower()}_trademind.png"),
         caption=caption,
         parse_mode="HTML",
         reply_markup=reply_markup,
     )
 
 
-async def send_chart_to_chat(
-    app,
-    chat_id,
-    coin,
-    result=None,
-    trade=None,
-):
+async def send_chart_to_chat(app, chat_id, coin, result=None, trade=None):
     try:
         if result is None:
-            result = await asyncio.to_thread(
-                build_analysis,
-                COINS[coin],
-            )
+            result = await asyncio.to_thread(build_analysis, COINS[coin])
 
-        await send_photo_to_chat(
-            app,
-            chat_id,
-            coin,
-            result,
-            trade=trade,
-        )
+        await send_photo_to_chat(app, chat_id, coin, result, trade=trade)
 
     except Exception as exc:
-        print(
-            "CHART SEND ERROR:",
-            exc,
-        )
+        print("CHART SEND ERROR:", exc)
 
 
-async def send_chart(
-    message,
-    coin,
-    result=None,
-    trade=None,
-):
+async def send_chart(message, coin, result=None, trade=None):
     try:
         if result is None:
-            result = await asyncio.to_thread(
-                build_analysis,
-                COINS[coin],
-            )
+            result = await asyncio.to_thread(build_analysis, COINS[coin])
 
-        image = chart_png(
-            result,
-            trade=trade,
-        )
-
+        image = await asyncio.to_thread(chart_png, result, trade)
         image.seek(0)
 
         if trade:
@@ -2119,21 +1665,13 @@ async def send_chart(
             )
 
             if pnl is not None:
-                caption += (
-                    f"\nPnL: <b>{pnl:+.2f}%</b>"
-                )
+                caption += f"\nPnL: <b>{pnl:+.2f}%</b>"
 
         else:
-            caption = coin_message(
-                coin,
-                result,
-            )
+            caption = coin_message(coin, result)
 
         await message.reply_photo(
-            photo=InputFile(
-                image,
-                filename=f"{coin.lower()}_trademind.png",
-            ),
+            photo=InputFile(image, filename=f"{coin.lower()}_trademind.png"),
             caption=caption,
             parse_mode="HTML",
             reply_markup=chart_keyboard(),
@@ -2149,25 +1687,17 @@ async def send_chart(
 # BROADCAST READY ONLY
 # ============================================================
 
-async def broadcast_ready(
-    app,
-    coin,
-    result,
-    setup,
-):
+async def broadcast_ready(app, coin, result, setup):
     ids = subscribers()
 
     if not ids:
         return
 
     async def send(chat_id):
-        await send_ready_chart(
-            app,
-            chat_id,
-            coin,
-            result,
-            setup,
-        )
+        try:
+            await send_ready_chart(app, chat_id, coin, result, setup)
+        except Exception as exc:
+            print("BROADCAST ERROR:", chat_id, exc)
 
     await asyncio.gather(
         *(send(chat_id) for chat_id in ids),
@@ -2179,89 +1709,38 @@ async def broadcast_ready(
 # PNG ENGINE
 # ============================================================
 
-def png_chunk(
-    chunk_type,
-    data,
-):
+def png_chunk(chunk_type, data):
     return (
-        struct.pack(
-            ">I",
-            len(data),
-        )
+        struct.pack(">I", len(data))
         + chunk_type
         + data
         + struct.pack(
             ">I",
-            zlib.crc32(
-                chunk_type + data
-            ) & 0xffffffff,
+            zlib.crc32(chunk_type + data) & 0xffffffff,
         )
     )
 
 
-def make_png(
-    width,
-    height,
-    pixels,
-):
-    raw = b"".join(
-        b"\0" + bytes(row)
-        for row in pixels
-    )
+def make_png(width, height, pixels):
+    raw = b"".join(b"\0" + bytes(row) for row in pixels)
 
     return (
         b"\x89PNG\r\n\x1a\n"
         + png_chunk(
             b"IHDR",
-            struct.pack(
-                ">IIBBBBB",
-                width,
-                height,
-                8,
-                2,
-                0,
-                0,
-                0,
-            ),
+            struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0),
         )
-        + png_chunk(
-            b"IDAT",
-            zlib.compress(
-                raw,
-                6,
-            ),
-        )
-        + png_chunk(
-            b"IEND",
-            b"",
-        )
+        + png_chunk(b"IDAT", zlib.compress(raw, 6))
+        + png_chunk(b"IEND", b"")
     )
 
 
-def create_canvas(
-    width,
-    height,
-):
-    background = (
-        14,
-        18,
-        24,
-    )
-
-    return [
-        bytearray(
-            background * width
-        )
-        for _ in range(height)
-    ]
+def create_canvas(width, height):
+    background = (14, 18, 24)
+    return [bytearray(background * width) for _ in range(height)]
 
 
-def put_pixel(
-    pixels,
-    x,
-    y,
-    color,
-):
+def put_pixel(pixels, x, y, color):
     if y < 0 or y >= len(pixels):
         return
 
@@ -2271,244 +1750,95 @@ def put_pixel(
         return
 
     index = x * 3
-
-    pixels[y][index:index + 3] = bytes(
-        color
-    )
+    pixels[y][index:index + 3] = bytes(color)
 
 
-def draw_line(
-    pixels,
-    x1,
-    y1,
-    x2,
-    y2,
-    color,
-    thickness=1,
-):
-    steps = max(
-        abs(x2 - x1),
-        abs(y2 - y1),
-        1,
-    )
+def draw_line(pixels, x1, y1, x2, y2, color, thickness=1):
+    steps = max(abs(x2 - x1), abs(y2 - y1), 1)
 
-    for i in range(
-        steps + 1
-    ):
-        x = int(
-            x1
-            + (x2 - x1)
-            * i
-            / steps
-        )
+    for i in range(steps + 1):
+        x = int(x1 + (x2 - x1) * i / steps)
+        y = int(y1 + (y2 - y1) * i / steps)
 
-        y = int(
-            y1
-            + (y2 - y1)
-            * i
-            / steps
-        )
-
-        for dx in range(
-            -thickness // 2,
-            thickness // 2 + 1,
-        ):
-            for dy in range(
-                -thickness // 2,
-                thickness // 2 + 1,
-            ):
-                put_pixel(
-                    pixels,
-                    x + dx,
-                    y + dy,
-                    color,
-                )
+        for dx in range(-thickness // 2, thickness // 2 + 1):
+            for dy in range(-thickness // 2, thickness // 2 + 1):
+                put_pixel(pixels, x + dx, y + dy, color)
 
 
-def draw_marker(
-    pixels,
-    x,
-    y,
-    color,
-    radius=7,
-):
-    for dx in range(
-        -radius,
-        radius + 1,
-    ):
-        for dy in range(
-            -radius,
-            radius + 1,
-        ):
-            if (
-                dx * dx
-                + dy * dy
-                <= radius * radius
-            ):
-                put_pixel(
-                    pixels,
-                    x + dx,
-                    y + dy,
-                    color,
-                )
+def draw_marker(pixels, x, y, color, radius=7):
+    for dx in range(-radius, radius + 1):
+        for dy in range(-radius, radius + 1):
+            if dx * dx + dy * dy <= radius * radius:
+                put_pixel(pixels, x + dx, y + dy, color)
 
 
-def fill_rect(
-    pixels,
-    x1,
-    y1,
-    x2,
-    y2,
-    color,
-):
-    x1 = max(
-        0,
-        int(x1),
-    )
+def fill_rect(pixels, x1, y1, x2, y2, color):
+    x1 = max(0, int(x1))
+    x2 = min(len(pixels[0]) // 3 - 1, int(x2))
+    y1 = max(0, int(y1))
+    y2 = min(len(pixels) - 1, int(y2))
 
-    x2 = min(
-        len(pixels[0]) // 3 - 1,
-        int(x2),
-    )
-
-    y1 = max(
-        0,
-        int(y1),
-    )
-
-    y2 = min(
-        len(pixels) - 1,
-        int(y2),
-    )
-
-    for y in range(
-        min(y1, y2),
-        max(y1, y2) + 1,
-    ):
+    for y in range(min(y1, y2), max(y1, y2) + 1):
         row = pixels[y]
-
-        for x in range(
-            min(x1, x2),
-            max(x1, x2) + 1,
-        ):
+        for x in range(min(x1, x2), max(x1, x2) + 1):
             index = x * 3
-
-            row[index:index + 3] = bytes(
-                color
-            )
+            row[index:index + 3] = bytes(color)
 
 
 # ============================================================
 # CHART
 # ============================================================
 
-def chart_png(
-    result,
-    trade=None,
-):
-    candles = result.get(
-        "candles_5m",
-        [],
-    )[-100:]
-
-    levels = strong_levels(
-        result.get(
-            "major_levels",
-            [],
-        )
-    )
+def chart_png(result, trade=None):
+    candles = result.get("candles_5m", [])[-100:]
+    levels = strong_levels(result.get("major_levels", []))
 
     values = []
 
     for candle in candles:
         try:
-            values.append(
-                float(candle["high"])
-            )
-
-            values.append(
-                float(candle["low"])
-            )
-
+            values.append(float(candle["high"]))
+            values.append(float(candle["low"]))
         except Exception:
             continue
 
     for level in levels:
         try:
-            values.append(
-                float(level["price"])
-            )
+            values.append(float(level["price"]))
         except Exception:
             pass
 
-    sweep = result.get(
-        "sweep"
-    )
+    sweep = result.get("sweep")
 
     if sweep:
-        for key in (
-            "level",
-            "extreme",
-        ):
+        for key in ("level", "extreme"):
             try:
-                values.append(
-                    float(sweep[key])
-                )
+                values.append(float(sweep[key]))
             except Exception:
                 pass
 
-    for key in (
-        "price",
-        "entry",
-        "sl",
-        "tp",
-        "exit_price",
-    ):
+    for key in ("price", "entry", "sl", "tp", "exit_price"):
         if result.get(key) is not None:
             try:
-                values.append(
-                    float(result[key])
-                )
+                values.append(float(result[key]))
             except Exception:
                 pass
 
     if trade:
-        for key in (
-            "entry",
-            "sl",
-            "tp",
-            "exit_price",
-            "last_price",
-        ):
+        for key in ("entry", "sl", "tp", "exit_price", "last_price"):
             if trade.get(key) is not None:
                 try:
-                    values.append(
-                        float(trade[key])
-                    )
+                    values.append(float(trade[key]))
                 except Exception:
                     pass
 
     if not values:
-        current = float(
-            result.get(
-                "price",
-                1,
-            )
-        )
-
-        values = [
-            current - 1,
-            current + 1,
-        ]
+        current = float(result.get("price", 1))
+        values = [current - 1, current + 1]
 
     low = min(values)
     high = max(values)
-
-    padding = (
-        (high - low) * 0.08
-        or 1
-    )
-
+    padding = (high - low) * 0.08 or 1
     low -= padding
     high += padding
 
@@ -2520,500 +1850,144 @@ def chart_png(
     top = 65
     bottom = 45
 
-    chart_width = (
-        width
-        - left
-        - right
-    )
+    chart_width = width - left - right
+    chart_height = height - top - bottom
 
-    chart_height = (
-        height
-        - top
-        - bottom
-    )
-
-    pixels = create_canvas(
-        width,
-        height,
-    )
+    pixels = create_canvas(width, height)
 
     def y(value):
-        return int(
-            top
-            + (
-                high - value
-            )
-            / (
-                high - low
-            )
-            * chart_height
-        )
+        return int(top + (high - value) / (high - low) * chart_height)
 
-    # ========================================================
-    # STAGE STRIPE
-    # ========================================================
-
-    stage = result.get(
-        "stage",
-        "WAIT",
-    )
+    stage = result.get("stage", "WAIT")
 
     stage_colors = {
-        "READY": (
-            60,
-            220,
-            140,
-        ),
-        "SWEPT": (
-            255,
-            165,
-            45,
-        ),
-        "15M_CONFIRMED": (
-            245,
-            205,
-            60,
-        ),
-        "WAIT": (
-            90,
-            100,
-            115,
-        ),
+        "READY": (60, 220, 140),
+        "SWEPT": (255, 165, 45),
+        "15M_CONFIRMED": (245, 205, 60),
+        "WAIT": (90, 100, 115),
     }
 
-    fill_rect(
-        pixels,
-        0,
-        0,
-        width,
-        10,
-        stage_colors.get(
-            stage,
-            (90, 100, 115),
-        ),
-    )
+    fill_rect(pixels, 0, 0, width, 10, stage_colors.get(stage, (90, 100, 115)))
 
-    # ========================================================
-    # GRID
-    # ========================================================
+    grid_color = (42, 48, 58)
 
-    grid_color = (
-        42,
-        48,
-        58,
-    )
-
-    for i in range(
-        1,
-        9,
-    ):
-        yy = (
-            top
-            + chart_height * i // 9
-        )
-
-        draw_line(
-            pixels,
-            left,
-            yy,
-            width - right,
-            yy,
-            grid_color,
-            1,
-        )
-
-    # ========================================================
-    # MAJOR LIQUIDITY ZONES
-    # ========================================================
+    for i in range(1, 9):
+        yy = top + chart_height * i // 9
+        draw_line(pixels, left, yy, width - right, yy, grid_color, 1)
 
     for level in levels:
-
         try:
-            level_price = float(
-                level["price"]
-            )
-
-            zone_low = float(
-                level.get(
-                    "zone_low",
-                    level_price * 0.998,
-                )
-            )
-
-            zone_high = float(
-                level.get(
-                    "zone_high",
-                    level_price * 1.002,
-                )
-            )
-
+            level_price = float(level["price"])
+            zone_low = float(level.get("zone_low", level_price * 0.998))
+            zone_high = float(level.get("zone_high", level_price * 1.002))
         except Exception:
             continue
 
         if level.get("type") == "BSL":
-            zone_color = (
-                65,
-                30,
-                38,
-            )
-
-            line_color = (
-                235,
-                80,
-                90,
-            )
-
+            zone_color = (65, 30, 38)
+            line_color = (235, 80, 90)
         else:
-            zone_color = (
-                25,
-                60,
-                42,
-            )
+            zone_color = (25, 60, 42)
+            line_color = (50, 210, 130)
 
-            line_color = (
-                50,
-                210,
-                130,
-            )
-
-        fill_rect(
-            pixels,
-            left,
-            y(zone_high),
-            width - right,
-            y(zone_low),
-            zone_color,
-        )
-
-        draw_line(
-            pixels,
-            left,
-            y(level_price),
-            width - right,
-            y(level_price),
-            line_color,
-            2,
-        )
-
-    # ========================================================
-    # CANDLES
-    # ========================================================
+        fill_rect(pixels, left, y(zone_high), width - right, y(zone_low), zone_color)
+        draw_line(pixels, left, y(level_price), width - right, y(level_price), line_color, 2)
 
     if candles:
+        spacing = chart_width / max(len(candles), 1)
+        candle_width = max(3, int(spacing * 0.58))
 
-        spacing = (
-            chart_width
-            / max(
-                len(candles),
-                1,
-            )
-        )
-
-        candle_width = max(
-            3,
-            int(
-                spacing * 0.58
-            ),
-        )
-
-        for i, candle in enumerate(
-            candles
-        ):
-
+        for i, candle in enumerate(candles):
             try:
-                open_price = float(
-                    candle["open"]
-                )
-
-                high_price = float(
-                    candle["high"]
-                )
-
-                low_price = float(
-                    candle["low"]
-                )
-
-                close_price = float(
-                    candle["close"]
-                )
-
+                open_price = float(candle["open"])
+                high_price = float(candle["high"])
+                low_price = float(candle["low"])
+                close_price = float(candle["close"])
             except Exception:
                 continue
 
-            x = int(
-                left
-                + (
-                    i + 0.5
-                )
-                * spacing
-            )
+            x = int(left + (i + 0.5) * spacing)
 
             if close_price >= open_price:
-                candle_color = (
-                    55,
-                    205,
-                    125,
-                )
+                candle_color = (55, 205, 125)
             else:
-                candle_color = (
-                    230,
-                    80,
-                    90,
-                )
+                candle_color = (230, 80, 90)
 
-            draw_line(
-                pixels,
-                x,
-                y(high_price),
-                x,
-                y(low_price),
-                candle_color,
-                1,
-            )
+            draw_line(pixels, x, y(high_price), x, y(low_price), candle_color, 1)
 
-            body_top = min(
-                y(open_price),
-                y(close_price),
-            )
-
-            body_bottom = max(
-                y(open_price),
-                y(close_price),
-            )
+            body_top = min(y(open_price), y(close_price))
+            body_bottom = max(y(open_price), y(close_price))
 
             if body_bottom <= body_top:
                 body_bottom = body_top + 1
 
-            for xx in range(
-                x - candle_width // 2,
-                x + candle_width // 2 + 1,
-            ):
-                for yy in range(
-                    body_top,
-                    body_bottom + 1,
-                ):
-                    put_pixel(
-                        pixels,
-                        xx,
-                        yy,
-                        candle_color,
-                    )
+            for xx in range(x - candle_width // 2, x + candle_width // 2 + 1):
+                for yy in range(body_top, body_bottom + 1):
+                    put_pixel(pixels, xx, yy, candle_color)
 
-    # ========================================================
-    # CURRENT PRICE
-    # ========================================================
-
-    current_price = result.get(
-        "price"
-    )
+    current_price = result.get("price")
 
     if current_price is not None:
-
         try:
-            current_price = float(
-                current_price
-            )
-
+            current_price = float(current_price)
             draw_line(
-                pixels,
-                left,
-                y(current_price),
-                width - right,
-                y(current_price),
-                (
-                    80,
-                    170,
-                    255,
-                ),
-                2,
+                pixels, left, y(current_price), width - right, y(current_price),
+                (80, 170, 255), 2,
             )
-
-            draw_marker(
-                pixels,
-                width - right - 8,
-                y(current_price),
-                (
-                    80,
-                    170,
-                    255,
-                ),
-                8,
-            )
-
+            draw_marker(pixels, width - right - 8, y(current_price), (80, 170, 255), 8)
         except Exception:
             pass
 
-    # ========================================================
-    # SWEEP
-    # ========================================================
-
     if sweep:
-
-        for key in (
-            "level",
-            "extreme",
-        ):
-
+        for key in ("level", "extreme"):
             try:
-                value = float(
-                    sweep[key]
-                )
-
-                draw_line(
-                    pixels,
-                    left,
-                    y(value),
-                    width - right,
-                    y(value),
-                    (
-                        255,
-                        165,
-                        40,
-                    ),
-                    3,
-                )
-
-                draw_marker(
-                    pixels,
-                    left + 15,
-                    y(value),
-                    (
-                        255,
-                        165,
-                        40,
-                    ),
-                    6,
-                )
-
+                value = float(sweep[key])
+                draw_line(pixels, left, y(value), width - right, y(value), (255, 165, 40), 3)
+                draw_marker(pixels, left + 15, y(value), (255, 165, 40), 6)
             except Exception:
                 continue
 
-    # ========================================================
-    # TRADE LEVELS
-    # ========================================================
-
-    trade_source = (
-        trade
-        or result
-    )
+    trade_source = trade or result
 
     trade_colors = {
-        "entry": (
-            255,
-            215,
-            70,
-        ),
-        "sl": (
-            235,
-            80,
-            90,
-        ),
-        "tp": (
-            80,
-            220,
-            150,
-        ),
-        "exit_price": (
-            180,
-            100,
-            255,
-        ),
+        "entry": (255, 215, 70),
+        "sl": (235, 80, 90),
+        "tp": (80, 220, 150),
+        "exit_price": (180, 100, 255),
     }
 
     for key, color in trade_colors.items():
-
         value = trade_source.get(key)
-
         if value is None:
             continue
 
         try:
             value = float(value)
-
-            draw_line(
-                pixels,
-                left,
-                y(value),
-                width - right,
-                y(value),
-                color,
-                3,
-            )
-
-            draw_marker(
-                pixels,
-                width - right - 10,
-                y(value),
-                color,
-                8,
-            )
-
+            draw_line(pixels, left, y(value), width - right, y(value), color, 3)
+            draw_marker(pixels, width - right - 10, y(value), color, 8)
         except Exception:
             continue
 
-    # ========================================================
-    # EXIT
-    # ========================================================
-
-    if (
-        trade
-        and trade.get("exit_price") is not None
-    ):
-
+    if trade and trade.get("exit_price") is not None:
         try:
-            exit_y = y(
-                float(
-                    trade["exit_price"]
-                )
-            )
-
-            exit_x = (
-                width
-                - right
-                - 55
-            )
-
-            draw_marker(
-                pixels,
-                exit_x,
-                exit_y,
-                (
-                    180,
-                    100,
-                    255,
-                ),
-                11,
-            )
-
+            exit_y = y(float(trade["exit_price"]))
+            exit_x = width - right - 55
+            draw_marker(pixels, exit_x, exit_y, (180, 100, 255), 11)
         except Exception:
             pass
 
-    return io.BytesIO(
-        make_png(
-            width,
-            height,
-            pixels,
-        )
-    )
+    return io.BytesIO(make_png(width, height, pixels))
 
 
 # ============================================================
 # START
 # ============================================================
 
-async def start(
-    update,
-    context,
-):
-    results = await asyncio.to_thread(
-        scan_all
-    )
+async def start(update, context):
+    results = await asyncio.to_thread(scan_all)
 
     await update.message.reply_text(
-        dashboard_message(
-            results,
-            update.effective_chat.id,
-        ),
+        dashboard_message(results, update.effective_chat.id),
         parse_mode="HTML",
         reply_markup=dashboard_keyboard(),
     )
@@ -3023,19 +1997,11 @@ async def start(
 # DASHBOARD
 # ============================================================
 
-async def dashboard_cmd(
-    update,
-    context,
-):
-    results = await asyncio.to_thread(
-        scan_all
-    )
+async def dashboard_cmd(update, context):
+    results = await asyncio.to_thread(scan_all)
 
     await update.message.reply_text(
-        dashboard_message(
-            results,
-            update.effective_chat.id,
-        ),
+        dashboard_message(results, update.effective_chat.id),
         parse_mode="HTML",
         reply_markup=dashboard_keyboard(),
     )
@@ -3045,59 +2011,37 @@ async def dashboard_cmd(
 # MARKET
 # ============================================================
 
-async def market_cmd(
-    update,
-    context,
-):
-    await dashboard_cmd(
-        update,
-        context,
-    )
+async def market_cmd(update, context):
+    await dashboard_cmd(update, context)
 
 
 # ============================================================
 # SEARCH
 # ============================================================
 
-async def search_cmd(
-    update,
-    context,
-):
-    results = await asyncio.to_thread(
-        scan_all
-    )
+async def search_cmd(update, context):
+    results = await asyncio.to_thread(scan_all)
 
     ready_items = []
 
     for coin, result in results.items():
-
         if result.get("error"):
             continue
 
         if (
             result.get("stage") == "READY"
-            and result.get("score", 0)
-            >= MIN_SCORE_READY
+            and result.get("score", 0) >= MIN_SCORE_READY
             and result.get("rr") is not None
             and float(result.get("rr")) >= MIN_RR
         ):
-            setup = save_ready_setup(
-                coin,
-                result,
-            )
+            setup = save_ready_setup(coin, result)
 
             if setup:
                 ready_items.append(
-                    (
-                        result.get("score", 0),
-                        coin,
-                        result,
-                        setup,
-                    )
+                    (result.get("score", 0), coin, result, setup)
                 )
 
     if not ready_items:
-
         await update.message.reply_text(
             (
                 "🔎 <b>READY СЕТАПОВ НЕТ</b>\n\n"
@@ -3109,26 +2053,15 @@ async def search_cmd(
             parse_mode="HTML",
             reply_markup=dashboard_keyboard(),
         )
-
         return
 
-    ready_items.sort(
-        key=lambda x: x[0],
-        reverse=True,
-    )
+    ready_items.sort(key=lambda x: x[0], reverse=True)
 
     for _, coin, result, setup in ready_items[:5]:
-
         await update.message.reply_text(
-            ready_message(
-                coin,
-                result,
-                setup,
-            ),
+            ready_message(coin, result, setup),
             parse_mode="HTML",
-            reply_markup=ready_keyboard(
-                setup
-            ),
+            reply_markup=ready_keyboard(setup),
         )
 
 
@@ -3136,39 +2069,27 @@ async def search_cmd(
 # CHART
 # ============================================================
 
-async def chart_cmd(
-    update,
-    context,
-):
+async def chart_cmd(update, context):
     coin = "SOL"
 
-    if (
-        context.args
-        and context.args[0].upper() in COINS
-    ):
+    if context.args and context.args[0].upper() in COINS:
         coin = context.args[0].upper()
 
-    await send_chart(
-        update.message,
-        coin,
-    )
+    await send_chart(update.message, coin)
 
 
 # ============================================================
 # SUBSCRIBE
 # ============================================================
 
-async def sub_cmd(
-    update,
-    context,
-):
+async def sub_cmd(update, context):
     chat_id = update.effective_chat.id
 
-    data = subscribers()
-
-    if chat_id not in data:
-        data.append(chat_id)
-        save_subscribers(data)
+    with _storage_lock:
+        data = subscribers()
+        if chat_id not in data:
+            data.append(chat_id)
+            save_subscribers(data)
 
     await update.message.reply_text(
         (
@@ -3189,17 +2110,13 @@ async def sub_cmd(
 # UNSUBSCRIBE
 # ============================================================
 
-async def unsub_cmd(
-    update,
-    context,
-):
+async def unsub_cmd(update, context):
     chat_id = update.effective_chat.id
 
-    save_subscribers([
-        x
-        for x in subscribers()
-        if x != chat_id
-    ])
+    with _storage_lock:
+        save_subscribers([
+            x for x in subscribers() if x != chat_id
+        ])
 
     await update.message.reply_text(
         (
@@ -3215,10 +2132,7 @@ async def unsub_cmd(
 # ACTIVE
 # ============================================================
 
-async def active_cmd(
-    update,
-    context,
-):
+async def active_cmd(update, context):
     chat_id = update.effective_chat.id
 
     await update.message.reply_text(
@@ -3232,10 +2146,7 @@ async def active_cmd(
 # JOURNAL
 # ============================================================
 
-async def journal_cmd(
-    update,
-    context,
-):
+async def journal_cmd(update, context):
     chat_id = update.effective_chat.id
 
     await update.message.reply_text(
@@ -3249,18 +2160,10 @@ async def journal_cmd(
 # STATUS
 # ============================================================
 
-async def status_cmd(
-    update,
-    context,
-):
+async def status_cmd(update, context):
     active = load_active_trades()
 
-    active_count = len([
-        x
-        for x in active
-        if x.get("status") == "OPEN"
-    ])
-
+    active_count = len([x for x in active if x.get("status") == "OPEN"])
     journal = load_journal()
 
     await update.message.reply_text(
@@ -3296,57 +2199,30 @@ async def status_cmd(
 # ============================================================
 
 async def monitor(app):
-
-    notification_state = (
-        load_notification_state()
-    )
+    notification_state = load_notification_state()
 
     while True:
-
-        started = (
-            asyncio.get_running_loop().time()
-        )
+        started = asyncio.get_running_loop().time()
 
         try:
+            results = await asyncio.to_thread(scan_all)
 
-            results = await asyncio.to_thread(
-                scan_all
-            )
-
-            # -----------------------------------------------
             # ACTIVE TRADES
-            # -----------------------------------------------
+            await monitor_active_trades(app, results)
 
-            await monitor_active_trades(
-                app,
-                results,
-            )
-
-            # -----------------------------------------------
             # SIGNAL NOTIFICATIONS
-            # -----------------------------------------------
-
             state_changed = False
 
             for coin, result in results.items():
-
                 if result.get("error"):
                     continue
 
-                stage = result.get(
-                    "stage",
-                    "WAIT",
-                )
+                stage = result.get("stage", "WAIT")
 
                 if stage != "READY":
                     continue
 
-                score = int(
-                    result.get(
-                        "score",
-                        0,
-                    )
-                )
+                score = int(result.get("score", 0))
 
                 if score < MIN_SCORE_READY:
                     continue
@@ -3364,43 +2240,18 @@ async def monitor(app):
                 if rr < MIN_RR:
                     continue
 
-                # -------------------------------------------
-                # СОЗДАЁМ SNAPSHOT
-                # -------------------------------------------
-
-                setup = save_ready_setup(
-                    coin,
-                    result,
-                )
+                setup = save_ready_setup(coin, result)
 
                 if setup is None:
                     continue
 
-                # -------------------------------------------
-                # УНИКАЛЬНЫЙ ID
-                # -------------------------------------------
-
-                signal_key = (
-                    setup["id"]
-                )
-
-                previous_key = (
-                    notification_state.get(
-                        coin
-                    )
-                )
+                signal_key = setup["id"]
+                previous_key = notification_state.get(coin)
 
                 if previous_key == signal_key:
                     continue
 
-                # -------------------------------------------
-                # НОВЫЙ READY
-                # -------------------------------------------
-
-                notification_state[coin] = (
-                    signal_key
-                )
-
+                notification_state[coin] = signal_key
                 state_changed = True
 
                 print(
@@ -3413,55 +2264,31 @@ async def monitor(app):
                     f"score={setup['score']}"
                 )
 
-                await broadcast_ready(
-                    app,
-                    coin,
-                    result,
-                    setup,
-                )
+                await broadcast_ready(app, coin, result, setup)
 
             if state_changed:
-                save_notification_state(
-                    notification_state
-                )
+                save_notification_state(notification_state)
 
         except Exception as exc:
-            print(
-                "MONITOR ERROR:",
-                exc,
-            )
+            print("MONITOR ERROR:", exc)
 
-        elapsed = (
-            asyncio.get_running_loop().time()
-            - started
-        )
+        elapsed = asyncio.get_running_loop().time() - started
 
-        await asyncio.sleep(
-            max(
-                1,
-                CHECK_INTERVAL - elapsed,
-            )
-        )
+        await asyncio.sleep(max(1, CHECK_INTERVAL - elapsed))
 
 
 # ============================================================
 # CALLBACK HELPER
 # ============================================================
 
-async def edit_query(
-    query,
-    text,
-    keyboard=None,
-):
+async def edit_query(query, text, keyboard=None):
     try:
         await query.edit_message_text(
             text,
             parse_mode="HTML",
             reply_markup=keyboard,
         )
-
         return True
-
     except Exception:
         return False
 
@@ -3470,10 +2297,7 @@ async def edit_query(
 # CALLBACKS
 # ============================================================
 
-async def callbacks(
-    update,
-    context,
-):
+async def callbacks(update, context):
     query = update.callback_query
 
     await query.answer()
@@ -3481,135 +2305,64 @@ async def callbacks(
     data = query.data
     chat_id = query.message.chat_id
 
-    # ========================================================
     # DASHBOARD
-    # ========================================================
+    if data in ("start", "dashboard"):
+        results = await asyncio.to_thread(scan_all)
+        text = dashboard_message(results, chat_id)
 
-    if data in (
-        "start",
-        "dashboard",
-    ):
-
-        results = await asyncio.to_thread(
-            scan_all
-        )
-
-        text = dashboard_message(
-            results,
-            chat_id,
-        )
-
-        if not await edit_query(
-            query,
-            text,
-            dashboard_keyboard(),
-        ):
+        if not await edit_query(query, text, dashboard_keyboard()):
             await query.message.reply_text(
                 text,
                 parse_mode="HTML",
                 reply_markup=dashboard_keyboard(),
             )
-
         return
 
-    # ========================================================
     # MARKET
-    # ========================================================
-
     if data == "market":
+        results = await asyncio.to_thread(scan_all)
+        text = dashboard_message(results, chat_id)
 
-        results = await asyncio.to_thread(
-            scan_all
-        )
-
-        text = dashboard_message(
-            results,
-            chat_id,
-        )
-
-        if not await edit_query(
-            query,
-            text,
-            dashboard_keyboard(),
-        ):
+        if not await edit_query(query, text, dashboard_keyboard()):
             await query.message.reply_text(
                 text,
                 parse_mode="HTML",
                 reply_markup=dashboard_keyboard(),
             )
-
         return
 
-    # ========================================================
     # READY FILTER
-    # ========================================================
-
     if data == "filter_ready":
+        results = await asyncio.to_thread(scan_all)
+        text = ready_filter_message(results)
 
-        results = await asyncio.to_thread(
-            scan_all
-        )
-
-        text = ready_filter_message(
-            results
-        )
-
-        await edit_query(
-            query,
-            text,
-            ready_filter_keyboard(
-                results
-            ),
-        )
-
+        await edit_query(query, text, ready_filter_keyboard(results))
         return
 
-    # ========================================================
     # SEARCH
-    # ========================================================
-
     if data == "search":
-
-        results = await asyncio.to_thread(
-            scan_all
-        )
+        results = await asyncio.to_thread(scan_all)
 
         ready = []
 
         for coin, result in results.items():
-
             if result.get("error"):
                 continue
 
             if (
                 result.get("stage") == "READY"
-                and result.get("score", 0)
-                >= MIN_SCORE_READY
+                and result.get("score", 0) >= MIN_SCORE_READY
                 and result.get("rr") is not None
-                and float(result.get("rr"))
-                >= MIN_RR
+                and float(result.get("rr")) >= MIN_RR
             ):
-
-                setup = save_ready_setup(
-                    coin,
-                    result,
-                )
+                setup = save_ready_setup(coin, result)
 
                 if setup:
                     ready.append(
-                        (
-                            result.get(
-                                "score",
-                                0,
-                            ),
-                            coin,
-                            result,
-                            setup,
-                        )
+                        (result.get("score", 0), coin, result, setup)
                     )
 
         if not ready:
-
             await edit_query(
                 query,
                 (
@@ -3618,106 +2371,56 @@ async def callbacks(
                 ),
                 dashboard_keyboard(),
             )
-
             return
 
-        ready.sort(
-            key=lambda x: x[0],
-            reverse=True,
-        )
+        ready.sort(key=lambda x: x[0], reverse=True)
 
         _, coin, result, setup = ready[0]
 
         await edit_query(
             query,
-            ready_message(
-                coin,
-                result,
-                setup,
-            ),
-            ready_keyboard(
-                setup
-            ),
+            ready_message(coin, result, setup),
+            ready_keyboard(setup),
         )
-
         return
 
-    # ========================================================
     # COIN
-    # ========================================================
-
     if data.startswith("coin_"):
-
-        coin = data.split(
-            "_",
-            1,
-        )[1]
+        coin = data.split("_", 1)[1]
 
         if coin not in COINS:
             return
 
-        result = await asyncio.to_thread(
-            build_analysis,
-            COINS[coin],
-        )
+        result = await asyncio.to_thread(build_analysis, COINS[coin])
 
         setup = None
 
         if (
             result.get("stage") == "READY"
-            and result.get("score", 0)
-            >= MIN_SCORE_READY
+            and result.get("score", 0) >= MIN_SCORE_READY
         ):
-            setup = save_ready_setup(
-                coin,
-                result,
-            )
+            setup = save_ready_setup(coin, result)
 
-        text = coin_message(
-            coin,
-            result,
-        )
+        text = coin_message(coin, result)
 
         if not await edit_query(
-            query,
-            text,
-            coin_keyboard(
-                coin,
-                result,
-                setup,
-            ),
+            query, text, coin_keyboard(coin, result, setup)
         ):
             await query.message.reply_text(
                 text,
                 parse_mode="HTML",
-                reply_markup=coin_keyboard(
-                    coin,
-                    result,
-                    setup,
-                ),
+                reply_markup=coin_keyboard(coin, result, setup),
             )
-
         return
 
-    # ========================================================
     # ENTER
-    # ========================================================
-
     if data.startswith("enter_"):
-
-        setup_id = data.split(
-            "_",
-            1,
-        )[1]
+        setup_id = data.split("_", 1)[1]
 
         pending = load_pending_setups()
-
-        setup = pending.get(
-            setup_id
-        )
+        setup = pending.get(setup_id)
 
         if not setup:
-
             await edit_query(
                 query,
                 (
@@ -3726,16 +2429,11 @@ async def callbacks(
                 ),
                 dashboard_keyboard(),
             )
-
             return
 
-        trade, created = activate_trade(
-            setup,
-            chat_id,
-        )
+        trade, created = activate_trade(setup, chat_id)
 
         if not created:
-
             await edit_query(
                 query,
                 (
@@ -3749,7 +2447,6 @@ async def callbacks(
                 ),
                 active_keyboard(chat_id),
             )
-
             return
 
         await edit_query(
@@ -3768,156 +2465,81 @@ async def callbacks(
             ),
             active_keyboard(chat_id),
         )
-
         return
 
-    # ========================================================
     # CHART MENU
-    # ========================================================
-
     if data == "charts":
-
         await edit_query(
             query,
             "📈 <b>ВЫБЕРИ МОНЕТУ</b>",
             chart_keyboard(),
         )
-
         return
 
-    # ========================================================
     # CHART
-    # ========================================================
-
     if data.startswith("chart_"):
-
-        coin = data.split(
-            "_",
-            1,
-        )[1]
+        coin = data.split("_", 1)[1]
 
         if coin not in COINS:
             return
 
-        await send_chart(
-            query.message,
-            coin,
-        )
-
+        await send_chart(query.message, coin)
         return
 
-    # ========================================================
     # ACTIVE
-    # ========================================================
-
     if data == "active":
+        text = active_message(chat_id)
 
-        text = active_message(
-            chat_id
-        )
-
-        if not await edit_query(
-            query,
-            text,
-            active_keyboard(chat_id),
-        ):
+        if not await edit_query(query, text, active_keyboard(chat_id)):
             await query.message.reply_text(
                 text,
                 parse_mode="HTML",
                 reply_markup=active_keyboard(chat_id),
             )
-
         return
 
-    # ========================================================
     # ACTIVE TRADE
-    # ========================================================
-
     if data.startswith("active_trade_"):
+        trade_id = data.split("_", 2)[2]
 
-        trade_id = data.split(
-            "_",
-            2,
-        )[2]
-
-        trades = user_active_trades(
-            chat_id
-        )
+        trades = user_active_trades(chat_id)
 
         trade = next(
-            (
-                x
-                for x in trades
-                if x.get("id") == trade_id
-            ),
+            (x for x in trades if x.get("id") == trade_id),
             None,
         )
 
         if not trade:
-
             await edit_query(
                 query,
                 "⚠️ Сделка больше не активна.",
                 dashboard_keyboard(),
             )
-
             return
 
-        coin = trade.get(
-            "coin",
-            "SOL",
-        )
+        coin = trade.get("coin", "SOL")
+        result = await asyncio.to_thread(build_analysis, COINS[coin])
 
-        result = await asyncio.to_thread(
-            build_analysis,
-            COINS[coin],
-        )
+        trade["last_price"] = result.get("price", trade.get("last_price"))
 
-        trade["last_price"] = result.get(
-            "price",
-            trade.get("last_price"),
-        )
-
-        await send_chart(
-            query.message,
-            coin,
-            result=result,
-            trade=trade,
-        )
-
+        await send_chart(query.message, coin, result=result, trade=trade)
         return
 
-    # ========================================================
     # JOURNAL
-    # ========================================================
-
     if data == "journal":
+        text = journal_message(chat_id)
 
-        text = journal_message(
-            chat_id
-        )
-
-        if not await edit_query(
-            query,
-            text,
-            journal_keyboard(),
-        ):
+        if not await edit_query(query, text, journal_keyboard()):
             await query.message.reply_text(
                 text,
                 parse_mode="HTML",
                 reply_markup=journal_keyboard(),
             )
-
         return
 
-    # ========================================================
     # NOTIFICATIONS
-    # ========================================================
-
     if data == "notifications":
-
         if is_subscribed(chat_id):
-
             text = (
                 "🔔 <b>УВЕДОМЛЕНИЯ ВКЛЮЧЕНЫ</b>\n\n"
                 "Ты получаешь только:\n\n"
@@ -3928,7 +2550,6 @@ async def callbacks(
                 "❌ 15M\n"
                 "❌ WAIT"
             )
-
             keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -3943,15 +2564,12 @@ async def callbacks(
                     ),
                 ],
             ])
-
         else:
-
             text = (
                 "🔕 <b>УВЕДОМЛЕНИЯ ВЫКЛЮЧЕНЫ</b>\n\n"
                 "Можно включить уведомления "
                 "только для готовых READY-сетапов."
             )
-
             keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -3967,25 +2585,16 @@ async def callbacks(
                 ],
             ])
 
-        await edit_query(
-            query,
-            text,
-            keyboard,
-        )
-
+        await edit_query(query, text, keyboard)
         return
 
-    # ========================================================
     # SUBSCRIBE
-    # ========================================================
-
     if data == "subscribe":
-
-        data_list = subscribers()
-
-        if chat_id not in data_list:
-            data_list.append(chat_id)
-            save_subscribers(data_list)
+        with _storage_lock:
+            data_list = subscribers()
+            if chat_id not in data_list:
+                data_list.append(chat_id)
+                save_subscribers(data_list)
 
         await edit_query(
             query,
@@ -3996,20 +2605,14 @@ async def callbacks(
             ),
             dashboard_keyboard(),
         )
-
         return
 
-    # ========================================================
     # UNSUBSCRIBE
-    # ========================================================
-
     if data == "unsubscribe":
-
-        save_subscribers([
-            x
-            for x in subscribers()
-            if x != chat_id
-        ])
+        with _storage_lock:
+            save_subscribers([
+                x for x in subscribers() if x != chat_id
+            ])
 
         await edit_query(
             query,
@@ -4019,23 +2622,13 @@ async def callbacks(
             ),
             dashboard_keyboard(),
         )
-
         return
 
-    # ========================================================
     # STATUS
-    # ========================================================
-
     if data == "status":
-
         active = load_active_trades()
 
-        active_count = len([
-            x
-            for x in active
-            if x.get("status") == "OPEN"
-        ])
-
+        active_count = len([x for x in active if x.get("status") == "OPEN"])
         journal = load_journal()
 
         await edit_query(
@@ -4063,7 +2656,6 @@ async def callbacks(
             ),
             dashboard_keyboard(),
         )
-
         return
 
 
@@ -4071,61 +2663,25 @@ async def callbacks(
 # POST INIT
 # ============================================================
 
-async def post_init(
-    application,
-):
+async def post_init(application):
     commands = [
-        (
-            "start",
-            "TradeMind Dashboard",
-        ),
-        (
-            "market",
-            "Рынок",
-        ),
-        (
-            "search",
-            "Поиск READY",
-        ),
-        (
-            "chart",
-            "График",
-        ),
-        (
-            "active",
-            "Активные сделки",
-        ),
-        (
-            "journal",
-            "Журнал",
-        ),
-        (
-            "status",
-            "Статус",
-        ),
-        (
-            "subscribe",
-            "Включить READY уведомления",
-        ),
-        (
-            "unsubscribe",
-            "Выключить уведомления",
-        ),
+        ("start", "TradeMind Dashboard"),
+        ("market", "Рынок"),
+        ("search", "Поиск READY"),
+        ("chart", "График"),
+        ("active", "Активные сделки"),
+        ("journal", "Журнал"),
+        ("status", "Статус"),
+        ("subscribe", "Включить READY уведомления"),
+        ("unsubscribe", "Выключить уведомления"),
     ]
 
     await application.bot.set_my_commands([
-        BotCommand(
-            command,
-            description,
-        )
+        BotCommand(command, description)
         for command, description in commands
     ])
 
-    application.create_task(
-        monitor(
-            application
-        )
-    )
+    application.create_task(monitor(application))
 
 
 # ============================================================
@@ -4133,11 +2689,8 @@ async def post_init(
 # ============================================================
 
 def main():
-
     if not TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN не найден"
-        )
+        raise RuntimeError("BOT_TOKEN не найден")
 
     application = (
         Application
@@ -4148,70 +2701,25 @@ def main():
     )
 
     handlers = [
-        (
-            "start",
-            start,
-        ),
-        (
-            "market",
-            market_cmd,
-        ),
-        (
-            "search",
-            search_cmd,
-        ),
-        (
-            "chart",
-            chart_cmd,
-        ),
-        (
-            "active",
-            active_cmd,
-        ),
-        (
-            "journal",
-            journal_cmd,
-        ),
-        (
-            "status",
-            status_cmd,
-        ),
-        (
-            "subscribe",
-            sub_cmd,
-        ),
-        (
-            "unsubscribe",
-            unsub_cmd,
-        ),
+        ("start", start),
+        ("market", market_cmd),
+        ("search", search_cmd),
+        ("chart", chart_cmd),
+        ("active", active_cmd),
+        ("journal", journal_cmd),
+        ("status", status_cmd),
+        ("subscribe", sub_cmd),
+        ("unsubscribe", unsub_cmd),
     ]
 
     for command, handler in handlers:
+        application.add_handler(CommandHandler(command, handler))
 
-        application.add_handler(
-            CommandHandler(
-                command,
-                handler,
-            )
-        )
+    application.add_handler(CallbackQueryHandler(callbacks))
 
-    application.add_handler(
-        CallbackQueryHandler(
-            callbacks
-        )
-    )
-
-    print(
-        f"TradeMind {STRATEGY_VERSION} started"
-    )
-
-    print(
-        f"Monitoring {len(COINS)} coins:"
-    )
-
-    print(
-        ", ".join(COINS.keys())
-    )
+    print(f"TradeMind {STRATEGY_VERSION} started")
+    print(f"Monitoring {len(COINS)} coins:")
+    print(", ".join(COINS.keys()))
 
     application.run_polling()
 
