@@ -50,10 +50,9 @@ MIN_RR = 2.0
 
 SCAN_CACHE_TTL = 5.0
 
-# Бэктест при старте — включён.
-# После анализа результатов поменяй на False.
 RUN_BACKTEST_ON_START = True
 BACKTEST_SYMBOL = "SOLUSDT"
+BACKTEST_MULTI = True
 
 
 COINS = {
@@ -441,7 +440,7 @@ def dashboard_message(results, chat_id=None):
         "→ 15M → 5M ILM → Entry",
         "",
         "⚡ Активный тренд ≥ 0.45",
-        "🔺 V-Recovery ≥ 0.45",
+        "🔺 V-Recovery ≥ 0.40",
         "💠 FVG bonus +15 max",
         "",
         "🔔 Автоуведомление: только READY.",
@@ -1763,7 +1762,7 @@ async def status_cmd(update, context):
          "🟡 15M confirmation\n"
          "🎯 5M ILM\n"
          "⚡ Trend ≥ 0.45\n"
-         "🔺 V-Recovery ≥ 0.45\n"
+         "🔺 V-Recovery ≥ 0.40\n"
          "📊 RR ≥ 1:2\n\n"
          "🕐 Работаем 24/7"),
         parse_mode="HTML",
@@ -2060,7 +2059,7 @@ async def callbacks(update, context):
              "🟡 15M confirmation\n"
              "🎯 5M ILM\n"
              "⚡ Trend ≥ 0.45\n"
-             "🔺 V-Recovery ≥ 0.45\n"
+             "🔺 V-Recovery ≥ 0.40\n"
              "📊 RR ≥ 1:2\n\n"
              "🕐 Работаем 24/7"),
             dashboard_keyboard())
@@ -2068,22 +2067,25 @@ async def callbacks(update, context):
 
 
 # ============================================================
-# POST INIT (с диагностическим бэктестом)
+# POST INIT
 # ============================================================
 
 async def post_init(application):
-    # ВРЕМЕННЫЙ БЛОК — прогнать бэктест при старте.
-    # После анализа поменяй RUN_BACKTEST_ON_START на False.
     if RUN_BACKTEST_ON_START:
         try:
             print("=" * 70, flush=True)
-            print("BACKTEST: запуск при старте бота", flush=True)
+            print("BACKTEST: запуск", flush=True)
             print("=" * 70, flush=True)
 
             import backtest
 
-            trades, diag = backtest.run_backtest(BACKTEST_SYMBOL, 12)
-            backtest.print_report(BACKTEST_SYMBOL, trades, diag)
+            if BACKTEST_MULTI:
+                print(">>> MULTI BACKTEST <<<", flush=True)
+                backtest.run_multi_backtest()
+            else:
+                trades, diag = backtest.run_backtest(
+                    BACKTEST_SYMBOL, 12)
+                backtest.print_report(BACKTEST_SYMBOL, trades, diag)
 
             print("=" * 70, flush=True)
             print("BACKTEST: завершён", flush=True)
