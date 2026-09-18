@@ -1,5 +1,5 @@
 # ============================================================
-# TradeMind 6.8
+# TradeMind 6.9
 # market.py
 #
 # Binance Spot market data
@@ -15,10 +15,16 @@
 # - Major Liquidity строится ТОЛЬКО из 1H
 # - 15M используется для strength / local context
 # - 5M и 1M не создают Major Liquidity
-# - Major уровень ближе 0.30% к цене отбрасывается
-# - уже swept liquidity (за последние 30 часов) не считается свежей
-# - текущая формирующаяся 1H свеча не используется
+# - Major уровень ближе MIN_MAJOR_DISTANCE_PCT к цене отбрасывается
+# - Level считается swept только при проколе >= SWEPT_MIN_DEPTH_PCT
+# - Текущая формирующаяся 1H свеча не используется
 # - klines кэшируются по TTL, HTTP с retry/backoff
+#
+# Изменения vs 6.8:
+# - MIN_MAJOR_DISTANCE_PCT 0.30 -> 0.20 (больше ближних уровней)
+# - SWING_RIGHT 2 -> 1 (новые свинги появляются быстрее)
+# - level_has_been_swept: требует минимальную глубину прокола,
+#   чтобы мелкий фитиль не убивал уровень
 # ============================================================
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ import requests
 # VERSION
 # ============================================================
 
-MARKET_VERSION = "6.8"
+MARKET_VERSION = "6.9"
 
 
 # ============================================================
@@ -83,7 +89,7 @@ COINS = {
 LOOKBACK_1H = 180
 LOOKBACK_15M = 200
 LOOKBACK_5M = 200
-LOOKBACK_1M = 30     # было 200 — избыточно
+LOOKBACK_1M = 30
 
 
 # ============================================================
@@ -106,7 +112,7 @@ _klines_lock = threading.RLock()
 # ============================================================
 
 SWING_LEFT = 2
-SWING_RIGHT = 2
+SWING_RIGHT = 1     # было 2 — уменьшили задержку подтверждения
 
 
 # ============================================================
@@ -119,9 +125,10 @@ ZONE_WIDTH_PCT = 0.20
 
 MIN_ZONE_GAP_PCT = 0.70
 
-MIN_MAJOR_DISTANCE_PCT = 0.30
+# Ближе этого к текущей цене — НЕ major.
+MIN_MAJOR_DISTANCE_PCT = 0.20   # было 0.30
 
-MIN_MAJOR_STRENGTH = 60.0
+MIN_MAJOR_STRENGTH = 58.0
 
 MAX_LEVELS_PER_SIDE = 4
 
@@ -134,10 +141,11 @@ MAX_TOTAL_LEVELS = 8
 
 MAX_LEVEL_AGE_1H = 120
 
-# Окно, в котором проверяем «уже снят ли уровень».
-# Если уровень был снят давно (>30 свечей назад) —
-# считаем его снова валидным.
 SWEEP_RECENT_LOOKBACK_1H = 30
+
+# Level считается "реально снятым" только если прокол
+# был глубже этого порога. Мелкие фитили не считаются sweep.
+SWEPT_MIN_DEPTH_PCT = 0.15
 
 
 # ============================================================
@@ -169,7 +177,7 @@ def _get_session() -> requests.Session:
     if session is None:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "TradeMind/6.8",
+            "User-Agent": "TradeMind/6.9",
             "Accept": "application/json",
         })
 
@@ -408,8 +416,6 @@ def find_swing_highs(
         left = candles[i - SWING_LEFT:i]
         right = candles[i + 1:i + 1 + SWING_RIGHT]
 
-        # Fix: плоские хаи больше не дублируются.
-        # Слева строго больше, справа >=.
         left_ok = all(high > candle_high(x) for x in left)
         right_ok = all(high >= candle_high(x) for x in right)
 
@@ -445,7 +451,6 @@ def find_swing_lows(
         left = candles[i - SWING_LEFT:i]
         right = candles[i + 1:i + 1 + SWING_RIGHT]
 
-        # Fix: плоские лоу больше не дублируются.
         left_ok = all(low < candle_low(x) for x in left)
         right_ok = all(low <= candle_low(x) for x in right)
 
@@ -553,8 +558,6 @@ def count_local_touches(
         high = candle_high(candle)
         low = candle_low(candle)
 
-        # Fix: свеча, прошедшая сквозь уровень,
-        # теперь тоже считается касанием.
         if low <= level_price <= high:
             touches += 1
             continue
@@ -579,8 +582,8 @@ def level_has_been_swept(
     candles: List[Dict[str, Any]],
 ) -> bool:
     """
-    Проверяем sweep только в недавнем окне.
-    Старый sweep (>30 свечей назад) не дисквалифицирует уровень.
+    Level считается снятым ТОЛЬКО если прокол был
+    глубже SWEPT_MIN_DEPTH_PCT. Мелкие фитили не считаются.
     """
 
     if not candles:
@@ -595,12 +598,22 @@ def level_has_been_swept(
         close = candle_close(candle)
 
         if level_type == "BSL":
+
             if high > level_price and close < level_price:
-                return True
+                depth_pct = (
+                    (high - level_price) / level_price * 100.0
+                )
+                if depth_pct >= SWEPT_MIN_DEPTH_PCT:
+                    return True
 
         elif level_type == "SSL":
+
             if low < level_price and close > level_price:
-                return True
+                depth_pct = (
+                    (level_price - low) / level_price * 100.0
+                )
+                if depth_pct >= SWEPT_MIN_DEPTH_PCT:
+                    return True
 
     return False
 
@@ -936,9 +949,6 @@ def detect_sweep(
     """
     LONG  -> SSL sweep
     SHORT -> BSL sweep
-
-    Только MAJOR уровни.
-    Возвращает лучший (самый близкий по глубине) sweep.
     """
 
     if direction not in {"LONG", "SHORT"}:
@@ -947,7 +957,6 @@ def detect_sweep(
     if not candles_1h:
         return None
 
-    # ---------- Normalize levels ----------
     normalized_levels = []
 
     if isinstance(levels, dict):
@@ -983,10 +992,6 @@ def detect_sweep(
         return None
 
     recent = confirmed[-MAX_SWEEP_LOOKBACK_1H:]
-
-    # ========================================================
-    # LONG -> SSL
-    # ========================================================
 
     if direction == "LONG":
 
@@ -1027,7 +1032,6 @@ def detect_sweep(
             if candidates:
 
                 candidates.sort(key=lambda x: x[0])
-
                 _, level, depth_pct = candidates[0]
 
                 return {
@@ -1042,10 +1046,6 @@ def detect_sweep(
                     "strength": float(level.get("strength", 0)),
                     "touches": int(level.get("touches", 1)),
                 }
-
-    # ========================================================
-    # SHORT -> BSL
-    # ========================================================
 
     if direction == "SHORT":
 
@@ -1086,7 +1086,6 @@ def detect_sweep(
             if candidates:
 
                 candidates.sort(key=lambda x: x[0])
-
                 _, level, depth_pct = candidates[0]
 
                 return {
@@ -1113,7 +1112,6 @@ def get_market_data(symbol: str = "SOLUSDT") -> Dict[str, Any]:
 
     symbol = _normalize_symbol(symbol)
 
-    # ---------- Parallel klines ----------
     with ThreadPoolExecutor(max_workers=4) as ex:
         f_1h = ex.submit(get_klines, "1h", LOOKBACK_1H, symbol)
         f_15m = ex.submit(get_klines, "15m", LOOKBACK_15M, symbol)
@@ -1125,9 +1123,6 @@ def get_market_data(symbol: str = "SOLUSDT") -> Dict[str, Any]:
         candles_5m = f_5m.result()
         candles_1m = f_1m.result()
 
-    # ---------- Price ----------
-    # Берём close последней 1m свечи.
-    # Это экономит один HTTP-запрос на символ.
     if candles_1m:
         price = float(candles_1m[-1]["close"])
     else:
@@ -1255,6 +1250,8 @@ def debug_symbol(symbol: str):
     print(f"Symbol: {symbol}")
     print(f"Major distance: {MIN_MAJOR_DISTANCE_PCT}%")
     print(f"Min strength: {MIN_MAJOR_STRENGTH}")
+    print(f"Swep min depth: {SWEPT_MIN_DEPTH_PCT}%")
+    print(f"Swing right: {SWING_RIGHT}")
     print(f"Klines TTL: {KLINES_TTL}")
     print("=" * 60)
 
