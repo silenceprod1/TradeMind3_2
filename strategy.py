@@ -1,31 +1,32 @@
 """
-TradeMind 6.11
+TradeMind 6.12
 
-Изменения vs 6.10:
-- MIN_5M_RECOVERY_RATIO: 0.33 -> 0.25
-- MIN_V_RECOVERY_FOR_READY: 0.45 -> 0.40
-- MAX_5M_ILM_CANDLES: 40 -> 60
-- MIN_5M_ILM_SWEEP_DISTANCE_PCT: 0.75 -> 1.5
+Изменения vs 6.11:
+- MIN_5M_RECOVERY_RATIO: 0.25 -> 0.20
+- MIN_5M_ILM_SWEEP_DISTANCE_PCT: 1.5 -> 3.0
+- resolve_target теперь принимает sl и перебирает major-уровни,
+  чтобы найти TP с RR >= MIN_RR. Если ближайший не даёт RR 2.0,
+  берётся следующий по расстоянию.
 """
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "6.11"
+STRATEGY_VERSION = "6.12"
 
 
 MIN_SCORE_READY = 80
 MIN_RR = 2.0
 SL_BUFFER_PCT = 0.20
 MIN_SWEEP_DEPTH_PCT = 0.15
-MIN_5M_RECOVERY_RATIO = 0.25
+MIN_5M_RECOVERY_RATIO = 0.20
 MIN_V_RECOVERY_FOR_READY = 0.40
 MIN_BODY_RATIO = 0.35
 MAX_SWEEP_AGE_1H = 24
 MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
-MIN_5M_ILM_SWEEP_DISTANCE_PCT = 1.5
+MIN_5M_ILM_SWEEP_DISTANCE_PCT = 3.0
 MIN_TARGET_DISTANCE_PCT = 0.30
 COUNTER_TREND_MIN_SCORE = 90
 
@@ -684,25 +685,72 @@ def detect_local_swing_target(candles_5m, candles_15m, direction, entry):
     return candidates[0]
 
 
-def resolve_target(major_levels, direction, entry, sweep_level,
+def resolve_target(major_levels, direction, entry, sl, sweep_level,
                    candles_5m, candles_15m, d1_context=None):
+    """
+    Ищем TP с RR >= MIN_RR.
+    Приоритет: D1 Point B -> major liquidity -> local swing.
+    Перебираем major-уровни по возрастанию расстояния от entry
+    и берём первый, который даёт RR >= MIN_RR.
+    """
+    entry_f = _f(entry)
+    sl_f = _f(sl)
+    if entry_f is None or sl_f is None:
+        return None, None, "Entry/SL некорректны."
+
+    risk = abs(entry_f - sl_f)
+    if risk <= 0:
+        return None, None, "Risk <= 0."
+
+    min_reward = risk * MIN_RR
+
+    # 1. D1 Point B — приоритет
     if d1_context:
         pb = _f(d1_context.get("point_b"))
         if pb is not None:
-            if direction == "LONG" and pb > entry:
-                d = (pb - entry) / entry * 100
-                if d >= MIN_TARGET_DISTANCE_PCT:
+            if direction == "LONG" and pb > entry_f:
+                reward = pb - entry_f
+                if reward >= min_reward:
                     return pb, "d1", f"TP = D1 Point B ({pb:.4f})."
-            elif direction == "SHORT" and pb < entry:
-                d = (entry - pb) / entry * 100
-                if d >= MIN_TARGET_DISTANCE_PCT:
+            elif direction == "SHORT" and pb < entry_f:
+                reward = entry_f - pb
+                if reward >= min_reward:
                     return pb, "d1", f"TP = D1 Point B ({pb:.4f})."
 
-    tp_major = next_target(major_levels, direction, entry, sweep_level)
-    if tp_major is not None:
-        return tp_major, "major", "TP = следующая свежая Major Liquidity."
+    # 2. Major liquidity — все подходящие
+    major_candidates = []
+    for level in major_levels or []:
+        if _is_swept_level(level):
+            continue
+        lp = _level_price(level)
+        if lp is None:
+            continue
+        if sweep_level is not None:
+            d_excl = _distance_pct(lp, sweep_level)
+            if d_excl is not None and d_excl < MIN_TARGET_DISTANCE_PCT:
+                continue
+        if direction == "LONG" and lp > entry_f:
+            major_candidates.append(lp)
+        elif direction == "SHORT" and lp < entry_f:
+            major_candidates.append(lp)
 
-    fb = detect_local_swing_target(candles_5m, candles_15m, direction, entry)
+    major_candidates.sort(key=lambda x: abs(x - entry_f))
+
+    # Первый, дающий RR >= MIN_RR
+    for candidate in major_candidates:
+        reward = abs(candidate - entry_f)
+        if reward >= min_reward:
+            return (candidate, "major",
+                    "TP = свежая Major Liquidity (RR >= 2).")
+
+    # Если ни один не даёт RR >= 2 — берём самый дальний
+    if major_candidates:
+        farthest = major_candidates[-1]
+        return (farthest, "major",
+                "TP = самый дальний Major (RR < 2).")
+
+    # 3. Local swing fallback
+    fb = detect_local_swing_target(candles_5m, candles_15m, direction, entry_f)
     if fb is not None:
         return fb["price"], "local", f"TP = ближайший {fb['source']}."
 
@@ -951,10 +999,15 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
         result["reason"] = "Не удалось построить корректный SL."
         return result
 
+    # resolve_target теперь принимает sl
     tp, tp_source, tp_reason = resolve_target(
-        major_levels=major_levels, direction=direction, entry=entry,
+        major_levels=major_levels,
+        direction=direction,
+        entry=entry,
+        sl=sl,
         sweep_level=sweep.get("level"),
-        candles_5m=candles_5m, candles_15m=candles_15m,
+        candles_5m=candles_5m,
+        candles_15m=candles_15m,
         d1_context=d1_context,
     )
     result["tp_reason"] = tp_reason
