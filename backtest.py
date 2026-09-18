@@ -1,13 +1,12 @@
 """
-Простой walk-forward бэктест TradeMind.
+Диагностический бэктест TradeMind.
 
-Прогоняет текущую логику strategy.py + market.py по историческим
-данным одной монеты. Считает win rate, средний PnL, max drawdown.
-
-БЕЗ LOOKAHEAD: на каждом шаге используются только закрытые свечи.
+Не только ищет READY-сигналы, но и показывает ВОРОНКУ:
+на каком шаге отваливаются сетапы и почему.
 """
 
 import argparse
+from collections import Counter
 from datetime import datetime, timezone
 
 from market import (
@@ -25,7 +24,6 @@ BT_LOOKBACK_5M = 1000
 BT_LOOKBACK_1M = 500
 
 WARMUP_1H = 150
-
 DEFAULT_MAX_HOURS = 12
 
 
@@ -54,8 +52,39 @@ def has_active_position(trades, ts_now):
 def pnl_pct(entry, exit_price, direction):
     if direction == "LONG":
         return (exit_price - entry) / entry * 100
-    else:
-        return (entry - exit_price) / entry * 100
+    return (entry - exit_price) / entry * 100
+
+
+def classify_reason(result):
+    """
+    Определяем краткую причину почему сетап не READY.
+    """
+    stage = result.get("stage", "WAIT")
+    reason = str(result.get("reason", "")).lower()
+
+    if stage == "READY":
+        return "READY"
+
+    if "major" in reason and ("нет" in reason or "ssl" in reason or "bsl" in reason):
+        return "no_major_level"
+    if "sweep" in reason and ("ждём" in reason or "wait" in reason):
+        return "no_sweep"
+    if "15m" in reason and "ждём" in reason:
+        return "no_15m_conf"
+    if "ilm" in reason:
+        return "no_5m_ilm"
+    if "rr" in reason and "<" in reason:
+        return "rr_too_low"
+    if "trend" in reason:
+        return "trend_blocked"
+    if "recovery" in reason:
+        return "v_recovery_blocked"
+    if "score" in reason:
+        return "score_too_low"
+    if "blocked" in reason or "заблок" in reason:
+        return "other_blocked"
+
+    return f"stage_{stage.lower()}"
 
 
 def simulate_trade(trade, candles_5m, start_ts, max_hours):
@@ -65,7 +94,6 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours):
     entry = trade["entry"]
 
     deadline = start_ts + max_hours * 3600 * 1000
-
     last_seen = None
     held = 0
 
@@ -90,15 +118,14 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours):
 
         if hit_tp and hit_sl:
             return ("SL", sl, c["open_time"], held)
-
         if hit_tp:
             return ("TP", tp, c["open_time"], held)
-
         if hit_sl:
             return ("SL", sl, c["open_time"], held)
 
     if last_seen is not None:
-        return ("TIMEOUT", last_seen["close"], last_seen["open_time"], held)
+        return ("TIMEOUT", last_seen["close"],
+                last_seen["open_time"], held)
 
     return ("TIMEOUT", entry, start_ts, 0)
 
@@ -107,7 +134,6 @@ def run_backtest(symbol, max_hours):
     symbol = _normalize_symbol(symbol)
 
     log(f"Символ: {symbol}")
-    log("Загрузка данных...")
 
     candles_1h = get_klines("1h", BT_LOOKBACK_1H, symbol)
     candles_15m = get_klines("15m", BT_LOOKBACK_15M, symbol)
@@ -115,19 +141,24 @@ def run_backtest(symbol, max_hours):
     candles_1m = get_klines("1m", BT_LOOKBACK_1M, symbol)
 
     if not candles_1h:
-        log("Нет данных по 1H.")
-        return []
+        log("Нет данных 1H")
+        return [], {}
 
-    log(f"Загружено: 1H={len(candles_1h)} 15M={len(candles_15m)} "
+    log(f"Данных: 1H={len(candles_1h)} 15M={len(candles_15m)} "
         f"5M={len(candles_5m)} 1M={len(candles_1m)}")
 
     if len(candles_1h) <= WARMUP_1H:
-        log(f"Мало данных 1H (нужно > {WARMUP_1H}).")
-        return []
+        return [], {}
 
     trades = []
+    stage_counter = Counter()
+    reason_counter = Counter()
+
+    # Для "почти сработавших": (score, ts, direction, stage, reason)
+    near_misses = []
+
     total = len(candles_1h) - WARMUP_1H
-    log(f"Шагов бэктеста: {total}")
+    log(f"Шагов: {total}")
 
     for i in range(WARMUP_1H, len(candles_1h)):
 
@@ -144,10 +175,7 @@ def run_backtest(symbol, max_hours):
         if len(c15) < 60 or len(c5) < 60:
             continue
 
-        if c1:
-            price = c1[-1]["close"]
-        else:
-            price = c1h[-1]["close"]
+        price = c1[-1]["close"] if c1 else c1h[-1]["close"]
 
         try:
             levels = find_major_liquidity(c1h, price, 12, c15, c5, c1)
@@ -168,7 +196,29 @@ def run_backtest(symbol, max_hours):
         except Exception:
             continue
 
-        if result.get("stage") != "READY":
+        stage = result.get("stage", "WAIT")
+        score = int(result.get("score", 0))
+        reason_key = classify_reason(result)
+
+        stage_counter[stage] += 1
+        reason_counter[reason_key] += 1
+
+        # near miss — только те, где stage не WAIT, но и не READY
+        # и вообще все с score >= 50
+        if score >= 50 and stage != "READY":
+            near_misses.append({
+                "ts": ts_now,
+                "direction": result.get("direction", "?"),
+                "stage": stage,
+                "score": score,
+                "reason_key": reason_key,
+                "reason": str(result.get("reason", ""))[:80],
+                "trend": result.get("trend_activity", 0),
+                "sweep": bool(sweep),
+                "ilm": bool(result.get("ilm")),
+            })
+
+        if stage != "READY":
             continue
 
         entry = result.get("entry")
@@ -185,14 +235,12 @@ def run_backtest(symbol, max_hours):
             "sl": float(sl),
             "tp": float(tp),
             "rr": result.get("rr"),
-            "score": result.get("score"),
+            "score": score,
             "open_ts": ts_now,
-            "signal_index": i,
         }
 
         res_type, exit_price, exit_ts, held = simulate_trade(
-            trade, candles_5m, ts_now, max_hours,
-        )
+            trade, candles_5m, ts_now, max_hours)
 
         trade["result"] = res_type
         trade["exit_price"] = exit_price
@@ -205,30 +253,76 @@ def run_backtest(symbol, max_hours):
         log(
             f"[{i:3}] {trade['direction']:5} "
             f"entry={entry:.4f} sl={sl:.4f} tp={tp:.4f} "
-            f"rr={trade['rr']:.2f} score={trade['score']} "
-            f"→ {res_type:7} "
-            f"pnl={trade['pnl']:+.2f}% ({held} × 5m)"
+            f"rr={trade['rr']:.2f} score={score} "
+            f"→ {res_type:7} pnl={trade['pnl']:+.2f}%"
         )
 
-    return trades
+    near_misses.sort(key=lambda x: x["score"], reverse=True)
+
+    diag = {
+        "stage_counter": stage_counter,
+        "reason_counter": reason_counter,
+        "near_misses": near_misses[:15],
+    }
+
+    return trades, diag
 
 
-def print_report(symbol, trades):
+def print_report(symbol, trades, diag):
 
     print()
     print("=" * 70)
     print(f"ОТЧЁТ БЭКТЕСТА — {symbol}")
     print("=" * 70)
 
-    total = len(trades)
+    stage_counter = diag.get("stage_counter", Counter())
+    reason_counter = diag.get("reason_counter", Counter())
+    near_misses = diag.get("near_misses", [])
 
-    if total == 0:
-        print("За период не было ни одного READY-сигнала.")
-        print()
-        print("Возможные причины:")
-        print("  1. Фильтры слишком строгие")
-        print("  2. Мало данных")
-        print("  3. Стратегия не подходит инструменту на этом периоде")
+    total = sum(stage_counter.values())
+
+    print()
+    print(f"Всего шагов проанализировано: {total}")
+    print()
+    print("РАСПРЕДЕЛЕНИЕ ПО СТАДИЯМ:")
+    for stage in ["READY", "15M_CONFIRMED", "SWEPT", "WAIT"]:
+        cnt = stage_counter.get(stage, 0)
+        pct = cnt / total * 100 if total else 0
+        print(f"  {stage:16} {cnt:4}  ({pct:.1f}%)")
+
+    print()
+    print("ТОП ПРИЧИН ОСТАНОВКИ:")
+    for reason, cnt in reason_counter.most_common(12):
+        pct = cnt / total * 100 if total else 0
+        print(f"  {reason:22} {cnt:4}  ({pct:.1f}%)")
+
+    print()
+    print("=" * 70)
+    print("ТОП-15 'ПОЧТИ СРАБОТАВШИХ' (score, stage, reason)")
+    print("=" * 70)
+    if not near_misses:
+        print("Нет сетапов с score >= 50")
+    else:
+        print(f"{'Дата':<17}{'Напр.':<6}{'Stage':<16}"
+              f"{'Score':<6}{'Trend':<7}{'Reason'}")
+        print("-" * 70)
+        for nm in near_misses:
+            print(
+                f"{ts_to_str(nm['ts']):<17}"
+                f"{nm['direction']:<6}"
+                f"{nm['stage']:<16}"
+                f"{nm['score']:<6}"
+                f"{nm['trend']:<7.2f}"
+                f"{nm['reason_key']}"
+            )
+
+    print()
+    print("=" * 70)
+    print("СДЕЛКИ (READY)")
+    print("=" * 70)
+
+    if not trades:
+        print("Нет READY-сигналов.")
         return
 
     tp = sum(1 for t in trades if t["result"] == "TP")
@@ -239,7 +333,7 @@ def print_report(symbol, trades):
     win_rate = tp / resolved * 100 if resolved else 0
 
     total_pnl = sum(t["pnl"] for t in trades)
-    avg_pnl = total_pnl / total
+    avg_pnl = total_pnl / len(trades)
 
     wins = [t["pnl"] for t in trades if t["pnl"] > 0]
     losses = [t["pnl"] for t in trades if t["pnl"] < 0]
@@ -258,93 +352,26 @@ def print_report(symbol, trades):
         if dd > max_dd:
             max_dd = dd
 
-    longs = [t for t in trades if t["direction"] == "LONG"]
-    shorts = [t for t in trades if t["direction"] == "SHORT"]
-
-    print()
-    print(f"Всего сделок: {total}")
-    print(f"  LONG:  {len(longs)}")
-    print(f"  SHORT: {len(shorts)}")
-    print()
-    print("Результаты:")
+    print(f"Всего сделок: {len(trades)}")
     print(f"  TP:      {tp}")
     print(f"  SL:      {sl}")
     print(f"  Timeout: {timeout}")
-    print()
-    print(f"Win rate:      {win_rate:.1f}%  (от {resolved} закрытых по TP/SL)")
-    print(f"Total PnL:     {total_pnl:+.2f}%")
-    print(f"Avg PnL:       {avg_pnl:+.2f}%")
-    print(f"Avg win:       {avg_win:+.2f}%")
-    print(f"Avg loss:      {avg_loss:+.2f}%")
-    print(f"Max DD:        -{max_dd:.2f}%")
-
-    gross_win = sum(wins)
-    gross_loss = abs(sum(losses))
-    if gross_loss > 0:
-        pf = gross_win / gross_loss
-        print(f"Profit Factor: {pf:.2f}")
-
-    print()
-    print("=" * 70)
-    print("ВСЕ СДЕЛКИ")
-    print("=" * 70)
-    print(f"{'Дата (UTC)':<17}{'Напр.':<6}{'Entry':<12}"
-          f"{'RR':<6}{'Score':<6}{'Результат':<10}{'PnL':<10}")
-    print("-" * 70)
-
-    for t in trades:
-        print(
-            f"{ts_to_str(t['open_ts']):<17}"
-            f"{t['direction']:<6}"
-            f"{t['entry']:<12.4f}"
-            f"{t['rr']:<6.2f}"
-            f"{t['score']:<6}"
-            f"{t['result']:<10}"
-            f"{t['pnl']:+.2f}%"
-        )
+    print(f"Win rate: {win_rate:.1f}%")
+    print(f"Total PnL: {total_pnl:+.2f}%")
+    print(f"Avg PnL:   {avg_pnl:+.2f}%")
+    print(f"Avg win:   {avg_win:+.2f}%")
+    print(f"Avg loss:  {avg_loss:+.2f}%")
+    print(f"Max DD:    -{max_dd:.2f}%")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TradeMind backtest")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="SOLUSDT")
     parser.add_argument("--max-hours", type=int, default=DEFAULT_MAX_HOURS)
-    parser.add_argument("--multi", action="store_true")
-
     args = parser.parse_args()
-    symbols = [args.symbol]
 
-    if args.multi:
-        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT",
-                   "BNBUSDT", "XRPUSDT", "DOGEUSDT"]
-
-    all_summary = []
-
-    for sym in symbols:
-        print()
-        print("-" * 70)
-        print(f"> {sym}")
-        print("-" * 70)
-
-        trades = run_backtest(sym, args.max_hours)
-        print_report(sym, trades)
-
-        if trades:
-            tp = sum(1 for t in trades if t["result"] == "TP")
-            sl = sum(1 for t in trades if t["result"] == "SL")
-            resolved = tp + sl
-            wr = tp / resolved * 100 if resolved else 0
-            pnl = sum(t["pnl"] for t in trades)
-            all_summary.append((sym, len(trades), wr, pnl))
-
-    if args.multi and all_summary:
-        print()
-        print("-" * 70)
-        print("СВОДКА")
-        print("-" * 70)
-        print(f"{'Символ':<12}{'Сделок':<10}{'WinRate':<12}{'PnL':<12}")
-        print("-" * 70)
-        for sym, cnt, wr, pnl in all_summary:
-            print(f"{sym:<12}{cnt:<10}{wr:<12.1f}{pnl:+.2f}%")
+    trades, diag = run_backtest(args.symbol, args.max_hours)
+    print_report(args.symbol, trades, diag)
 
 
 if __name__ == "__main__":
