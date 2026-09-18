@@ -1,11 +1,10 @@
 """
-Диагностический бэктест TradeMind.
-
-Не только ищет READY-сигналы, но и показывает ВОРОНКУ:
-на каком шаге отваливаются сетапы и почему.
+Диагностический бэктест v3.
+Логирует exceptions, разбивает no_major_level по типам, фиксит классификатор.
 """
 
 import argparse
+import traceback
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -55,9 +54,10 @@ def pnl_pct(entry, exit_price, direction):
     return (entry - exit_price) / entry * 100
 
 
-def classify_reason(result):
+def classify_reason(result, market_info):
     """
-    Определяем краткую причину почему сетап не READY.
+    Возвращает ключ причины, почему сетап не READY.
+    Учитывает market_info — сколько BSL/SSL было найдено.
     """
     stage = result.get("stage", "WAIT")
     reason = str(result.get("reason", "")).lower()
@@ -65,22 +65,37 @@ def classify_reason(result):
     if stage == "READY":
         return "READY"
 
-    if "major" in reason and ("нет" in reason or "ssl" in reason or "bsl" in reason):
-        return "no_major_level"
-    if "sweep" in reason and ("ждём" in reason or "wait" in reason):
-        return "no_sweep"
+    # Разбиваем no_major_level по типам
+    if "нет актуальной major" in reason or "нет актуальной major ssl" in reason or "нет актуальной major bsl" in reason:
+        n_bsl = market_info.get("bsl_count", 0)
+        n_ssl = market_info.get("ssl_count", 0)
+
+        if n_bsl == 0 and n_ssl == 0:
+            return "no_levels_both"
+        if n_bsl == 0:
+            return "no_levels_bsl"
+        if n_ssl == 0:
+            return "no_levels_ssl"
+        return "no_levels_matching"
+
+    # Сначала проверяем продвинутые стадии — они важнее
     if "15m" in reason and "ждём" in reason:
         return "no_15m_conf"
     if "ilm" in reason:
         return "no_5m_ilm"
     if "rr" in reason and "<" in reason:
         return "rr_too_low"
-    if "trend" in reason:
+    if "trend" in reason and "блок" in reason:
         return "trend_blocked"
-    if "recovery" in reason:
+    if "recovery" in reason and "блок" in reason:
         return "v_recovery_blocked"
-    if "score" in reason:
+    if "score" in reason and "блок" in reason:
         return "score_too_low"
+
+    # Потом уже sweep
+    if "ждём" in reason and "sweep" in reason:
+        return "no_sweep"
+
     if "blocked" in reason or "заблок" in reason:
         return "other_blocked"
 
@@ -132,7 +147,6 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours):
 
 def run_backtest(symbol, max_hours):
     symbol = _normalize_symbol(symbol)
-
     log(f"Символ: {symbol}")
 
     candles_1h = get_klines("1h", BT_LOOKBACK_1H, symbol)
@@ -153,8 +167,9 @@ def run_backtest(symbol, max_hours):
     trades = []
     stage_counter = Counter()
     reason_counter = Counter()
+    exception_counter = Counter()
+    market_stats = Counter()
 
-    # Для "почти сработавших": (score, ts, direction, stage, reason)
     near_misses = []
 
     total = len(candles_1h) - WARMUP_1H
@@ -173,12 +188,32 @@ def run_backtest(symbol, max_hours):
         c1 = candles_until(candles_1m, ts_now)
 
         if len(c15) < 60 or len(c5) < 60:
+            exception_counter["not_enough_candles"] += 1
             continue
 
         price = c1[-1]["close"] if c1 else c1h[-1]["close"]
 
+        # --- market ---
         try:
             levels = find_major_liquidity(c1h, price, 12, c15, c5, c1)
+        except Exception as exc:
+            exception_counter[f"market:{type(exc).__name__}"] += 1
+            continue
+
+        n_bsl = sum(1 for l in levels if l.get("type") == "BSL")
+        n_ssl = sum(1 for l in levels if l.get("type") == "SSL")
+
+        if n_bsl == 0 and n_ssl == 0:
+            market_stats["empty"] += 1
+        elif n_bsl == 0:
+            market_stats["only_ssl"] += 1
+        elif n_ssl == 0:
+            market_stats["only_bsl"] += 1
+        else:
+            market_stats["both"] += 1
+
+        # --- strategy ---
+        try:
             direction = get_1h_direction(c1h)
 
             sweep = None
@@ -193,18 +228,22 @@ def run_backtest(symbol, max_hours):
                 fvgs=[],
             )
 
-        except Exception:
+        except Exception as exc:
+            exception_counter[f"analyze:{type(exc).__name__}"] += 1
+            if exception_counter[f"analyze:{type(exc).__name__}"] == 1:
+                print(f"[BT] FIRST EXCEPTION {type(exc).__name__}: {exc}",
+                      flush=True)
+                traceback.print_exc()
             continue
 
         stage = result.get("stage", "WAIT")
         score = int(result.get("score", 0))
-        reason_key = classify_reason(result)
+        market_info = {"bsl_count": n_bsl, "ssl_count": n_ssl}
+        reason_key = classify_reason(result, market_info)
 
         stage_counter[stage] += 1
         reason_counter[reason_key] += 1
 
-        # near miss — только те, где stage не WAIT, но и не READY
-        # и вообще все с score >= 50
         if score >= 50 and stage != "READY":
             near_misses.append({
                 "ts": ts_now,
@@ -214,8 +253,8 @@ def run_backtest(symbol, max_hours):
                 "reason_key": reason_key,
                 "reason": str(result.get("reason", ""))[:80],
                 "trend": result.get("trend_activity", 0),
-                "sweep": bool(sweep),
-                "ilm": bool(result.get("ilm")),
+                "bsl": n_bsl,
+                "ssl": n_ssl,
             })
 
         if stage != "READY":
@@ -224,7 +263,6 @@ def run_backtest(symbol, max_hours):
         entry = result.get("entry")
         sl = result.get("sl")
         tp = result.get("tp")
-
         if entry is None or sl is None or tp is None:
             continue
 
@@ -262,6 +300,8 @@ def run_backtest(symbol, max_hours):
     diag = {
         "stage_counter": stage_counter,
         "reason_counter": reason_counter,
+        "exception_counter": exception_counter,
+        "market_stats": market_stats,
         "near_misses": near_misses[:15],
     }
 
@@ -272,18 +312,36 @@ def print_report(symbol, trades, diag):
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА — {symbol}")
+    print(f"ОТЧЁТ БЭКТЕСТА v3 — {symbol}")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
     reason_counter = diag.get("reason_counter", Counter())
+    exception_counter = diag.get("exception_counter", Counter())
+    market_stats = diag.get("market_stats", Counter())
     near_misses = diag.get("near_misses", [])
 
     total = sum(stage_counter.values())
+    total_exc = sum(exception_counter.values())
 
     print()
     print(f"Всего шагов проанализировано: {total}")
+    print(f"Пропущено через exception: {total_exc}")
     print()
+
+    if exception_counter:
+        print("EXCEPTIONS (что падало):")
+        for k, v in exception_counter.most_common(10):
+            print(f"  {k:40} {v}")
+        print()
+
+    print("MARKET: сколько уровней находил find_major_liquidity:")
+    for k in ["both", "only_ssl", "only_bsl", "empty"]:
+        v = market_stats.get(k, 0)
+        pct = v / total * 100 if total else 0
+        print(f"  {k:15} {v:4}  ({pct:.1f}%)")
+    print()
+
     print("РАСПРЕДЕЛЕНИЕ ПО СТАДИЯМ:")
     for stage in ["READY", "15M_CONFIRMED", "SWEPT", "WAIT"]:
         cnt = stage_counter.get(stage, 0)
@@ -292,19 +350,19 @@ def print_report(symbol, trades, diag):
 
     print()
     print("ТОП ПРИЧИН ОСТАНОВКИ:")
-    for reason, cnt in reason_counter.most_common(12):
+    for reason, cnt in reason_counter.most_common(15):
         pct = cnt / total * 100 if total else 0
-        print(f"  {reason:22} {cnt:4}  ({pct:.1f}%)")
+        print(f"  {reason:26} {cnt:4}  ({pct:.1f}%)")
 
     print()
     print("=" * 70)
-    print("ТОП-15 'ПОЧТИ СРАБОТАВШИХ' (score, stage, reason)")
+    print("ТОП-15 'ПОЧТИ СРАБОТАВШИХ'")
     print("=" * 70)
     if not near_misses:
         print("Нет сетапов с score >= 50")
     else:
         print(f"{'Дата':<17}{'Напр.':<6}{'Stage':<16}"
-              f"{'Score':<6}{'Trend':<7}{'Reason'}")
+              f"{'Score':<6}{'Trend':<7}{'BSL/SSL':<10}{'Reason'}")
         print("-" * 70)
         for nm in near_misses:
             print(
@@ -313,6 +371,7 @@ def print_report(symbol, trades, diag):
                 f"{nm['stage']:<16}"
                 f"{nm['score']:<6}"
                 f"{nm['trend']:<7.2f}"
+                f"{nm['bsl']}/{nm['ssl']:<7}"
                 f"{nm['reason_key']}"
             )
 
@@ -334,10 +393,8 @@ def print_report(symbol, trades, diag):
 
     total_pnl = sum(t["pnl"] for t in trades)
     avg_pnl = total_pnl / len(trades)
-
     wins = [t["pnl"] for t in trades if t["pnl"] > 0]
     losses = [t["pnl"] for t in trades if t["pnl"] < 0]
-
     avg_win = sum(wins) / len(wins) if wins else 0
     avg_loss = sum(losses) / len(losses) if losses else 0
 
