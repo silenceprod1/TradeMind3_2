@@ -3,11 +3,20 @@ TradeMind 6.8
 1H Context -> Major Liquidity -> Sweep -> 15M Confirmation -> 5M ILM -> Entry
 
 Изменения vs 6.7:
-- Тайминг-фильтр: READY только в торговые сессии
-  (09-13 и 15-20 МСК).
-- Активный тренд 1H: минимум MIN_TREND_ACTIVITY для READY.
-- D1 контекст: bonus за aligned, штраф за counter-trend.
-- Recovery_ratio для READY поднят до 0.45 (V-образность).
+- Тайминг-фильтр: READY только в торговые сессии MSK (09-13, 15-20).
+- Активный тренд 1H: минимум MIN_TREND_ACTIVITY_READY для READY.
+- D1 контекст: bonus за aligned trend, штраф за counter-trend.
+- Recovery ratio для READY поднят до MIN_V_RECOVERY_FOR_READY (V-образность).
+- TP resolution: D1 Point B -> Major -> Local swing.
+
+Логика (как в видео):
+- D1 задаёт глобальный тренд и точки A/B.
+- 1H даёт контекст и уровень для sweep.
+- 15M подтверждает разворот.
+- 5M ILM даёт точку входа.
+- TP = D1 Point B (приоритет), иначе major liquidity, иначе local swing.
+- RR >= 1:2.
+- Только в торговые сессии.
 """
 
 from datetime import datetime, timezone, timedelta
@@ -35,7 +44,6 @@ MIN_SWEEP_DEPTH_PCT = 0.15
 
 MIN_5M_RECOVERY_RATIO = 0.33
 
-# Для READY нужно более сильное восстановление (V-образность)
 MIN_V_RECOVERY_FOR_READY = 0.45
 
 MIN_BODY_RATIO = 0.35
@@ -54,7 +62,6 @@ COUNTER_TREND_MIN_SCORE = 90
 
 # ---------- TIMING ----------
 
-# Торговые окна в MSK (UTC+3)
 TRADING_SESSIONS_MSK = [
     (9, 13),
     (15, 20),
@@ -258,7 +265,8 @@ def _swing_low(candles, index):
 
 def _swing_highs(candles):
     result = []
-    if not candles: return result
+    if not candles:
+        return result
     for i in range(len(candles)):
         if _swing_high(candles, i):
             p = _h(candles[i])
@@ -269,7 +277,8 @@ def _swing_highs(candles):
 
 def _swing_lows(candles):
     result = []
-    if not candles: return result
+    if not candles:
+        return result
     for i in range(len(candles)):
         if _swing_low(candles, i):
             p = _l(candles[i])
@@ -990,7 +999,7 @@ def resolve_target(
     candles_5m, candles_15m, d1_context=None,
 ):
 
-    # 1. D1 Point B — если определена и по нужную сторону
+    # 1. D1 Point B
     if d1_context:
         point_b = _f(d1_context.get("point_b"))
         if point_b is not None:
@@ -1159,6 +1168,7 @@ def _score(
     5M ILM               0-15
     RR                   0-20
     Liquidity strength   0-10
+    Local TP penalty     x0.9
     """
 
     score = 0
@@ -1274,7 +1284,6 @@ def _analyze_scenario(
         result["reason"] = "Недостаточно рыночных данных."
         return result
 
-    # Trend activity
     trend_activity = measure_trend_activity(candles_1h, direction)
     result["trend_activity"] = round(trend_activity, 3)
 
@@ -1364,7 +1373,6 @@ def _analyze_scenario(
         result["reason"] = "Не удалось построить корректный SL."
         return result
 
-    # TP
     tp, tp_source, tp_reason = resolve_target(
         major_levels=major_levels,
         direction=direction,
@@ -1456,13 +1464,10 @@ def _analyze_scenario(
 
     # ---------- EXTRA READY GATES ----------
 
-    # Тайминг
     in_session = is_trading_session()
 
-    # Активный тренд
     trend_ok = trend_activity >= MIN_TREND_ACTIVITY_READY
 
-    # V-образность (recovery_ratio)
     recovery = (ilm or {}).get("recovery_ratio", 0)
     v_ok = recovery >= MIN_V_RECOVERY_FOR_READY
 
@@ -1526,3 +1531,231 @@ def analyze(
         "context_direction": context_direction,
         "d1_trend": (d1_context or {}).get("trend", "NEUTRAL"),
         "d1_point_a": (d1_context or {}).get("point_a"),
+        "d1_point_b": (d1_context or {}).get("point_b"),
+        "score": 0,
+        "reason": "",
+        "entry": None,
+        "sl": None,
+        "tp": None,
+        "tp_source": None,
+        "rr": None,
+        "sweep": None,
+        "major_levels": major_levels or [],
+        "confirmation_15m": False,
+        "confirmation_15m_time": None,
+        "confirmation": None,
+        "ilm": None,
+        "sweep_extreme": None,
+        "tp_reason": None,
+        "geometry_valid": False,
+        "trend_activity": 0.0,
+        "long": None,
+        "short": None,
+    }
+
+    if price is None or not candles_1h or not candles_15m or not candles_5m:
+        base["reason"] = "Недостаточно рыночных данных."
+        return base
+
+    long_result = _analyze_scenario(
+        candles_1h, candles_15m, candles_5m,
+        price, major_levels, "LONG", context_direction,
+        d1_context=d1_context,
+    )
+
+    short_result = _analyze_scenario(
+        candles_1h, candles_15m, candles_5m,
+        price, major_levels, "SHORT", context_direction,
+        d1_context=d1_context,
+    )
+
+    base["long"] = long_result
+    base["short"] = short_result
+
+    # ---------- NEUTRAL 1H ----------
+    if context_direction == "NEUTRAL":
+        best = max(
+            [long_result, short_result],
+            key=lambda x: x.get("score", 0),
+        )
+
+        base.update({
+            "stage": (
+                "WAIT"
+                if best.get("stage") == "READY"
+                else best.get("stage", "WAIT")
+            ),
+            "direction": "NEUTRAL",
+            "score": best.get("score", 0),
+            "reason": (
+                "1H NEUTRAL. Следим за структурой, "
+                "но READY не разрешаем."
+            ),
+            "entry": best.get("entry"),
+            "sl": best.get("sl"),
+            "tp": best.get("tp"),
+            "tp_source": best.get("tp_source"),
+            "rr": best.get("rr"),
+            "sweep": best.get("sweep"),
+            "confirmation_15m": best.get("confirmation_15m", False),
+            "confirmation_15m_time": best.get("confirmation_15m_time"),
+            "confirmation": best.get("confirmation"),
+            "ilm": best.get("ilm"),
+            "sweep_extreme": best.get("sweep_extreme"),
+            "tp_reason": best.get("tp_reason"),
+            "geometry_valid": best.get("geometry_valid", False),
+            "trend_activity": best.get("trend_activity", 0.0),
+        })
+        return base
+
+    # ---------- READY CANDIDATES ----------
+    ready = []
+
+    if (
+        long_result.get("stage") == "READY"
+        and long_result.get("score", 0) >= MIN_SCORE_READY
+    ):
+        ready.append(long_result)
+
+    if (
+        short_result.get("stage") == "READY"
+        and short_result.get("score", 0) >= MIN_SCORE_READY
+    ):
+        ready.append(short_result)
+
+    if ready:
+        aligned = [x for x in ready if x["direction"] == context_direction]
+        counter = [x for x in ready if x["direction"] != context_direction]
+
+        if aligned:
+            chosen = max(aligned, key=lambda x: x["score"])
+        elif counter:
+            counter_ready = [
+                x for x in counter
+                if x["score"] >= COUNTER_TREND_MIN_SCORE
+            ]
+            if not counter_ready:
+                base["score"] = max(
+                    long_result["score"], short_result["score"],
+                )
+                base["reason"] = (
+                    "Есть контртрендовый сценарий, "
+                    "но он недостаточно сильный для READY."
+                )
+                return base
+            chosen = max(counter_ready, key=lambda x: x["score"])
+        else:
+            chosen = None
+
+        if chosen:
+            base.update(chosen)
+            base["context_direction"] = context_direction
+            base["long"] = long_result
+            base["short"] = short_result
+            return base
+
+    # ---------- NO READY ----------
+    candidates = [long_result, short_result]
+
+    def stage_weight(r):
+        return {
+            "READY": 5,
+            "15M_CONFIRMED": 4,
+            "SWEPT": 3,
+            "WAIT": 1,
+        }.get(r.get("stage"), 0)
+
+    aligned_candidates = [
+        x for x in candidates
+        if x["direction"] == context_direction
+    ]
+    pool = aligned_candidates if aligned_candidates else candidates
+
+    chosen = max(
+        pool,
+        key=lambda x: (stage_weight(x), x.get("score", 0)),
+    )
+
+    base.update({
+        "stage": chosen.get("stage", "WAIT"),
+        "direction": chosen.get("direction", context_direction),
+        "score": chosen.get("score", 0),
+        "reason": chosen.get("reason", ""),
+        "entry": chosen.get("entry"),
+        "sl": chosen.get("sl"),
+        "tp": chosen.get("tp"),
+        "tp_source": chosen.get("tp_source"),
+        "rr": chosen.get("rr"),
+        "sweep": chosen.get("sweep"),
+        "confirmation_15m": chosen.get("confirmation_15m", False),
+        "confirmation_15m_time": chosen.get("confirmation_15m_time"),
+        "confirmation": chosen.get("confirmation"),
+        "ilm": chosen.get("ilm"),
+        "sweep_extreme": chosen.get("sweep_extreme"),
+        "tp_reason": chosen.get("tp_reason"),
+        "geometry_valid": chosen.get("geometry_valid", False),
+        "trend_activity": chosen.get("trend_activity", 0.0),
+    })
+
+    base["context_direction"] = context_direction
+
+    if (
+        context_direction == "LONG"
+        and short_result["stage"] in {"SWEPT", "15M_CONFIRMED", "READY"}
+    ):
+        base["reason"] = (
+            f"{base['reason']} "
+            f"SHORT-сценарий также активен: {short_result['stage']}."
+        )
+    elif (
+        context_direction == "SHORT"
+        and long_result["stage"] in {"SWEPT", "15M_CONFIRMED", "READY"}
+    ):
+        base["reason"] = (
+            f"{base['reason']} "
+            f"LONG-сценарий также активен: {long_result['stage']}."
+        )
+
+    return base
+
+
+# ============================================================
+# SOL COMPATIBILITY
+# ============================================================
+
+def analyze_sol(*args, **kwargs):
+    return analyze(*args, **kwargs)
+
+
+# ============================================================
+# EXPORTS
+# ============================================================
+
+__all__ = [
+    "STRATEGY_VERSION",
+    "MIN_SCORE_READY",
+    "MIN_RR",
+    "SL_BUFFER_PCT",
+    "TRADING_SESSIONS_MSK",
+    "MIN_TREND_ACTIVITY_READY",
+    "MIN_V_RECOVERY_FOR_READY",
+    "get_1h_direction",
+    "get_higher_timeframe_direction",
+    "measure_trend_activity",
+    "is_trading_session",
+    "current_msk_hour",
+    "find_sweep",
+    "confirmation_15m",
+    "detect_5m_ilm",
+    "calculate_entry",
+    "calculate_stop",
+    "calculate_take_profit",
+    "calculate_rr",
+    "validate_trade_geometry",
+    "validate_target",
+    "next_target",
+    "detect_local_swing_target",
+    "resolve_target",
+    "analyze",
+    "analyze_sol",
+]
