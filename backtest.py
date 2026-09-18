@@ -1,6 +1,6 @@
 """
-Диагностический бэктест v3.
-Логирует exceptions, разбивает no_major_level по типам, фиксит классификатор.
+Диагностический бэктест v4.
+Исправлен классификатор: ILM проверяется раньше 15M.
 """
 
 import argparse
@@ -55,21 +55,15 @@ def pnl_pct(entry, exit_price, direction):
 
 
 def classify_reason(result, market_info):
-    """
-    Возвращает ключ причины, почему сетап не READY.
-    Учитывает market_info — сколько BSL/SSL было найдено.
-    """
     stage = result.get("stage", "WAIT")
     reason = str(result.get("reason", "")).lower()
 
     if stage == "READY":
         return "READY"
 
-    # Разбиваем no_major_level по типам
-    if "нет актуальной major" in reason or "нет актуальной major ssl" in reason or "нет актуальной major bsl" in reason:
+    if "нет актуальной major" in reason:
         n_bsl = market_info.get("bsl_count", 0)
         n_ssl = market_info.get("ssl_count", 0)
-
         if n_bsl == 0 and n_ssl == 0:
             return "no_levels_both"
         if n_bsl == 0:
@@ -78,23 +72,28 @@ def classify_reason(result, market_info):
             return "no_levels_ssl"
         return "no_levels_matching"
 
-    # Сначала проверяем продвинутые стадии — они важнее
-    if "15m" in reason and "ждём" in reason:
-        return "no_15m_conf"
-    if "ilm" in reason:
+    # ILM проверяем РАНЬШЕ 15M — его reason содержит "15m"
+    if "ilm" in reason or "5m ilm" in reason:
         return "no_5m_ilm"
+
+    if "sweep есть" in reason and "15m" in reason:
+        return "no_15m_conf"
+
+    if "ждём" in reason and "sweep" in reason:
+        return "no_sweep"
+
     if "rr" in reason and "<" in reason:
         return "rr_too_low"
+
+    if "tp" in reason or "major liquidity не найдена" in reason:
+        return "tp_failed"
+
     if "trend" in reason and "блок" in reason:
         return "trend_blocked"
     if "recovery" in reason and "блок" in reason:
         return "v_recovery_blocked"
     if "score" in reason and "блок" in reason:
         return "score_too_low"
-
-    # Потом уже sweep
-    if "ждём" in reason and "sweep" in reason:
-        return "no_sweep"
 
     if "blocked" in reason or "заблок" in reason:
         return "other_blocked"
@@ -193,7 +192,6 @@ def run_backtest(symbol, max_hours):
 
         price = c1[-1]["close"] if c1 else c1h[-1]["close"]
 
-        # --- market ---
         try:
             levels = find_major_liquidity(c1h, price, 12, c15, c5, c1)
         except Exception as exc:
@@ -212,7 +210,6 @@ def run_backtest(symbol, max_hours):
         else:
             market_stats["both"] += 1
 
-        # --- strategy ---
         try:
             direction = get_1h_direction(c1h)
 
@@ -312,7 +309,7 @@ def print_report(symbol, trades, diag):
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v3 — {symbol}")
+    print(f"ОТЧЁТ БЭКТЕСТА v4 — {symbol}")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
