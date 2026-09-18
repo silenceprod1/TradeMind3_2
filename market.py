@@ -1,15 +1,14 @@
 # ============================================================
-# TradeMind 7.5
+# TradeMind 7.6
 # market.py
 #
-# Изменения vs 7.4:
-# - Новый детектор ATH/ATL extension:
-#   Если цена выше всех 1H свинг-хаев за окно -> генерируем
-#   синтетические BSL выше цены (+0.5%, +1%, +2%, +3%).
-#   Если цена ниже всех свинг-лоу -> генерируем SSL ниже.
-#   Помечаются source="ATH" / "ATL".
-# - MAX_LEVELS_PER_SIDE: 6 -> 4 (чтобы UI не заваливался)
-# - ROUND fallback остался, но работает после ATH/ATL
+# Изменения vs 7.5:
+# - Новый источник уровней: FRESH (локальные свинги 1/1
+#   за последние 24 свечи 1H, в радиусе 3% от цены).
+# - FRESH имеет приоритет выше 1H при слиянии, потому что
+#   отражает актуальную реакцию цены.
+# - Свежие уровни проходят мягкий фильтр swept (окно 6 свечей,
+#   а не 15), чтобы не выпадать из-за недавнего шума.
 # ============================================================
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
-MARKET_VERSION = "7.5"
+MARKET_VERSION = "7.6"
 
 BASE_URL = "https://api.binance.com/api/v3"
 REQUEST_TIMEOUT = 10
@@ -54,10 +53,6 @@ _klines_cache: Dict[Tuple[str, str, int], Tuple[float, List[Dict[str, Any]]]] = 
 _klines_lock = threading.RLock()
 
 
-# ============================================================
-# SWINGS
-# ============================================================
-
 SWING_LEFT = 2
 SWING_RIGHT = 2
 
@@ -67,10 +62,10 @@ SWING_RIGHT_15M = 1
 SWING_LEFT_D1 = 3
 SWING_RIGHT_D1 = 3
 
+# FRESH: быстрые локальные свинги
+FRESH_LEFT = 1
+FRESH_RIGHT = 1
 
-# ============================================================
-# LIQUIDITY
-# ============================================================
 
 CLUSTER_DISTANCE_PCT = 0.15
 ZONE_WIDTH_PCT = 0.20
@@ -80,34 +75,23 @@ MIN_MAJOR_STRENGTH = 48.0
 MIN_MINOR_STRENGTH = 38.0
 MIN_ROUND_STRENGTH = 42.0
 MIN_ATH_STRENGTH = 55.0
+MIN_FRESH_STRENGTH = 40.0
 
 MAX_LEVELS_PER_SIDE = 4
 MAX_TOTAL_LEVELS = 8
 MIN_LEVELS_PER_SIDE_1H = 3
 
-
-# ============================================================
-# ROUND NUMBERS
-# ============================================================
+# FRESH
+FRESH_MAX_AGE_1H = 24
+FRESH_MAX_DISTANCE_PCT = 3.0
+FRESH_SWEEP_LOOKBACK = 6
+FRESH_PRIORITY = 0  # 0 — выше всех в merge
 
 ROUND_MAX_COUNT = 5
 ROUND_MAX_DISTANCE_PCT = 20.0
 
-
-# ============================================================
-# ATH / ATL EXTENSION
-# ============================================================
-
-# Шаги для синтетических уровней, если цена на ATH/ATL.
 ATH_EXTENSION_STEPS_PCT = [0.5, 1.0, 2.0, 3.0]
-
-# Окно для проверки ATH/ATL — считаем максимум/минимум за N 1H свечей.
 ATH_LOOKBACK_1H = 180
-
-
-# ============================================================
-# AGE
-# ============================================================
 
 MAX_LEVEL_AGE_1H = 168
 MAX_LEVEL_AGE_15M = 200
@@ -117,43 +101,19 @@ SWEEP_RECENT_LOOKBACK_15M = 30
 
 SWEPT_MIN_DEPTH_PCT = 0.30
 
-
-# ============================================================
-# D1 CONTEXT
-# ============================================================
-
 D1_SWING_LOOKBACK = 60
 D1_POINT_LOOKBACK = 30
 
-
-# ============================================================
-# LOCAL
-# ============================================================
-
 LOCAL_TOUCH_DISTANCE_PCT = 0.20
-
-
-# ============================================================
-# FVG
-# ============================================================
 
 FVG_MIN_SIZE_PCT_5M = 0.05
 FVG_MIN_SIZE_PCT_15M = 0.10
 FVG_MAX_ZONES_PER_TF = 5
 FVG_MAX_LOOKBACK = 100
 
-
-# ============================================================
-# SWEEP
-# ============================================================
-
 MIN_SWEEP_DEPTH_PCT = 0.08
 MAX_SWEEP_LOOKBACK_1H = 8
 
-
-# ============================================================
-# HTTP
-# ============================================================
 
 _thread_local = threading.local()
 
@@ -163,7 +123,7 @@ def _get_session():
     if session is None:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "TradeMind/7.5",
+            "User-Agent": "TradeMind/7.6",
             "Accept": "application/json",
         })
         adapter = requests.adapters.HTTPAdapter(
@@ -319,6 +279,10 @@ def find_swing_highs_15m(c): return _find_swings(c, SWING_LEFT_15M, SWING_RIGHT_
 def find_swing_lows_15m(c): return _find_swings(c, SWING_LEFT_15M, SWING_RIGHT_15M, "low")
 def find_swing_highs_d1(c): return _find_swings(c, SWING_LEFT_D1, SWING_RIGHT_D1, "high")
 def find_swing_lows_d1(c): return _find_swings(c, SWING_LEFT_D1, SWING_RIGHT_D1, "low")
+
+# FRESH — быстрые свинги 1/1
+def find_fresh_highs(c): return _find_swings(c, FRESH_LEFT, FRESH_RIGHT, "high")
+def find_fresh_lows(c): return _find_swings(c, FRESH_LEFT, FRESH_RIGHT, "low")
 
 
 # ============================================================
@@ -589,20 +553,15 @@ def calculate_strength(level, candles, candles_15m, max_age, base=40.0):
 
 
 # ============================================================
-# ATH / ATL EXTENSION
+# ATH / ATL
 # ============================================================
 
 def detect_ath_extension(candles_1h, price):
-    """
-    Если цена выше всех 1H свинг-хаев за окно ATH_LOOKBACK_1H,
-    генерируем синтетические BSL-уровни выше цены.
-    """
     if not candles_1h or len(candles_1h) < 20:
         return []
 
     window = candles_1h[-ATH_LOOKBACK_1H:]
     confirmed = window[:-1]
-
     if not confirmed:
         return []
 
@@ -613,40 +572,28 @@ def detect_ath_extension(candles_1h, price):
     results = []
     for step_pct in ATH_EXTENSION_STEPS_PCT:
         target = price * (1 + step_pct / 100)
-
         zone_low = target * (1 - ZONE_WIDTH_PCT / 100.0)
         zone_high = target * (1 + ZONE_WIDTH_PCT / 100.0)
-
         distance = (target - price) / price * 100
 
         results.append({
             "price": round(target, 8),
             "zone_low": round(zone_low, 8),
             "zone_high": round(zone_high, 8),
-            "type": "BSL",
-            "strength": MIN_ATH_STRENGTH,
-            "touches": 1,
-            "distance_pct": round(distance, 4),
-            "age_1h": 0,
-            "source": "ATH",
-            "status": "FRESH",
-            "swept": False, "taken": False,
-            "used": False, "consumed": False,
+            "type": "BSL", "strength": MIN_ATH_STRENGTH, "touches": 1,
+            "distance_pct": round(distance, 4), "age_1h": 0,
+            "source": "ATH", "status": "FRESH",
+            "swept": False, "taken": False, "used": False, "consumed": False,
         })
-
     return results
 
 
 def detect_atl_extension(candles_1h, price):
-    """
-    Если цена ниже всех 1H свинг-лоу за окно — генерируем SSL ниже.
-    """
     if not candles_1h or len(candles_1h) < 20:
         return []
 
     window = candles_1h[-ATH_LOOKBACK_1H:]
     confirmed = window[:-1]
-
     if not confirmed:
         return []
 
@@ -657,27 +604,19 @@ def detect_atl_extension(candles_1h, price):
     results = []
     for step_pct in ATH_EXTENSION_STEPS_PCT:
         target = price * (1 - step_pct / 100)
-
         zone_low = target * (1 - ZONE_WIDTH_PCT / 100.0)
         zone_high = target * (1 + ZONE_WIDTH_PCT / 100.0)
-
         distance = (price - target) / price * 100
 
         results.append({
             "price": round(target, 8),
             "zone_low": round(zone_low, 8),
             "zone_high": round(zone_high, 8),
-            "type": "SSL",
-            "strength": MIN_ATH_STRENGTH,
-            "touches": 1,
-            "distance_pct": round(distance, 4),
-            "age_1h": 0,
-            "source": "ATL",
-            "status": "FRESH",
-            "swept": False, "taken": False,
-            "used": False, "consumed": False,
+            "type": "SSL", "strength": MIN_ATH_STRENGTH, "touches": 1,
+            "distance_pct": round(distance, 4), "age_1h": 0,
+            "source": "ATL", "status": "FRESH",
+            "swept": False, "taken": False, "used": False, "consumed": False,
         })
-
     return results
 
 
@@ -751,6 +690,74 @@ def _select_zones(levels, price, candles_ref, candles_15m, level_type,
     return selected
 
 
+def _select_fresh_zones(candles_1h, price, level_type):
+    """
+    Свежие локальные свинги за последние 24 часа, в радиусе 3% от цены.
+    """
+    if not candles_1h:
+        return []
+
+    confirmed = candles_1h[:-1]
+    if len(confirmed) < 5:
+        return []
+
+    if level_type == "BSL":
+        swings = find_fresh_highs(confirmed)
+    else:
+        swings = find_fresh_lows(confirmed)
+
+    if not swings:
+        return []
+
+    clusters = cluster_levels(swings)
+
+    candidates = []
+    for level in clusters:
+        level_price = float(level.get("price", 0))
+        if level_price <= 0:
+            continue
+
+        if level_type == "BSL":
+            if level_price <= price: continue
+        else:
+            if level_price >= price: continue
+
+        distance = distance_pct(price, level_price)
+        if distance < MIN_MAJOR_DISTANCE_PCT: continue
+        if distance > FRESH_MAX_DISTANCE_PCT: continue
+
+        age = len(confirmed) - 1 - int(level.get("last_index", 0))
+        if age > FRESH_MAX_AGE_1H: continue
+
+        if level_has_been_swept(level_price, level_type, confirmed, FRESH_SWEEP_LOOKBACK):
+            continue
+
+        strength = calculate_strength(level, confirmed, candles_15m if False else [], FRESH_MAX_AGE_1H)
+        if strength < MIN_FRESH_STRENGTH:
+            continue
+
+        zone_low = level_price * (1 - ZONE_WIDTH_PCT / 100.0)
+        zone_high = level_price * (1 + ZONE_WIDTH_PCT / 100.0)
+
+        candidates.append({
+            "price": round(level_price, 8),
+            "zone_low": round(zone_low, 8),
+            "zone_high": round(zone_high, 8),
+            "type": level_type,
+            "strength": round(strength, 2),
+            "touches": int(level.get("touches", 1)),
+            "distance_pct": round(distance, 4),
+            "age_1h": age,
+            "source": "FRESH",
+            "status": "FRESH",
+            "swept": False, "taken": False,
+            "used": False, "consumed": False,
+        })
+
+    candidates.sort(key=lambda x: x["distance_pct"])
+    return candidates[:MAX_LEVELS_PER_SIDE]
+
+
 def _round_step(price):
     if price <= 0: return 1.0
     exp = math.floor(math.log10(price)) - 1
@@ -804,6 +811,10 @@ def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
 
 
 def _merge_sources(sources, limit):
+    """
+    sources — список списков. Первый источник имеет приоритет.
+    FRESH передаётся первым.
+    """
     merged = []
     seen = []
     for source in sources:
@@ -830,6 +841,11 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
     if len(confirmed_1h) < 10:
         return {"BSL": [], "SSL": []}
 
+    # FR_ESHLOOK — приоритет выше
+    bBACKsl_fresh = _select_fresh__zones(candles_1h, price15, "BSL")
+    sMsl_fresh = _select_fresh_zones(candles_1h, price, "SSL")
+
+    # 1H свинги
     bsl_1h = _select_zones(cluster_levels(find_swing_highs(confirmed_1h)),
                            price, confirmed_1h, candles_15m,
                            "BSL", MIN_MAJOR_STRENGTH, MAX_LEVEL_AGE_1H,
@@ -839,9 +855,10 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
                            "SSL", MIN_MAJOR_STRENGTH, MAX_LEVEL_AGE_1H,
                            SWEEP_RECENT_LOOKBACK_1H, "1H")
 
+    # 15M
     bsl_15m, ssl_15m = [], []
-    need_bsl = len(bsl_1h) < MIN_LEVELS_PER_SIDE_1H
-    need_ssl = len(ssl_1h) < MIN_LEVELS_PER_SIDE_1H
+    need_bsl = len(bsl_1h) + len(bsl_fresh) < MIN_LEVELS_PER_SIDE_1H
+    need_ssl = len(ssl_1h) + len(ssl_fresh) < MIN_LEVELS_PER_SIDE_1H
 
     if (need_bsl or need_ssl) and candles_15m:
         confirmed_15m = candles_15m[:-1]
@@ -855,24 +872,25 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
                 ssl_15m = _select_zones(cluster_levels(find_swing_lows_15m(confirmed_15m)),
                                         price, confirmed_15m, candles_15m,
                                         "SSL", MIN_MINOR_STRENGTH, MAX_LEVEL_AGE_15M,
-                                        SWEEP_RECENT_LOOKBACK_15M, "15M")
+                                        SWEEP_RECENT, "15M")
 
-    # ATH/ATL extension
+    # ATH/ATL
     bsl_ath = []
     ssl_atl = []
 
-    if len(bsl_1h) + len(bsl_15m) < MIN_LEVELS_PER_SIDE_1H:
+    if len(bsl_1h) + len(bsl_15m) + len(bsl_fresh) < MIN_LEVELS_PER_SIDE_1H:
         bsl_ath = detect_ath_extension(confirmed_1h, price)
 
-    if len(ssl_1h) + len(ssl_15m) < MIN_LEVELS_PER_SIDE_1H:
+    if len(ssl_1h) + len(ssl_15m) + len(ssl_fresh) < MIN_LEVELS_PER_SIDE_1H:
         ssl_atl = detect_atl_extension(confirmed_1h, price)
 
-    # ROUND fallback
-    bsl_round = find_round_number_levels(price, "BSL") if len(bsl_1h) + len(bsl_15m) + len(bsl_ath) < MIN_LEVELS_PER_SIDE_1H else []
-    ssl_round = find_round_number_levels(price, "SSL") if len(ssl_1h) + len(ssl_15m) + len(ssl_atl) < MIN_LEVELS_PER_SIDE_1H else []
+    # ROUND
+    bsl_round = find_round_number_levels(price, "BSL") if len(bsl_1h) + len(bsl_15m) + len(bsl_ath) + len(bsl_fresh) < MIN_LEVELS_PER_SIDE_1H else []
+    ssl_round = find_round_number_levels(price, "SSL") if len(ssl_1h) + len(ssl_15m) + len(ssl_atl) + len(ssl_fresh) < MIN_LEVELS_PER_SIDE_1H else []
 
-    bsl = _merge_sources([bsl_1h, bsl_15m, bsl_ath, bsl_round], MAX_LEVELS_PER_SIDE)
-    ssl = _merge_sources([ssl_1h, ssl_15m, ssl_atl, ssl_round], MAX_LEVELS_PER_SIDE)
+    # Merge: FRESH первый
+    bsl = _merge_sources([bsl_fresh, bsl_1h, bsl_15m, bsl_ath, bsl_round], MAX_LEVELS_PER_SIDE)
+    ssl = _merge_sources([ssl_fresh, ssl_1h, ssl_15m, ssl_atl, ssl_round], MAX_LEVELS_PER_SIDE)
 
     combined = [("BSL", x) for x in bsl] + [("SSL", x) for x in ssl]
     combined.sort(key=lambda x: x[1]["strength"], reverse=True)
