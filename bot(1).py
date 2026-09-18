@@ -53,6 +53,7 @@ SCAN_CACHE_TTL = 5.0
 RUN_BACKTEST_ON_START = True
 BACKTEST_SYMBOL = "SOLUSDT"
 BACKTEST_MULTI = True
+BACKTEST_MAX_HOURS = 24
 
 
 COINS = {
@@ -829,9 +830,15 @@ def create_pending_setup(coin, result):
     sweep = result.get("sweep") or {}
     ilm = result.get("ilm") or {}
 
-    raw_id = (f"{coin}|{result['direction']}|{entry:.10f}|"
-              f"{sl:.10f}|{tp:.10f}|{sweep.get('open_time')}|"
-              f"{ilm.get('trigger_time')}")
+    # ID строится ТОЛЬКО из стабильных параметров.
+    # entry меняется каждую секунду — его нельзя использовать,
+    # иначе спам уведомлениями.
+    raw_id = (
+        f"{coin}|{result['direction']}|"
+        f"{sweep.get('open_time')}|"
+        f"{sweep.get('level')}|"
+        f"{ilm.get('trigger_time')}"
+    )
     setup_id = uuid.uuid5(uuid.NAMESPACE_DNS, raw_id).hex[:12]
 
     pending = load_pending_setups()
@@ -2080,11 +2087,12 @@ async def post_init(application):
             import backtest
 
             if BACKTEST_MULTI:
-                print(">>> MULTI BACKTEST <<<", flush=True)
-                backtest.run_multi_backtest()
+                print(f">>> MULTI BACKTEST ({BACKTEST_MAX_HOURS}h) <<<",
+                      flush=True)
+                backtest.run_multi_backtest_with_hours(BACKTEST_MAX_HOURS)
             else:
                 trades, diag = backtest.run_backtest(
-                    BACKTEST_SYMBOL, 12)
+                    BACKTEST_SYMBOL, BACKTEST_MAX_HOURS)
                 backtest.print_report(BACKTEST_SYMBOL, trades, diag)
 
             print("=" * 70, flush=True)
