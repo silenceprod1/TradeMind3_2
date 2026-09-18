@@ -1,30 +1,21 @@
-"""
-TradeMind 6.5
-Market Data + Dynamic Major Liquidity
+# market.py
+# TradeMind 6.6
+# Binance Spot — источник рыночных данных
+#
+# Логика:
+# 1H -> MAJOR liquidity
+# 15M -> confirmation
+# 5M -> ILM
+# 1M -> только local context
+#
+# ВАЖНО:
+# MAJOR liquidity пересчитывается заново при каждом get_market_data().
+# Слишком близкие к текущей цене уровни НЕ считаются MAJOR.
 
-Reference:
-Binance Spot
+from __future__ import annotations
 
-Hierarchy:
-
-1H candles
-    ↓
-1H swing highs / lows
-    ↓
-cluster nearby swings
-    ↓
-structural scoring
-    ↓
-freshness / touches
-    ↓
-remove weak intermediate levels
-    ↓
-Major BSL + Major SSL
-
-15M / 5M / 1M:
-    ONLY reinforce existing 1H zones.
-    They NEVER create Major Liquidity themselves.
-"""
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -34,54 +25,86 @@ import requests
 # ============================================================
 
 BASE_URL = "https://api.binance.com/api/v3"
-
 SYMBOL = "SOLUSDT"
 
-TIMEOUT = 10
+REQUEST_TIMEOUT = 10
 
+# Сколько свечей загружаем
+LOOKBACK_1H = 180
+LOOKBACK_15M = 200
+LOOKBACK_5M = 200
+LOOKBACK_1M = 200
 
-# ------------------------------------------------------------
-# Liquidity settings
-# ------------------------------------------------------------
+# Свинг:
+# 2 свечи слева + сама свеча + 2 справа
+SWING_LEFT = 2
+SWING_RIGHT = 2
 
-# Swings closer than this are considered one liquidity cluster.
+# Кластеризация ликвидности
 CLUSTER_DISTANCE_PCT = 0.15
 
-# Maximum width of a liquidity zone.
+# Размер рабочей зоны вокруг уровня
 ZONE_WIDTH_PCT = 0.20
 
-# Minimum distance between two separate Major zones.
+# Минимальное расстояние между MAJOR зонами
 MIN_ZONE_GAP_PCT = 0.70
 
-# Number of Major zones per side.
-MAX_LEVELS_PER_SIDE = 4
+# ============================================================
+# НОВОЕ
+# ============================================================
 
-# Total maximum returned.
-MAX_TOTAL_LEVELS = 8
+# Уровень ближе этого расстояния к текущей цене
+# НЕ МОЖЕТ быть MAJOR.
+#
+# Пример:
+# SOL = 106.10
+# MIN_MAJOR_DISTANCE_PCT = 0.30
+#
+# 106.12 -> 0.019% -> ОТБРАСЫВАЕМ
+# 106.40 -> 0.282% -> ОТБРАСЫВАЕМ
+# 106.55 -> 0.424% -> МОЖЕТ быть MAJOR
+#
+MIN_MAJOR_DISTANCE_PCT = 0.30
 
-# Local timeframe reinforcement.
-LOCAL_TOUCH_DISTANCE_PCT = 0.20
-
-# A level with too little structural importance is ignored.
+# Минимальная сила структуры
 MIN_MAJOR_STRENGTH = 58
 
-# How many 1H candles are considered for structural liquidity.
-LOOKBACK_1H = 180
+# Максимальное количество зон на сторону
+MAX_LEVELS_PER_SIDE = 4
 
-# Don't keep very old zones indefinitely.
+# Максимум всех зон
+MAX_TOTAL_LEVELS = 8
+
+# Возраст MAJOR-свича в 1H
 MAX_LEVEL_AGE_1H = 120
 
+# Local touch
+LOCAL_TOUCH_DISTANCE_PCT = 0.20
+
 
 # ============================================================
-# BINANCE REQUEST
+# HTTP
 # ============================================================
 
-def _get(path, params):
+_session = requests.Session()
+_session.headers.update(
+    {
+        "User-Agent": "TradeMind/6.6",
+        "Accept": "application/json",
+    }
+)
 
-    response = requests.get(
-        BASE_URL + path,
+
+def _get(
+    endpoint: str,
+    params: Dict[str, Any],
+) -> Any:
+    url = f"{BASE_URL}/{endpoint}"
+
+    response = _session.get(
+        url,
         params=params,
-        timeout=TIMEOUT,
+        timeout=REQUEST_TIMEOUT,
     )
 
     response.raise_for_status()
@@ -90,49 +113,34 @@ def _get(path, params):
 
 
 # ============================================================
-# PRICE
+# BINANCE
 # ============================================================
 
-def get_price(symbol=SYMBOL):
-
+def get_current_price() -> float:
     data = _get(
-        "/ticker/price",
-        {
-            "symbol": symbol,
-        },
+        "ticker/price",
+        {"symbol": SYMBOL},
     )
 
     return float(data["price"])
 
 
-# ============================================================
-# KLINES
-# ============================================================
-
 def get_klines(
-    symbol=SYMBOL,
-    interval="1h",
-    limit=200,
-):
-
-    limit = max(
-        1,
-        min(int(limit), 1000),
-    )
-
+    interval: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
     raw = _get(
-        "/klines",
+        "klines",
         {
-            "symbol": symbol,
+            "symbol": SYMBOL,
             "interval": interval,
             "limit": limit,
         },
     )
 
-    candles = []
+    candles: List[Dict[str, Any]] = []
 
     for x in raw:
-
         candles.append(
             {
                 "open_time": int(x[0]),
@@ -149,487 +157,494 @@ def get_klines(
 
 
 # ============================================================
-# MARKET DATA
+# HELPERS
 # ============================================================
 
-def get_market_data(symbol=SYMBOL):
+def pct_distance(
+    price_a: float,
+    price_b: float,
+) -> float:
+    if price_b == 0:
+        return 999.0
 
-    candles_1h = get_klines(
-        symbol,
-        "1h",
-        200,
-    )
+    return abs(price_a - price_b) / price_b * 100.0
 
-    candles_15m = get_klines(
-        symbol,
-        "15m",
-        200,
-    )
 
-    candles_5m = get_klines(
-        symbol,
-        "5m",
-        200,
-    )
+def is_above(
+    level: float,
+    price: float,
+) -> bool:
+    return level > price
 
-    candles_1m = get_klines(
-        symbol,
-        "1m",
-        200,
-    )
 
-    price = get_price(symbol)
+def is_below(
+    level: float,
+    price: float,
+) -> bool:
+    return level < price
 
-    major_levels = find_major_liquidity(
-        candles_1h=candles_1h,
-        current_price=price,
-        max_levels=MAX_TOTAL_LEVELS,
-        candles_15m=candles_15m,
-        candles_5m=candles_5m,
-        candles_1m=candles_1m,
-    )
 
-    return {
-        "symbol": symbol,
-        "price": price,
-
-        "candles_1h": candles_1h,
-        "candles_15m": candles_15m,
-        "candles_5m": candles_5m,
-        "candles_1m": candles_1m,
-
-        "major_liquidity": major_levels,
-    }
+def _safe_float(
+    value: Any,
+    default: float = 0.0,
+) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 # ============================================================
-# SWINGS
+# SWING DETECTION
 # ============================================================
 
-def _swing_high(candles, i):
+def find_swing_highs(
+    candles: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    swings: List[Dict[str, Any]] = []
 
-    if i < 2:
-        return False
+    start = SWING_LEFT
+    end = len(candles) - SWING_RIGHT
 
-    if i >= len(candles) - 2:
-        return False
+    for i in range(start, end):
+        current = candles[i]
+        high = current["high"]
 
-    current = candles[i]["high"]
+        left = candles[
+            i - SWING_LEFT:i
+        ]
 
-    left_1 = candles[i - 1]["high"]
-    left_2 = candles[i - 2]["high"]
+        right = candles[
+            i + 1:i + 1 + SWING_RIGHT
+        ]
 
-    right_1 = candles[i + 1]["high"]
-    right_2 = candles[i + 2]["high"]
+        if all(high >= x["high"] for x in left) and \
+           all(high >= x["high"] for x in right):
 
-    return (
-        current > left_1
-        and current >= left_2
-        and current >= right_1
-        and current > right_2
-    )
-
-
-def _swing_low(candles, i):
-
-    if i < 2:
-        return False
-
-    if i >= len(candles) - 2:
-        return False
-
-    current = candles[i]["low"]
-
-    left_1 = candles[i - 1]["low"]
-    left_2 = candles[i - 2]["low"]
-
-    right_1 = candles[i + 1]["low"]
-    right_2 = candles[i + 2]["low"]
-
-    return (
-        current < left_1
-        and current <= left_2
-        and current <= right_1
-        and current < right_2
-    )
-
-
-# ============================================================
-# COLLECT 1H SWINGS
-# ============================================================
-
-def _collect_swings(candles):
-
-    highs = []
-    lows = []
-
-    if not candles:
-        return highs, lows
-
-    candles = candles[-LOOKBACK_1H:]
-
-    for i in range(len(candles)):
-
-        if _swing_high(candles, i):
-
-            highs.append(
+            swings.append(
                 {
-                    "price": candles[i]["high"],
+                    "price": high,
                     "index": i,
+                    "time": current["open_time"],
                     "type": "BSL",
                 }
             )
 
-        if _swing_low(candles, i):
+    return swings
 
-            lows.append(
+
+def find_swing_lows(
+    candles: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    swings: List[Dict[str, Any]] = []
+
+    start = SWING_LEFT
+    end = len(candles) - SWING_RIGHT
+
+    for i in range(start, end):
+        current = candles[i]
+        low = current["low"]
+
+        left = candles[
+            i - SWING_LEFT:i
+        ]
+
+        right = candles[
+            i + 1:i + 1 + SWING_RIGHT
+        ]
+
+        if all(low <= x["low"] for x in left) and \
+           all(low <= x["low"] for x in right):
+
+            swings.append(
                 {
-                    "price": candles[i]["low"],
+                    "price": low,
                     "index": i,
+                    "time": current["open_time"],
                     "type": "SSL",
                 }
             )
 
-    return highs, lows
+    return swings
 
 
 # ============================================================
-# CLUSTER SWINGS
+# CLUSTERING
 # ============================================================
 
-def _cluster_swings(
-    points,
-    distance_pct=CLUSTER_DISTANCE_PCT,
-):
-
-    if not points:
+def cluster_levels(
+    levels: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not levels:
         return []
 
-    points = sorted(
-        points,
+    levels = sorted(
+        levels,
         key=lambda x: x["price"],
     )
 
-    clusters = []
+    clusters: List[List[Dict[str, Any]]] = []
 
-    for point in points:
-
-        price = point["price"]
+    for level in levels:
 
         if not clusters:
-
-            clusters.append(
-                {
-                    "points": [point],
-                    "price": price,
-                }
-            )
-
+            clusters.append([level])
             continue
 
-        current = clusters[-1]
+        current_cluster = clusters[-1]
 
-        center = current["price"]
+        average_price = sum(
+            x["price"]
+            for x in current_cluster
+        ) / len(current_cluster)
 
-        distance = (
-            abs(price - center)
-            / center
-            * 100
+        distance = pct_distance(
+            level["price"],
+            average_price,
         )
 
-        if distance <= distance_pct:
-
-            current["points"].append(point)
-
-            prices = [
-                x["price"]
-                for x in current["points"]
-            ]
-
-            current["price"] = (
-                sum(prices)
-                / len(prices)
-            )
-
+        if distance <= CLUSTER_DISTANCE_PCT:
+            current_cluster.append(level)
         else:
+            clusters.append([level])
 
-            clusters.append(
-                {
-                    "points": [point],
-                    "price": price,
-                }
-            )
+    result: List[Dict[str, Any]] = []
 
-    return clusters
+    for cluster in clusters:
 
+        prices = [
+            x["price"]
+            for x in cluster
+        ]
 
-# ============================================================
-# LOCAL TOUCHES
-# ============================================================
+        times = [
+            x["time"]
+            for x in cluster
+        ]
 
-def _local_touches(
-    candles,
-    level,
-    distance_pct=LOCAL_TOUCH_DISTANCE_PCT,
-):
+        indices = [
+            x["index"]
+            for x in cluster
+        ]
 
-    if not candles:
-        return 0
+        avg_price = sum(prices) / len(prices)
 
-    count = 0
-
-    for candle in candles[-160:]:
-
-        high = candle["high"]
-        low = candle["low"]
-
-        high_distance = (
-            abs(high - level)
-            / level
-            * 100
+        result.append(
+            {
+                "price": avg_price,
+                "touches": len(cluster),
+                "first_time": min(times),
+                "last_time": max(times),
+                "first_index": min(indices),
+                "last_index": max(indices),
+            }
         )
 
-        low_distance = (
-            abs(low - level)
-            / level
-            * 100
-        )
-
-        if (
-            high_distance <= distance_pct
-            or low_distance <= distance_pct
-        ):
-            count += 1
-
-    return count
-
-
-# ============================================================
-# SWEEPED / TAKEN
-# ============================================================
-
-def _level_has_been_swept(
-    level,
-    candles_1h,
-    current_price,
-):
-
-    price = level["price"]
-    level_type = level["type"]
-
-    if not candles_1h:
-        return False
-
-    # We intentionally don't use the latest candle
-    # as a definitive sweep if it is still forming.
-    closed = candles_1h[:-1]
-
-    # Search recent history after the swing.
-    start_index = max(
-        0,
-        level["index"] - 2,
-    )
-
-    relevant = closed[start_index:]
-
-    for candle in relevant:
-
-        high = candle["high"]
-        low = candle["low"]
-        close = candle["close"]
-
-        # ----------------------------------------------------
-        # BSL
-        # ----------------------------------------------------
-
-        if level_type == "BSL":
-
-            if (
-                high > price
-                and close < price
-            ):
-                return True
-
-        # ----------------------------------------------------
-        # SSL
-        # ----------------------------------------------------
-
-        elif level_type == "SSL":
-
-            if (
-                low < price
-                and close > price
-            ):
-                return True
-
-    return False
+    return result
 
 
 # ============================================================
 # FRESHNESS
 # ============================================================
 
-def _freshness_score(
-    index,
-    candle_count,
-):
+def freshness_score(
+    level: Dict[str, Any],
+    candles: List[Dict[str, Any]],
+) -> float:
 
-    age = (
-        candle_count
-        - 1
-        - index
-    )
+    index = int(level["last_index"])
 
-    if age <= 8:
-        return 20
+    age = len(candles) - 1 - index
 
-    if age <= 20:
-        return 16
+    if age <= 10:
+        return 25.0
 
-    if age <= 40:
-        return 12
+    if age <= 30:
+        return 20.0
 
-    if age <= 80:
-        return 7
+    if age <= 60:
+        return 15.0
 
-    return 2
+    if age <= 90:
+        return 10.0
+
+    if age <= MAX_LEVEL_AGE_1H:
+        return 5.0
+
+    return 0.0
 
 
 # ============================================================
-# STRUCTURAL SCORE
+# LOCAL TOUCHES
 # ============================================================
 
-def _cluster_strength(
-    cluster,
-    candles_1h,
-    candles_15m=None,
-    candles_5m=None,
-    candles_1m=None,
-):
+def count_local_touches(
+    level_price: float,
+    candles: List[Dict[str, Any]],
+) -> int:
 
-    points = cluster["points"]
+    touches = 0
 
-    touches = len(points)
+    for candle in candles:
 
-    latest_index = max(
-        p["index"]
-        for p in points
-    )
+        high = candle["high"]
+        low = candle["low"]
 
-    freshness = _freshness_score(
-        latest_index,
-        len(candles_1h),
-    )
-
-    # --------------------------------------------------------
-    # Base structural score
-    # --------------------------------------------------------
-
-    # 50 base
-    # + repeated swings
-    # + freshness
-    # + local reinforcement
-
-    strength = 50
-
-    # Repeated 1H swing touches.
-    strength += min(
-        18,
-        max(0, touches - 1) * 6,
-    )
-
-    # Freshness.
-    strength += freshness
-
-    # Local reinforcement.
-    level_price = cluster["price"]
-
-    local = (
-        _local_touches(
-            candles_15m,
+        high_distance = pct_distance(
+            high,
             level_price,
         )
-        + _local_touches(
-            candles_5m,
+
+        low_distance = pct_distance(
+            low,
             level_price,
         )
+
+        if high_distance <= LOCAL_TOUCH_DISTANCE_PCT:
+            touches += 1
+
+        elif low_distance <= LOCAL_TOUCH_DISTANCE_PCT:
+            touches += 1
+
+    return touches
+
+
+# ============================================================
+# SWEPT DETECTION
+# ============================================================
+
+def level_has_been_swept(
+    level_price: float,
+    level_type: str,
+    candles: List[Dict[str, Any]],
+) -> bool:
+
+    for candle in candles:
+
+        high = candle["high"]
+        low = candle["low"]
+        close = candle["close"]
+
+        # BSL:
+        # цена забрала хай,
+        # затем закрылась обратно ниже уровня
+        if level_type == "BSL":
+
+            if high > level_price and close < level_price:
+                return True
+
+        # SSL:
+        # цена забрала лоу,
+        # затем закрылась обратно выше уровня
+        elif level_type == "SSL":
+
+            if low < level_price and close > level_price:
+                return True
+
+    return False
+
+
+# ============================================================
+# STRENGTH
+# ============================================================
+
+def calculate_strength(
+    level: Dict[str, Any],
+    candles_1h: List[Dict[str, Any]],
+    candles_15m: List[Dict[str, Any]],
+) -> float:
+
+    score = 50.0
+
+    touches = int(
+        level.get("touches", 1)
     )
 
-    strength += min(
-        12,
-        local,
+    # Повторные тесты уровня
+    if touches >= 2:
+        score += 8
+
+    if touches >= 3:
+        score += 6
+
+    if touches >= 4:
+        score += 5
+
+    # Свежесть
+    score += freshness_score(
+        level,
+        candles_1h,
     )
+
+    # Локальные подтверждения
+    local_touches = count_local_touches(
+        level["price"],
+        candles_15m,
+    )
+
+    if local_touches >= 2:
+        score += 4
+
+    if local_touches >= 4:
+        score += 4
 
     return min(
-        100,
-        round(strength),
+        round(score, 2),
+        100.0,
     )
 
 
 # ============================================================
-# ZONE SELECTION
+# MAJOR ZONE SELECTION
 # ============================================================
 
-def _select_major_zones(
-    candidates,
-    current_price,
-    max_levels,
-):
+def select_major_zones(
+    levels: List[Dict[str, Any]],
+    price: float,
+    candles_1h: List[Dict[str, Any]],
+    candles_15m: List[Dict[str, Any]],
+    level_type: str,
+) -> List[Dict[str, Any]]:
 
-    if not candidates:
-        return []
+    candidates: List[Dict[str, Any]] = []
 
-    # Strongest first.
-    candidates = sorted(
-        candidates,
+    for level in levels:
+
+        level_price = level["price"]
+
+        # ----------------------------------------------------
+        # Направление
+        # ----------------------------------------------------
+
+        if level_type == "BSL":
+
+            if level_price <= price:
+                continue
+
+        elif level_type == "SSL":
+
+            if level_price >= price:
+                continue
+
+        # ----------------------------------------------------
+        # НОВЫЙ ФИЛЬТР ДИСТАНЦИИ
+        # ----------------------------------------------------
+
+        distance = pct_distance(
+            price,
+            level_price,
+        )
+
+        if distance < MIN_MAJOR_DISTANCE_PCT:
+            # Это уже практически текущая цена.
+            # Такой уровень не должен называться MAJOR.
+            continue
+
+        # ----------------------------------------------------
+        # Слишком старый уровень
+        # ----------------------------------------------------
+
+        age = (
+            len(candles_1h)
+            - 1
+            - int(level["last_index"])
+        )
+
+        if age > MAX_LEVEL_AGE_1H:
+            continue
+
+        # ----------------------------------------------------
+        # Sweep
+        # ----------------------------------------------------
+
+        if level_has_been_swept(
+            level_price,
+            level_type,
+            candles_1h,
+        ):
+            continue
+
+        # ----------------------------------------------------
+        # Strength
+        # ----------------------------------------------------
+
+        strength = calculate_strength(
+            level,
+            candles_1h,
+            candles_15m,
+        )
+
+        if strength < MIN_MAJOR_STRENGTH:
+            continue
+
+        zone_low = (
+            level_price
+            * (1 - ZONE_WIDTH_PCT / 100)
+        )
+
+        zone_high = (
+            level_price
+            * (1 + ZONE_WIDTH_PCT / 100)
+        )
+
+        candidates.append(
+            {
+                "price": round(level_price, 4),
+                "zone_low": round(zone_low, 4),
+                "zone_high": round(zone_high, 4),
+                "type": level_type,
+                "strength": round(strength, 2),
+                "touches": level["touches"],
+                "distance_pct": round(distance, 3),
+                "age_1h": age,
+                "status": "FRESH",
+            }
+        )
+
+    # --------------------------------------------------------
+    # Сначала сильные зоны
+    # --------------------------------------------------------
+
+    candidates.sort(
         key=lambda x: (
-            -x["strength"],
-            -x["touches"],
-            -x["freshness"],
+            x["strength"],
+            x["touches"],
+            -x["distance_pct"],
         ),
+        reverse=True,
     )
 
-    selected = []
+    selected: List[Dict[str, Any]] = []
 
     for candidate in candidates:
 
-        if len(selected) >= max_levels:
-            break
-
-        price = candidate["price"]
-
-        # ----------------------------------------------------
-        # Don't keep levels too close to current price
-        # if they are obviously intermediate noise.
-        #
-        # Very close levels can still be useful,
-        # so we only reject them if another selected
-        # zone already covers the same area.
-        # ----------------------------------------------------
-
-        duplicate = False
+        too_close = False
 
         for existing in selected:
 
-            distance = (
-                abs(price - existing["price"])
-                / existing["price"]
-                * 100
+            distance = pct_distance(
+                candidate["price"],
+                existing["price"],
             )
 
             if distance < MIN_ZONE_GAP_PCT:
-
-                duplicate = True
+                too_close = True
                 break
 
-        if duplicate:
+        if too_close:
             continue
 
         selected.append(candidate)
 
-    # Sort by actual price.
+        if len(selected) >= MAX_LEVELS_PER_SIDE:
+            break
+
+    # --------------------------------------------------------
+    # Для отображения сортируем по близости к цене
+    # --------------------------------------------------------
+
     selected.sort(
-        key=lambda x: x["price"]
+        key=lambda x: x["distance_pct"]
     )
 
     return selected
@@ -640,496 +655,241 @@ def _select_major_zones(
 # ============================================================
 
 def find_major_liquidity(
-    candles_1h,
-    current_price,
-    max_levels=MAX_TOTAL_LEVELS,
-    candles_15m=None,
-    candles_5m=None,
-    candles_1m=None,
-    include_swept=False,
-):
-
-    """
-    Только 1H создаёт Major Liquidity.
-
-    15M/5M/1M:
-        только усиливают уже существующие 1H зоны.
-
-    Возвращаем:
-        BSL above price
-        SSL below price
-
-    Динамически пересчитывается каждый вызов.
-    """
-
-    if (
-        not candles_1h
-        or len(candles_1h) < 20
-    ):
-        return []
-
-    price = float(current_price)
+    candles_1h: List[Dict[str, Any]],
+    candles_15m: List[Dict[str, Any]],
+    price: float,
+) -> Dict[str, List[Dict[str, Any]]]:
 
     # --------------------------------------------------------
-    # Exclude currently forming 1H candle.
+    # ВАЖНО:
+    # последняя 1H свеча может быть ещё формирующейся.
+    # Не используем её как окончательный swing.
     # --------------------------------------------------------
 
-    closed = candles_1h[:-1]
+    confirmed_1h = candles_1h[:-1]
 
-    if len(closed) < 10:
-        return []
+    swing_highs = find_swing_highs(
+        confirmed_1h
+    )
 
-    # --------------------------------------------------------
-    # Collect raw swings.
-    # --------------------------------------------------------
-
-    highs, lows = _collect_swings(
-        closed
+    swing_lows = find_swing_lows(
+        confirmed_1h
     )
 
     # --------------------------------------------------------
-    # Cluster independently:
-    #
-    # BSL with BSL
-    # SSL with SSL
+    # Кластеры
     # --------------------------------------------------------
 
-    bsl_clusters = _cluster_swings(
-        highs
+    bsl_clusters = cluster_levels(
+        swing_highs
     )
 
-    ssl_clusters = _cluster_swings(
-        lows
+    ssl_clusters = cluster_levels(
+        swing_lows
     )
 
-    candidates = []
+    # --------------------------------------------------------
+    # Выбор MAJOR
+    # --------------------------------------------------------
 
-    # ========================================================
-    # BSL
-    # ========================================================
+    bsl = select_major_zones(
+        bsl_clusters,
+        price,
+        confirmed_1h,
+        candles_15m,
+        "BSL",
+    )
 
-    for cluster in bsl_clusters:
+    ssl = select_major_zones(
+        ssl_clusters,
+        price,
+        confirmed_1h,
+        candles_15m,
+        "SSL",
+    )
 
-        level_price = cluster["price"]
+    # --------------------------------------------------------
+    # Общий лимит
+    # --------------------------------------------------------
 
-        # BSL must currently be ABOVE price.
-        if level_price <= price:
-            continue
+    combined = (
+        [("BSL", x) for x in bsl]
+        + [("SSL", x) for x in ssl]
+    )
 
-        points = cluster["points"]
+    combined.sort(
+        key=lambda item: item[1]["strength"],
+        reverse=True,
+    )
 
-        latest_index = max(
-            p["index"]
-            for p in points
-        )
-
-        age = (
-            len(closed)
-            - 1
-            - latest_index
-        )
-
-        if age > MAX_LEVEL_AGE_1H:
-            continue
-
-        touches = len(points)
-
-        local_touches = (
-            _local_touches(
-                candles_15m,
-                level_price,
-            )
-            + _local_touches(
-                candles_5m,
-                level_price,
-            )
-            + _local_touches(
-                candles_1m,
-                level_price,
-            )
-        )
-
-        freshness = _freshness_score(
-            latest_index,
-            len(closed),
-        )
-
-        strength = _cluster_strength(
-            cluster,
-            closed,
-            candles_15m,
-            candles_5m,
-            candles_1m,
-        )
-
-        swept = _level_has_been_swept(
-            {
-                "price": level_price,
-                "type": "BSL",
-                "index": latest_index,
-            },
-            closed,
-            price,
-        )
-
-        if swept and not include_swept:
-            continue
-
-        if strength < MIN_MAJOR_STRENGTH:
-            continue
-
-        candidates.append(
-            {
-                "price": level_price,
-                "side": "SHORT",
-                "type": "BSL",
-                "kind": "1H MAJOR BSL",
-
-                "touches": touches,
-
-                "local_touches": local_touches,
-
-                "strength": strength,
-
-                "freshness": freshness,
-
-                "age_1h": age,
-
-                "swept": swept,
-
-                "taken": swept,
-
-                "zone_low": (
-                    level_price
-                    * (
-                        1
-                        - ZONE_WIDTH_PCT
-                        / 100
-                    )
-                ),
-
-                "zone_high": (
-                    level_price
-                    * (
-                        1
-                        + ZONE_WIDTH_PCT
-                        / 100
-                    )
-                ),
-
-                "index": latest_index,
-            }
-        )
-
-    # ========================================================
-    # SSL
-    # ========================================================
-
-    for cluster in ssl_clusters:
-
-        level_price = cluster["price"]
-
-        # SSL must currently be BELOW price.
-        if level_price >= price:
-            continue
-
-        points = cluster["points"]
-
-        latest_index = max(
-            p["index"]
-            for p in points
-        )
-
-        age = (
-            len(closed)
-            - 1
-            - latest_index
-        )
-
-        if age > MAX_LEVEL_AGE_1H:
-            continue
-
-        touches = len(points)
-
-        local_touches = (
-            _local_touches(
-                candles_15m,
-                level_price,
-            )
-            + _local_touches(
-                candles_5m,
-                level_price,
-            )
-            + _local_touches(
-                candles_1m,
-                level_price,
-            )
-        )
-
-        freshness = _freshness_score(
-            latest_index,
-            len(closed),
-        )
-
-        strength = _cluster_strength(
-            cluster,
-            closed,
-            candles_15m,
-            candles_5m,
-            candles_1m,
-        )
-
-        swept = _level_has_been_swept(
-            {
-                "price": level_price,
-                "type": "SSL",
-                "index": latest_index,
-            },
-            closed,
-            price,
-        )
-
-        if swept and not include_swept:
-            continue
-
-        if strength < MIN_MAJOR_STRENGTH:
-            continue
-
-        candidates.append(
-            {
-                "price": level_price,
-                "side": "LONG",
-                "type": "SSL",
-                "kind": "1H MAJOR SSL",
-
-                "touches": touches,
-
-                "local_touches": local_touches,
-
-                "strength": strength,
-
-                "freshness": freshness,
-
-                "age_1h": age,
-
-                "swept": swept,
-
-                "taken": swept,
-
-                "zone_low": (
-                    level_price
-                    * (
-                        1
-                        - ZONE_WIDTH_PCT
-                        / 100
-                    )
-                ),
-
-                "zone_high": (
-                    level_price
-                    * (
-                        1
-                        + ZONE_WIDTH_PCT
-                        / 100
-                    )
-                ),
-
-                "index": latest_index,
-            }
-        )
-
-    # ========================================================
-    # Separate sides
-    # ========================================================
-
-    bsl = [
-        x
-        for x in candidates
-        if x["type"] == "BSL"
+    combined = combined[
+        :MAX_TOTAL_LEVELS
     ]
 
-    ssl = [
-        x
-        for x in candidates
-        if x["type"] == "SSL"
+    result_bsl = [
+        x for side, x in combined
+        if side == "BSL"
     ]
 
-    # ========================================================
-    # Select real Major zones
-    # ========================================================
+    result_ssl = [
+        x for side, x in combined
+        if side == "SSL"
+    ]
 
-    selected_bsl = _select_major_zones(
-        bsl,
-        price,
-        MAX_LEVELS_PER_SIDE,
+    # После общего лимита снова сортируем
+    result_bsl.sort(
+        key=lambda x: x["distance_pct"]
     )
 
-    selected_ssl = _select_major_zones(
-        ssl,
-        price,
-        MAX_LEVELS_PER_SIDE,
+    result_ssl.sort(
+        key=lambda x: x["distance_pct"]
     )
 
-    result = (
-        selected_bsl
-        + selected_ssl
-    )
+    return {
+        "BSL": result_bsl,
+        "SSL": result_ssl,
+    }
 
-    # ========================================================
-    # Sort by distance from current price
-    # ========================================================
 
-    result.sort(
+# ============================================================
+# TARGET LIQUIDITY
+# ============================================================
+
+def get_target_liquidity(
+    major_liquidity: Dict[str, List[Dict[str, Any]]],
+    direction: str,
+    entry: float,
+) -> Optional[Dict[str, Any]]:
+
+    if direction == "LONG":
+
+        levels = major_liquidity.get(
+            "BSL",
+            [],
+        )
+
+        candidates = [
+            x
+            for x in levels
+            if x["price"] > entry
+        ]
+
+    else:
+
+        levels = major_liquidity.get(
+            "SSL",
+            [],
+        )
+
+        candidates = [
+            x
+            for x in levels
+            if x["price"] < entry
+        ]
+
+    if not candidates:
+        return None
+
+    candidates.sort(
         key=lambda x: abs(
-            x["price"] - price
+            x["price"] - entry
         )
     )
 
-    return result[:max_levels]
+    return candidates[0]
+
+
+# ============================================================
+# MARKET DATA
+# ============================================================
+
+def get_market_data() -> Dict[str, Any]:
+
+    # --------------------------------------------------------
+    # ВАЖНО:
+    # всё загружается заново.
+    # Никакого старого кеша зон.
+    # --------------------------------------------------------
+
+    candles_1h = get_klines(
+        "1h",
+        LOOKBACK_1H,
+    )
+
+    candles_15m = get_klines(
+        "15m",
+        LOOKBACK_15M,
+    )
+
+    candles_5m = get_klines(
+        "5m",
+        LOOKBACK_5M,
+    )
+
+    candles_1m = get_klines(
+        "1m",
+        LOOKBACK_1M,
+    )
+
+    price = get_current_price()
+
+    # --------------------------------------------------------
+    # ПОЛНЫЙ ПЕРЕСЧЁТ MAJOR
+    # --------------------------------------------------------
+
+    major_liquidity = find_major_liquidity(
+        candles_1h,
+        candles_15m,
+        price,
+    )
+
+    return {
+        "symbol": SYMBOL,
+        "price": price,
+
+        "candles": {
+            "1h": candles_1h,
+            "15m": candles_15m,
+            "5m": candles_5m,
+            "1m": candles_1m,
+        },
+
+        "major_liquidity": major_liquidity,
+
+        "updated_at": time.time(),
+    }
 
 
 # ============================================================
 # COMPATIBILITY
 # ============================================================
 
-def get_fresh_liquidity(
-    *args,
-    **kwargs,
-):
+def get_major_liquidity(
+    price: Optional[float] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+
+    candles_1h = get_klines(
+        "1h",
+        LOOKBACK_1H,
+    )
+
+    candles_15m = get_klines(
+        "15m",
+        LOOKBACK_15M,
+    )
+
+    if price is None:
+        price = get_current_price()
 
     return find_major_liquidity(
-        *args,
-        **kwargs,
-    )
-
-
-def get_all_major_liquidity(
-    *args,
-    **kwargs,
-):
-
-    return find_major_liquidity(
-        *args,
-        **kwargs,
-    )
-
-
-# ============================================================
-# TARGET
-# ============================================================
-
-def get_target_liquidity(
-    major_levels,
-    current_price,
-    direction,
-    exclude_level=None,
-):
-
-    price = float(current_price)
-
-    excluded = (
-        float(exclude_level)
-        if exclude_level is not None
-        else None
-    )
-
-    candidates = []
-
-    for level in major_levels or []:
-
-        if _level_has_been_swept_local(level):
-            continue
-
-        level_price = _level_price(level)
-
-        if level_price is None:
-            continue
-
-        if excluded is not None:
-
-            if (
-                abs(
-                    level_price
-                    - excluded
-                )
-                / excluded
-                * 100
-                < 0.05
-            ):
-                continue
-
-        if direction == "LONG":
-
-            if level_price > price:
-                candidates.append(level)
-
-        elif direction == "SHORT":
-
-            if level_price < price:
-                candidates.append(level)
-
-    if not candidates:
-        return None
-
-    return min(
-        candidates,
-        key=lambda x: abs(
-            _level_price(x) - price
-        ),
-    )
-
-
-def _level_has_been_swept_local(level):
-
-    if not isinstance(level, dict):
-        return False
-
-    return bool(
-        level.get("swept")
-        or level.get("taken")
-        or level.get("used")
-        or level.get("consumed")
-    )
-
-
-# ============================================================
-# SWEEP COMPATIBILITY
-# ============================================================
-
-def detect_sweep(
-    candles_1h,
-    current_price,
-    direction=None,
-    major_levels=None,
-):
-
-    from strategy import (
-        get_1h_direction,
-        find_sweep,
-    )
-
-    if direction is None:
-
-        direction = get_1h_direction(
-            candles_1h
-        )
-
-    if major_levels is None:
-
-        major_levels = find_major_liquidity(
-            candles_1h,
-            current_price,
-            MAX_TOTAL_LEVELS,
-        )
-
-    return find_sweep(
         candles_1h,
-        major_levels,
-        direction,
+        candles_15m,
+        price,
     )
 
 
-detect_fresh_sweep = detect_sweep
+def market_snapshot() -> Dict[str, Any]:
+    return get_market_data()
 
 
 # ============================================================
@@ -1137,81 +897,69 @@ detect_fresh_sweep = detect_sweep
 # ============================================================
 
 def format_major_liquidity(
-    major_levels,
-    current_price,
-):
+    data: Dict[str, Any],
+) -> str:
+
+    price = data["price"]
+    liquidity = data["major_liquidity"]
 
     lines = []
 
-    price = float(current_price)
-
-    bsl = [
-        x
-        for x in major_levels or []
-        if x.get("type") == "BSL"
-    ]
-
-    ssl = [
-        x
-        for x in major_levels or []
-        if x.get("type") == "SSL"
-    ]
-
-    bsl.sort(
-        key=lambda x: x["price"]
-    )
-
-    ssl.sort(
-        key=lambda x: x["price"],
-        reverse=True,
-    )
-
     lines.append(
-        f"PRICE: ${price:.4f}"
+        f"💰 SOL: ${price:.4f}"
     )
 
     lines.append("")
-    lines.append("BSL:")
+    lines.append("🔴 BSL MAJOR")
 
-    for level in bsl:
+    bsl = liquidity.get("BSL", [])
 
-        distance = (
-            abs(
-                level["price"]
-                - price
-            )
-            / price
-            * 100
-        )
+    if not bsl:
+        lines.append("— нет актуальных зон")
+
+    for i, zone in enumerate(bsl, 1):
 
         lines.append(
-            f"  ${level['price']:.4f}"
-            f" | +{distance:.2f}%"
-            f" | S{level['strength']}"
-            f" | touches={level['touches']}"
-            f" | age={level['age_1h']}H"
+            f"{i}. ${zone['price']:.4f} "
+            f"• {zone['distance_pct']:.2f}% "
+            f"• S{zone['strength']:.0f}"
         )
 
     lines.append("")
-    lines.append("SSL:")
+    lines.append("🟢 SSL MAJOR")
 
-    for level in ssl:
+    ssl = liquidity.get("SSL", [])
 
-        distance = (
-            abs(
-                level["price"]
-                - price
-            )
-            / price
-            * 100
-        )
+    if not ssl:
+        lines.append("— нет актуальных зон")
+
+    for i, zone in enumerate(ssl, 1):
 
         lines.append(
-            f"  ${level['price']:.4f}"
-            f" | -{distance:.2f}%"
-            f" | S{level['strength']}"
-            f" | touches={level['touches']}"
-            f" | age={level['age_1h']}H"
+            f"{i}. ${zone['price']:.4f} "
+            f"• {zone['distance_pct']:.2f}% "
+            f"• S{zone['strength']:.0f}"
         )
 
     return "\n".join(lines)
+
+
+# ============================================================
+# TEST
+# ============================================================
+
+if __name__ == "__main__":
+
+    print("TradeMind market.py 6.6")
+
+    try:
+        data = get_market_data()
+
+        print(
+            format_major_liquidity(data)
+        )
+
+    except Exception as e:
+        print(
+            f"MARKET ERROR: {e}"
+        )
