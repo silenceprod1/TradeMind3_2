@@ -1,6 +1,6 @@
 """
-Диагностический бэктест v5.
-Добавлен multi-режим: прогон 10 монет и сводка.
+Диагностический бэктест v6.
+Добавлен параметр hours в run_multi_backtest_with_hours.
 """
 
 import argparse
@@ -308,7 +308,7 @@ def print_report(symbol, trades, diag):
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v5 — {symbol}")
+    print(f"ОТЧЁТ БЭКТЕСТА v6 — {symbol}")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -417,10 +417,7 @@ def print_report(symbol, trades, diag):
     print(f"Max DD:    -{max_dd:.2f}%")
 
 
-def run_multi_backtest():
-    """
-    Прогон стратегии по списку монет + сводка.
-    """
+def run_multi_backtest_with_hours(max_hours):
     symbols = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT",
         "BNBUSDT", "XRPUSDT", "DOGEUSDT",
@@ -432,7 +429,7 @@ def run_multi_backtest():
 
     for sym in symbols:
         try:
-            trades, diag = run_backtest(sym, DEFAULT_MAX_HOURS)
+            trades, diag = run_backtest(sym, max_hours)
             print_report(sym, trades, diag)
 
             if trades:
@@ -446,15 +443,13 @@ def run_multi_backtest():
                                     timeout, wr, pnl))
             else:
                 all_summary.append((sym, 0, 0, 0, 0, 0, 0.0))
-
         except Exception as exc:
             print(f"[BT] {sym} FAILED: {exc}", flush=True)
             all_summary.append((sym, 0, 0, 0, 0, 0, 0.0))
 
-    # Сводка
     print()
     print("=" * 70)
-    print("СВОДКА ПО ВСЕМ МОНЕТАМ")
+    print(f"СВОДКА ПО ВСЕМ МОНЕТАМ (max_hours={max_hours})")
     print("=" * 70)
     print(f"{'Символ':<10}{'Сделок':<8}{'TP':<5}{'SL':<5}"
           f"{'TO':<5}{'WinRate':<10}{'PnL':<10}")
@@ -501,16 +496,19 @@ def run_multi_backtest():
     print("=" * 70)
 
 
+def run_multi_backtest():
+    run_multi_backtest_with_hours(DEFAULT_MAX_HOURS)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="SOLUSDT")
     parser.add_argument("--max-hours", type=int, default=DEFAULT_MAX_HOURS)
-    parser.add_argument("--multi", action="store_true",
-                        help="Прогнать 10 монет и дать сводку")
+    parser.add_argument("--multi", action="store_true")
     args = parser.parse_args()
 
     if args.multi:
-        run_multi_backtest()
+        run_multi_backtest_with_hours(args.max_hours)
     else:
         trades, diag = run_backtest(args.symbol, args.max_hours)
         print_report(args.symbol, trades, diag)
