@@ -1,18 +1,15 @@
 # ============================================================
-# TradeMind 7.4
+# TradeMind 7.5
 # market.py
 #
-# Изменения vs 7.3:
-# - Ослаблены фильтры для поиска ближних зон ликвидности
-# - MIN_MAJOR_DISTANCE_PCT: 0.15 -> 0.08
-# - MIN_MAJOR_STRENGTH: 58 -> 48
-# - MIN_ZONE_GAP_PCT: 0.70 -> 0.40
-# - SWEPT_MIN_DEPTH_PCT: 0.15 -> 0.30
-# - SWEEP_RECENT_LOOKBACK_1H: 30 -> 15
-# - MAX_LEVELS_PER_SIDE: 4 -> 6
-# - MAX_TOTAL_LEVELS: 8 -> 12
-# - SWING_RIGHT: 1 -> 2
-# - base strength: 48 -> 40
+# Изменения vs 7.4:
+# - Новый детектор ATH/ATL extension:
+#   Если цена выше всех 1H свинг-хаев за окно -> генерируем
+#   синтетические BSL выше цены (+0.5%, +1%, +2%, +3%).
+#   Если цена ниже всех свинг-лоу -> генерируем SSL ниже.
+#   Помечаются source="ATH" / "ATL".
+# - MAX_LEVELS_PER_SIDE: 6 -> 4 (чтобы UI не заваливался)
+# - ROUND fallback остался, но работает после ATH/ATL
 # ============================================================
 
 from __future__ import annotations
@@ -26,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
-MARKET_VERSION = "7.4"
+MARKET_VERSION = "7.5"
 
 BASE_URL = "https://api.binance.com/api/v3"
 REQUEST_TIMEOUT = 10
@@ -58,7 +55,7 @@ _klines_lock = threading.RLock()
 
 
 # ============================================================
-# SWING SETTINGS
+# SWINGS
 # ============================================================
 
 SWING_LEFT = 2
@@ -72,27 +69,20 @@ SWING_RIGHT_D1 = 3
 
 
 # ============================================================
-# LIQUIDITY SETTINGS (ослаблены)
+# LIQUIDITY
 # ============================================================
 
 CLUSTER_DISTANCE_PCT = 0.15
-
 ZONE_WIDTH_PCT = 0.20
-
 MIN_ZONE_GAP_PCT = 0.40
-
 MIN_MAJOR_DISTANCE_PCT = 0.08
-
 MIN_MAJOR_STRENGTH = 48.0
-
 MIN_MINOR_STRENGTH = 38.0
-
 MIN_ROUND_STRENGTH = 42.0
+MIN_ATH_STRENGTH = 55.0
 
-MAX_LEVELS_PER_SIDE = 6
-
-MAX_TOTAL_LEVELS = 12
-
+MAX_LEVELS_PER_SIDE = 4
+MAX_TOTAL_LEVELS = 8
 MIN_LEVELS_PER_SIDE_1H = 3
 
 
@@ -102,6 +92,17 @@ MIN_LEVELS_PER_SIDE_1H = 3
 
 ROUND_MAX_COUNT = 5
 ROUND_MAX_DISTANCE_PCT = 20.0
+
+
+# ============================================================
+# ATH / ATL EXTENSION
+# ============================================================
+
+# Шаги для синтетических уровней, если цена на ATH/ATL.
+ATH_EXTENSION_STEPS_PCT = [0.5, 1.0, 2.0, 3.0]
+
+# Окно для проверки ATH/ATL — считаем максимум/минимум за N 1H свечей.
+ATH_LOOKBACK_1H = 180
 
 
 # ============================================================
@@ -143,7 +144,7 @@ FVG_MAX_LOOKBACK = 100
 
 
 # ============================================================
-# SWEEP DETECTION
+# SWEEP
 # ============================================================
 
 MIN_SWEEP_DEPTH_PCT = 0.08
@@ -151,7 +152,7 @@ MAX_SWEEP_LOOKBACK_1H = 8
 
 
 # ============================================================
-# HTTP SESSION
+# HTTP
 # ============================================================
 
 _thread_local = threading.local()
@@ -162,7 +163,7 @@ def _get_session():
     if session is None:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "TradeMind/7.4",
+            "User-Agent": "TradeMind/7.5",
             "Accept": "application/json",
         })
         adapter = requests.adapters.HTTPAdapter(
@@ -258,34 +259,15 @@ def get_klines(interval, limit, symbol="SOLUSDT"):
     return data
 
 
-# ============================================================
-# CANDLE HELPERS
-# ============================================================
-
 def candle_open(c): return float(c.get("open", 0))
 def candle_high(c): return float(c.get("high", 0))
 def candle_low(c): return float(c.get("low", 0))
 def candle_close(c): return float(c.get("close", 0))
-
-
-def candle_body(c):
-    return abs(candle_close(c) - candle_open(c))
-
-
-def candle_range(c):
-    return max(candle_high(c) - candle_low(c), 1e-12)
-
-
-def body_ratio(c):
-    return candle_body(c) / candle_range(c)
-
-
-def is_bullish(c):
-    return candle_close(c) > candle_open(c)
-
-
-def is_bearish(c):
-    return candle_close(c) < candle_open(c)
+def candle_body(c): return abs(candle_close(c) - candle_open(c))
+def candle_range(c): return max(candle_high(c) - candle_low(c), 1e-12)
+def body_ratio(c): return candle_body(c) / candle_range(c)
+def is_bullish(c): return candle_close(c) > candle_open(c)
+def is_bearish(c): return candle_close(c) < candle_open(c)
 
 
 def distance_pct(a, b):
@@ -295,7 +277,7 @@ def distance_pct(a, b):
 
 
 # ============================================================
-# SWINGS (generic)
+# SWINGS
 # ============================================================
 
 def _find_swings(candles, left, right, kind):
@@ -417,7 +399,7 @@ def _analyze_d1_context(candles_d1, price):
 
 
 # ============================================================
-# FVG DETECTION
+# FVG
 # ============================================================
 
 def detect_fvgs(candles, tf, price):
@@ -544,10 +526,6 @@ def freshness_score(level, candles, max_age):
     return 0.0
 
 
-# ============================================================
-# LOCAL TOUCHES
-# ============================================================
-
 def count_local_touches(level_price, candles):
     touches = 0
     for candle in candles:
@@ -564,10 +542,6 @@ def count_local_touches(level_price, candles):
             touches += 1
     return touches
 
-
-# ============================================================
-# LEVEL SWEPT
-# ============================================================
 
 def level_has_been_swept(level_price, level_type, candles, lookback):
     if not candles:
@@ -592,10 +566,6 @@ def level_has_been_swept(level_price, level_type, candles, lookback):
     return False
 
 
-# ============================================================
-# STRENGTH (база снижена до 40)
-# ============================================================
-
 def calculate_strength(level, candles, candles_15m, max_age, base=40.0):
     score = base
 
@@ -616,6 +586,99 @@ def calculate_strength(level, candles, candles_15m, max_age, base=40.0):
         score += 5
 
     return min(round(score, 2), 100.0)
+
+
+# ============================================================
+# ATH / ATL EXTENSION
+# ============================================================
+
+def detect_ath_extension(candles_1h, price):
+    """
+    Если цена выше всех 1H свинг-хаев за окно ATH_LOOKBACK_1H,
+    генерируем синтетические BSL-уровни выше цены.
+    """
+    if not candles_1h or len(candles_1h) < 20:
+        return []
+
+    window = candles_1h[-ATH_LOOKBACK_1H:]
+    confirmed = window[:-1]
+
+    if not confirmed:
+        return []
+
+    max_high = max(candle_high(c) for c in confirmed)
+    if price <= max_high:
+        return []
+
+    results = []
+    for step_pct in ATH_EXTENSION_STEPS_PCT:
+        target = price * (1 + step_pct / 100)
+
+        zone_low = target * (1 - ZONE_WIDTH_PCT / 100.0)
+        zone_high = target * (1 + ZONE_WIDTH_PCT / 100.0)
+
+        distance = (target - price) / price * 100
+
+        results.append({
+            "price": round(target, 8),
+            "zone_low": round(zone_low, 8),
+            "zone_high": round(zone_high, 8),
+            "type": "BSL",
+            "strength": MIN_ATH_STRENGTH,
+            "touches": 1,
+            "distance_pct": round(distance, 4),
+            "age_1h": 0,
+            "source": "ATH",
+            "status": "FRESH",
+            "swept": False, "taken": False,
+            "used": False, "consumed": False,
+        })
+
+    return results
+
+
+def detect_atl_extension(candles_1h, price):
+    """
+    Если цена ниже всех 1H свинг-лоу за окно — генерируем SSL ниже.
+    """
+    if not candles_1h or len(candles_1h) < 20:
+        return []
+
+    window = candles_1h[-ATH_LOOKBACK_1H:]
+    confirmed = window[:-1]
+
+    if not confirmed:
+        return []
+
+    min_low = min(candle_low(c) for c in confirmed)
+    if price >= min_low:
+        return []
+
+    results = []
+    for step_pct in ATH_EXTENSION_STEPS_PCT:
+        target = price * (1 - step_pct / 100)
+
+        zone_low = target * (1 - ZONE_WIDTH_PCT / 100.0)
+        zone_high = target * (1 + ZONE_WIDTH_PCT / 100.0)
+
+        distance = (price - target) / price * 100
+
+        results.append({
+            "price": round(target, 8),
+            "zone_low": round(zone_low, 8),
+            "zone_high": round(zone_high, 8),
+            "type": "SSL",
+            "strength": MIN_ATH_STRENGTH,
+            "touches": 1,
+            "distance_pct": round(distance, 4),
+            "age_1h": 0,
+            "source": "ATL",
+            "status": "FRESH",
+            "swept": False, "taken": False,
+            "used": False, "consumed": False,
+        })
+
+    return results
 
 
 # ============================================================
@@ -688,10 +751,6 @@ def _select_zones(levels, price, candles_ref, candles_15m, level_type,
     return selected
 
 
-# ============================================================
-# ROUND NUMBERS
-# ============================================================
-
 def _round_step(price):
     if price <= 0: return 1.0
     exp = math.floor(math.log10(price)) - 1
@@ -743,10 +802,6 @@ def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
             current -= step
     return results
 
-
-# ============================================================
-# MERGE SOURCES
-# ============================================================
 
 def _merge_sources(sources, limit):
     merged = []
@@ -802,11 +857,22 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
                                         "SSL", MIN_MINOR_STRENGTH, MAX_LEVEL_AGE_15M,
                                         SWEEP_RECENT_LOOKBACK_15M, "15M")
 
-    bsl_round = find_round_number_levels(price, "BSL") if len(bsl_1h) + len(bsl_15m) < MIN_LEVELS_PER_SIDE_1H else []
-    ssl_round = find_round_number_levels(price, "SSL") if len(ssl_1h) + len(ssl_15m) < MIN_LEVELS_PER_SIDE_1H else []
+    # ATH/ATL extension
+    bsl_ath = []
+    ssl_atl = []
 
-    bsl = _merge_sources([bsl_1h, bsl_15m, bsl_round], MAX_LEVELS_PER_SIDE)
-    ssl = _merge_sources([ssl_1h, ssl_15m, ssl_round], MAX_LEVELS_PER_SIDE)
+    if len(bsl_1h) + len(bsl_15m) < MIN_LEVELS_PER_SIDE_1H:
+        bsl_ath = detect_ath_extension(confirmed_1h, price)
+
+    if len(ssl_1h) + len(ssl_15m) < MIN_LEVELS_PER_SIDE_1H:
+        ssl_atl = detect_atl_extension(confirmed_1h, price)
+
+    # ROUND fallback
+    bsl_round = find_round_number_levels(price, "BSL") if len(bsl_1h) + len(bsl_15m) + len(bsl_ath) < MIN_LEVELS_PER_SIDE_1H else []
+    ssl_round = find_round_number_levels(price, "SSL") if len(ssl_1h) + len(ssl_15m) + len(ssl_atl) < MIN_LEVELS_PER_SIDE_1H else []
+
+    bsl = _merge_sources([bsl_1h, bsl_15m, bsl_ath, bsl_round], MAX_LEVELS_PER_SIDE)
+    ssl = _merge_sources([ssl_1h, ssl_15m, ssl_atl, ssl_round], MAX_LEVELS_PER_SIDE)
 
     combined = [("BSL", x) for x in bsl] + [("SSL", x) for x in ssl]
     combined.sort(key=lambda x: x[1]["strength"], reverse=True)
@@ -829,10 +895,6 @@ def find_major_liquidity(candles_1h, price, max_levels=12,
     levels.sort(key=lambda x: x["distance_pct"])
     return levels[:max_levels]
 
-
-# ============================================================
-# TARGET LIQUIDITY
-# ============================================================
 
 def get_target_liquidity(major_liquidity, direction, entry):
     if not major_liquidity: return None
@@ -860,10 +922,6 @@ def get_target_liquidity(major_liquidity, direction, entry):
     candidates.sort(key=lambda x: abs(x["price"] - entry))
     return candidates[0]
 
-
-# ============================================================
-# DETECT SWEEP
-# ============================================================
 
 def detect_sweep(candles_1h, price, direction, levels=None):
     if direction not in {"LONG", "SHORT"}: return None
@@ -941,10 +999,6 @@ def detect_sweep(candles_1h, price, direction, levels=None):
     return None
 
 
-# ============================================================
-# MARKET DATA
-# ============================================================
-
 def get_market_data(symbol="SOLUSDT"):
     symbol = _normalize_symbol(symbol)
 
@@ -986,10 +1040,6 @@ def get_market_data(symbol="SOLUSDT"):
     }
 
 
-# ============================================================
-# COMPAT
-# ============================================================
-
 def get_major_liquidity(price=None, symbol="SOLUSDT"):
     symbol = _normalize_symbol(symbol)
     candles_1h = get_klines("1h", LOOKBACK_1H, symbol)
@@ -1003,10 +1053,6 @@ def get_major_liquidity(price=None, symbol="SOLUSDT"):
 def market_snapshot(symbol="SOLUSDT"):
     return get_market_data(symbol)
 
-
-# ============================================================
-# DEBUG
-# ============================================================
 
 def format_major_liquidity(data):
     symbol = data.get("symbol", "SOLUSDT")
@@ -1033,7 +1079,7 @@ def format_major_liquidity(data):
         for i, lvl in enumerate(bsl, 1):
             lines.append(
                 f"{i}. ${lvl['price']:.6f} • {lvl['distance_pct']:.2f}% "
-                f"• S{lvl['strength']:.0f} • T{lvl['touches']} • {lvl.get('source','?')}"
+                f"• S{lvl['strength']:.0f} • {lvl.get('source','?')}"
             )
 
     lines.append("")
@@ -1045,15 +1091,15 @@ def format_major_liquidity(data):
         for i, lvl in enumerate(ssl, 1):
             lines.append(
                 f"{i}. ${lvl['price']:.6f} • {lvl['distance_pct']:.2f}% "
-                f"• S{lvl['strength']:.0f} • T{lvl['touches']} • {lvl.get('source','?')}"
+                f"• S{lvl['strength']:.0f} • {lvl.get('source','?')}"
             )
 
     lines.append("")
-    lines.append("⚡ FVG (IMBALANCE)")
+    lines.append("⚡ FVG")
     if not fvgs:
         lines.append("— нет незакрытых")
     else:
-        for f in fvgs:
+        for f in fvgs[:5]:
             icon = "🟢" if f["type"] == "bullish" else "🔴"
             lines.append(
                 f"{icon} {f['tf'].upper()} "
@@ -1069,9 +1115,6 @@ def debug_symbol(symbol):
     print("=" * 60)
     print(f"TradeMind Market {MARKET_VERSION}")
     print(f"Symbol: {symbol}")
-    print(f"MIN_MAJOR_DISTANCE_PCT: {MIN_MAJOR_DISTANCE_PCT}")
-    print(f"MIN_MAJOR_STRENGTH: {MIN_MAJOR_STRENGTH}")
-    print(f"MIN_ZONE_GAP_PCT: {MIN_ZONE_GAP_PCT}")
     print("=" * 60)
     try:
         data = get_market_data(symbol)
