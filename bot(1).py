@@ -2074,7 +2074,7 @@ async def callbacks(update, context):
 
 
 # ============================================================
-# POST INIT
+# POST INIT (с 40-дневным бэктестом + trailing)
 # ============================================================
 
 async def post_init(application):
@@ -2087,9 +2087,14 @@ async def post_init(application):
             import backtest
 
             if BACKTEST_MULTI:
-                print(f">>> MULTI BACKTEST ({BACKTEST_MAX_HOURS}h) <<<",
-                      flush=True)
-                backtest.run_multi_backtest_with_hours(BACKTEST_MAX_HOURS)
+                print(">>> BACKTEST 40d — БЕЗ TRAILING <<<", flush=True)
+                backtest.run_multi_backtest_with_hours(
+                    BACKTEST_MAX_HOURS, use_trailing=False)
+
+                print(flush=True)
+                print(">>> BACKTEST 40d — С TRAILING <<<", flush=True)
+                backtest.run_multi_backtest_with_hours(
+                    BACKTEST_MAX_HOURS, use_trailing=True)
             else:
                 trades, diag = backtest.run_backtest(
                     BACKTEST_SYMBOL, BACKTEST_MAX_HOURS)
