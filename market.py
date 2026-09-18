@@ -3,13 +3,8 @@
 # market.py
 #
 # Изменения vs 7.6:
-# - Увеличены окна загрузки свечей:
-#   LOOKBACK_1H:  180 -> 500  (20 дней вместо 7.5)
-#   LOOKBACK_15M: 200 -> 500  (5 дней вместо 2)
-#   LOOKBACK_5M:  200 -> 500  (41 час вместо 16)
-#   LOOKBACK_1M:  30  -> 200  (3.3 часа вместо 30 мин)
-# - Weight лимит Binance учтён: 101-500 свечей = weight 2,
-#   501-1000 = weight 5. Оставлено 500 как безопасный оптимум.
+# - LOOKBACK увеличены (500 / 500 / 500 / 200)
+# - Добавлена get_klines_history() с пагинацией для бэктеста
 # ============================================================
 
 from __future__ import annotations
@@ -41,15 +36,11 @@ COINS = {
 }
 
 
-# ============================================================
-# LOOKBACK (увеличены)
-# ============================================================
-
 LOOKBACK_D1 = 60
-LOOKBACK_1H = 500    # было 180  → 20 дней
-LOOKBACK_15M = 500   # было 200  → 5 дней
-LOOKBACK_5M = 500    # было 200  → ~41 час
-LOOKBACK_1M = 200    # было 30   → ~3.3 часа
+LOOKBACK_1H = 500
+LOOKBACK_15M = 500
+LOOKBACK_5M = 500
+LOOKBACK_1M = 200
 
 
 KLINES_TTL = {"1d": 300, "1h": 60, "15m": 30, "5m": 15, "1m": 5}
@@ -57,10 +48,6 @@ KLINES_TTL = {"1d": 300, "1h": 60, "15m": 30, "5m": 15, "1m": 5}
 _klines_cache: Dict[Tuple[str, str, int], Tuple[float, List[Dict[str, Any]]]] = {}
 _klines_lock = threading.RLock()
 
-
-# ============================================================
-# SWINGS
-# ============================================================
 
 SWING_LEFT = 2
 SWING_RIGHT = 2
@@ -74,10 +61,6 @@ SWING_RIGHT_D1 = 3
 FRESH_LEFT = 1
 FRESH_RIGHT = 1
 
-
-# ============================================================
-# LIQUIDITY
-# ============================================================
 
 CLUSTER_DISTANCE_PCT = 0.15
 ZONE_WIDTH_PCT = 0.20
@@ -124,10 +107,6 @@ FVG_MAX_LOOKBACK = 100
 MIN_SWEEP_DEPTH_PCT = 0.08
 MAX_SWEEP_LOOKBACK_1H = 8
 
-
-# ============================================================
-# HTTP
-# ============================================================
 
 _thread_local = threading.local()
 
@@ -234,6 +213,65 @@ def get_klines(interval, limit, symbol="SOLUSDT"):
 
 
 # ============================================================
+# PAGINATED HISTORY (для бэктеста)
+# ============================================================
+
+def get_klines_history(interval, limit, symbol="SOLUSDT"):
+    """
+    Загружает историю свечей с пагинацией.
+    Binance отдаёт максимум 1000 свечей за один запрос.
+    Если limit > 1000 — делаем несколько запросов.
+    """
+    symbol = _normalize_symbol(symbol)
+
+    if limit <= 1000:
+        return _fetch_klines(interval, limit, symbol)
+
+    all_candles = []
+    end_time = None
+
+    while len(all_candles) < limit:
+        batch_limit = min(1000, limit - len(all_candles))
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": batch_limit,
+        }
+        if end_time is not None:
+            params["endTime"] = end_time
+
+        try:
+            raw = _get("klines", params)
+        except Exception:
+            break
+
+        if not raw:
+            break
+
+        batch = []
+        for item in raw:
+            batch.append({
+                "open_time": int(item[0]),
+                "open": float(item[1]),
+                "high": float(item[2]),
+                "low": float(item[3]),
+                "close": float(item[4]),
+                "volume": float(item[5]),
+                "close_time": int(item[6]),
+            })
+
+        all_candles = batch + all_candles
+        end_time = batch[0]["open_time"] - 1
+
+        if len(batch) < batch_limit:
+            break
+
+        time.sleep(0.1)
+
+    return all_candles[-limit:]
+
+
+# ============================================================
 # CANDLE HELPERS
 # ============================================================
 
@@ -307,11 +345,8 @@ def find_fresh_lows(c): return _find_swings(c, FRESH_LEFT, FRESH_RIGHT, "low")
 
 def _analyze_d1_context(candles_d1, price):
     empty = {
-        "trend": "NEUTRAL",
-        "point_a": None,
-        "point_b": None,
-        "last_swing_high": None,
-        "last_swing_low": None,
+        "trend": "NEUTRAL", "point_a": None, "point_b": None,
+        "last_swing_high": None, "last_swing_low": None,
     }
     if not candles_d1 or len(candles_d1) < 20:
         return empty
@@ -331,7 +366,6 @@ def _analyze_d1_context(candles_d1, price):
         l1 = swing_lows[-3]["price"]
         l2 = swing_lows[-2]["price"]
         l3 = swing_lows[-1]["price"]
-
         if h3 > h2 > h1 and l3 > l2 > l1:
             trend = "LONG"
         elif h3 < h2 < h1 and l3 < l2 < l1:
@@ -390,15 +424,11 @@ def detect_fvgs(candles, tf, price):
     lookback = candles[-FVG_MAX_LOOKBACK:] if len(candles) > FVG_MAX_LOOKBACK else candles
 
     results = []
-
     for i in range(1, len(lookback) - 1):
         c1 = lookback[i - 1]
         c3 = lookback[i + 1]
-
-        h1 = candle_high(c1)
-        l1 = candle_low(c1)
-        h3 = candle_high(c3)
-        l3 = candle_low(c3)
+        h1 = candle_high(c1); l1 = candle_low(c1)
+        h3 = candle_high(c3); l3 = candle_low(c3)
 
         if l3 > h1:
             top, bottom, fvg_type = l3, h1, "bullish"
@@ -409,7 +439,6 @@ def detect_fvgs(candles, tf, price):
 
         if top <= bottom or bottom <= 0:
             continue
-
         size_pct = (top - bottom) / bottom * 100
         if size_pct < min_size:
             continue
@@ -418,24 +447,18 @@ def detect_fvgs(candles, tf, price):
         for j in range(i + 2, len(lookback)):
             ch = candle_high(lookback[j])
             cl = candle_low(lookback[j])
-
             if fvg_type == "bullish":
                 if cl <= bottom:
-                    filled = True
-                    break
+                    filled = True; break
             else:
                 if ch >= top:
-                    filled = True
-                    break
-
+                    filled = True; break
         if filled:
             continue
 
         results.append({
-            "type": fvg_type,
-            "tf": tf,
-            "top": round(top, 8),
-            "bottom": round(bottom, 8),
+            "type": fvg_type, "tf": tf,
+            "top": round(top, 8), "bottom": round(bottom, 8),
             "middle": round((top + bottom) / 2, 8),
             "open_time": lookback[i].get("open_time"),
             "size_pct": round(size_pct, 4),
@@ -459,14 +482,11 @@ def collect_fvgs(candles_5m, candles_15m, price):
 def cluster_levels(levels):
     if not levels:
         return []
-
     levels = sorted(levels, key=lambda x: x["price"])
     clusters = []
-
     for level in levels:
         if not clusters:
-            clusters.append([level])
-            continue
+            clusters.append([level]); continue
         current = clusters[-1]
         avg_price = sum(x["price"] for x in current) / len(current)
         if distance_pct(level["price"], avg_price) <= CLUSTER_DISTANCE_PCT:
@@ -491,13 +511,12 @@ def cluster_levels(levels):
 
 
 # ============================================================
-# FRESHNESS
+# FRESHNESS / TOUCHES / SWEPT
 # ============================================================
 
 def freshness_score(level, candles, max_age):
     last_index = int(level.get("last_index", 0))
     age = len(candles) - 1 - last_index
-
     if age <= 10: return 25.0
     if age <= 30: return 20.0
     if age <= 60: return 15.0
@@ -509,15 +528,11 @@ def freshness_score(level, candles, max_age):
 def count_local_touches(level_price, candles):
     touches = 0
     for candle in candles:
-        high = candle_high(candle)
-        low = candle_low(candle)
-
+        high = candle_high(candle); low = candle_low(candle)
         if low <= level_price <= high:
-            touches += 1
-            continue
+            touches += 1; continue
         if distance_pct(high, level_price) <= LOCAL_TOUCH_DISTANCE_PCT:
-            touches += 1
-            continue
+            touches += 1; continue
         if distance_pct(low, level_price) <= LOCAL_TOUCH_DISTANCE_PCT:
             touches += 1
     return touches
@@ -526,13 +541,9 @@ def count_local_touches(level_price, candles):
 def level_has_been_swept(level_price, level_type, candles, lookback):
     if not candles:
         return False
-
     recent = candles[-lookback:]
     for candle in recent:
-        high = candle_high(candle)
-        low = candle_low(candle)
-        close = candle_close(candle)
-
+        high = candle_high(candle); low = candle_low(candle); close = candle_close(candle)
         if level_type == "BSL":
             if high > level_price and close < level_price:
                 depth_pct = (high - level_price) / level_price * 100.0
@@ -548,92 +559,18 @@ def level_has_been_swept(level_price, level_type, candles, lookback):
 
 def calculate_strength(level, candles, candles_15m, max_age, base=40.0):
     score = base
-
     touches = int(level.get("touches", 1))
-    if touches >= 2:
-        score += 10
-    if touches >= 3:
-        score += 8
-    if touches >= 4:
-        score += 6
+    if touches >= 2: score += 10
+    if touches >= 3: score += 8
+    if touches >= 4: score += 6
 
     score += freshness_score(level, candles, max_age)
 
     local_touches = count_local_touches(level["price"], candles_15m)
-    if local_touches >= 2:
-        score += 5
-    if local_touches >= 4:
-        score += 5
+    if local_touches >= 2: score += 5
+    if local_touches >= 4: score += 5
 
     return min(round(score, 2), 100.0)
-
-
-# ============================================================
-# ATH / ATL
-# ============================================================
-
-def detect_ath_extension(candles_1h, price):
-    if not candles_1h or len(candles_1h) < 20:
-        return []
-
-    window = candles_1h[-ATH_LOOKBACK_1H:]
-    confirmed = window[:-1]
-    if not confirmed:
-        return []
-
-    max_high = max(candle_high(c) for c in confirmed)
-    if price <= max_high:
-        return []
-
-    results = []
-    for step_pct in ATH_EXTENSION_STEPS_PCT:
-        target = price * (1 + step_pct / 100)
-        zone_low = target * (1 - ZONE_WIDTH_PCT / 100.0)
-        zone_high = target * (1 + ZONE_WIDTH_PCT / 100.0)
-        distance = (target - price) / price * 100
-
-        results.append({
-            "price": round(target, 8),
-            "zone_low": round(zone_low, 8),
-            "zone_high": round(zone_high, 8),
-            "type": "BSL", "strength": MIN_ATH_STRENGTH, "touches": 1,
-            "distance_pct": round(distance, 4), "age_1h": 0,
-            "source": "ATH", "status": "FRESH",
-            "swept": False, "taken": False, "used": False, "consumed": False,
-        })
-    return results
-
-
-def detect_atl_extension(candles_1h, price):
-    if not candles_1h or len(candles_1h) < 20:
-        return []
-
-    window = candles_1h[-ATH_LOOKBACK_1H:]
-    confirmed = window[:-1]
-    if not confirmed:
-        return []
-
-    min_low = min(candle_low(c) for c in confirmed)
-    if price >= min_low:
-        return []
-
-    results = []
-    for step_pct in ATH_EXTENSION_STEPS_PCT:
-        target = price * (1 - step_pct / 100)
-        zone_low = target * (1 - ZONE_WIDTH_PCT / 100.0)
-        zone_high = target * (1 + ZONE_WIDTH_PCT / 100.0)
-        distance = (price - target) / price * 100
-
-        results.append({
-            "price": round(target, 8),
-            "zone_low": round(zone_low, 8),
-            "zone_high": round(zone_high, 8),
-            "type": "SSL", "strength": MIN_ATH_STRENGTH, "touches": 1,
-            "distance_pct": round(distance, 4), "age_1h": 0,
-            "source": "ATL", "status": "FRESH",
-            "swept": False, "taken": False, "used": False, "consumed": False,
-        })
-    return results
 
 
 # ============================================================
@@ -645,9 +582,7 @@ def _select_zones(levels, price, candles_ref, candles_15m, level_type,
     candidates = []
     for level in levels:
         level_price = float(level.get("price", 0))
-        if level_price <= 0:
-            continue
-
+        if level_price <= 0: continue
         if level_type == "BSL":
             if level_price <= price: continue
         elif level_type == "SSL":
@@ -656,19 +591,16 @@ def _select_zones(levels, price, candles_ref, candles_15m, level_type,
             continue
 
         distance = distance_pct(price, level_price)
-        if distance < MIN_MAJOR_DISTANCE_PCT:
-            continue
+        if distance < MIN_MAJOR_DISTANCE_PCT: continue
 
         age = len(candles_ref) - 1 - int(level.get("last_index", 0))
-        if age > max_age:
-            continue
+        if age > max_age: continue
 
         if level_has_been_swept(level_price, level_type, candles_ref, sweep_lookback):
             continue
 
         strength = calculate_strength(level, candles_ref, candles_15m, max_age)
-        if strength < min_strength:
-            continue
+        if strength < min_strength: continue
 
         zone_low = level_price * (1 - ZONE_WIDTH_PCT / 100.0)
         zone_high = level_price * (1 + ZONE_WIDTH_PCT / 100.0)
@@ -684,8 +616,7 @@ def _select_zones(levels, price, candles_ref, candles_15m, level_type,
             "age_1h": age,
             "source": source,
             "status": "FRESH",
-            "swept": False, "taken": False,
-            "used": False, "consumed": False,
+            "swept": False, "taken": False, "used": False, "consumed": False,
         })
 
     candidates.sort(key=lambda x: (x["strength"], x["touches"], -x["distance_pct"]), reverse=True)
@@ -696,40 +627,32 @@ def _select_zones(levels, price, candles_ref, candles_15m, level_type,
             distance_pct(candidate["price"], existing["price"]) < MIN_ZONE_GAP_PCT
             for existing in selected
         )
-        if too_close:
-            continue
+        if too_close: continue
         selected.append(candidate)
-        if len(selected) >= MAX_LEVELS_PER_SIDE:
-            break
+        if len(selected) >= MAX_LEVELS_PER_SIDE: break
 
     selected.sort(key=lambda x: x["distance_pct"])
     return selected
 
 
 def _select_fresh_zones(candles_1h, price, level_type):
-    if not candles_1h:
-        return []
-
+    if not candles_1h: return []
     confirmed = candles_1h[:-1]
-    if len(confirmed) < 5:
-        return []
+    if len(confirmed) < 5: return []
 
     if level_type == "BSL":
         swings = find_fresh_highs(confirmed)
     else:
         swings = find_fresh_lows(confirmed)
 
-    if not swings:
-        return []
+    if not swings: return []
 
     clusters = cluster_levels(swings)
-
     candidates = []
+
     for level in clusters:
         level_price = float(level.get("price", 0))
-        if level_price <= 0:
-            continue
-
+        if level_price <= 0: continue
         if level_type == "BSL":
             if level_price <= price: continue
         else:
@@ -746,8 +669,7 @@ def _select_fresh_zones(candles_1h, price, level_type):
             continue
 
         strength = calculate_strength(level, confirmed, [], FRESH_MAX_AGE_1H)
-        if strength < MIN_FRESH_STRENGTH:
-            continue
+        if strength < MIN_FRESH_STRENGTH: continue
 
         zone_low = level_price * (1 - ZONE_WIDTH_PCT / 100.0)
         zone_high = level_price * (1 + ZONE_WIDTH_PCT / 100.0)
@@ -760,15 +682,68 @@ def _select_fresh_zones(candles_1h, price, level_type):
             "strength": round(strength, 2),
             "touches": int(level.get("touches", 1)),
             "distance_pct": round(distance, 4),
-            "age_1h": age,
-            "source": "FRESH",
-            "status": "FRESH",
-            "swept": False, "taken": False,
-            "used": False, "consumed": False,
+            "age_1h": age, "source": "FRESH", "status": "FRESH",
+            "swept": False, "taken": False, "used": False, "consumed": False,
         })
 
     candidates.sort(key=lambda x: x["distance_pct"])
     return candidates[:MAX_LEVELS_PER_SIDE]
+
+
+# ============================================================
+# ATH / ATL
+# ============================================================
+
+def detect_ath_extension(candles_1h, price):
+    if not candles_1h or len(candles_1h) < 20: return []
+    window = candles_1h[-ATH_LOOKBACK_1H:]
+    confirmed = window[:-1]
+    if not confirmed: return []
+
+    max_high = max(candle_high(c) for c in confirmed)
+    if price <= max_high: return []
+
+    results = []
+    for step_pct in ATH_EXTENSION_STEPS_PCT:
+        target = price * (1 + step_pct / 100)
+        zone_low = target * (1 - ZONE_WIDTH_PCT / 100.0)
+        zone_high = target * (1 + ZONE_WIDTH_PCT / 100.0)
+        distance = (target - price) / price * 100
+        results.append({
+            "price": round(target, 8),
+            "zone_low": round(zone_low, 8), "zone_high": round(zone_high, 8),
+            "type": "BSL", "strength": MIN_ATH_STRENGTH, "touches": 1,
+            "distance_pct": round(distance, 4), "age_1h": 0, "source": "ATH",
+            "status": "FRESH", "swept": False, "taken": False,
+            "used": False, "consumed": False,
+        })
+    return results
+
+
+def detect_atl_extension(candles_1h, price):
+    if not candles_1h or len(candles_1h) < 20: return []
+    window = candles_1h[-ATH_LOOKBACK_1H:]
+    confirmed = window[:-1]
+    if not confirmed: return []
+
+    min_low = min(candle_low(c) for c in confirmed)
+    if price >= min_low: return []
+
+    results = []
+    for step_pct in ATH_EXTENSION_STEPS_PCT:
+        target = price * (1 - step_pct / 100)
+        zone_low = target * (1 - ZONE_WIDTH_PCT / 100.0)
+        zone_high = target * (1 + ZONE_WIDTH_PCT / 100.0)
+        distance = (price - target) / price * 100
+        results.append({
+            "price": round(target, 8),
+            "zone_low": round(zone_low, 8), "zone_high": round(zone_high, 8),
+            "type": "SSL", "strength": MIN_ATH_STRENGTH, "touches": 1,
+            "distance_pct": round(distance, 4), "age_1h": 0, "source": "ATL",
+            "status": "FRESH", "swept": False, "taken": False,
+            "used": False, "consumed": False,
+        })
+    return results
 
 
 def _round_step(price):
@@ -824,15 +799,13 @@ def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
 
 
 def _merge_sources(sources, limit):
-    merged = []
-    seen = []
+    merged = []; seen = []
     for source in sources:
         for level in source:
             if len(merged) >= limit: break
             too_close = any(distance_pct(level["price"], p) < MIN_ZONE_GAP_PCT for p in seen)
             if too_close: continue
-            merged.append(level)
-            seen.append(level["price"])
+            merged.append(level); seen.append(level["price"])
         if len(merged) >= limit: break
     merged.sort(key=lambda x: x["distance_pct"])
     return merged
@@ -845,26 +818,22 @@ def _merge_sources(sources, limit):
 def _build_major_liquidity(candles_1h, candles_15m, price):
     if not candles_1h:
         return {"BSL": [], "SSL": []}
-
     confirmed_1h = candles_1h[:-1]
     if len(confirmed_1h) < 10:
         return {"BSL": [], "SSL": []}
 
-    # FRESH — приоритет
     bsl_fresh = _select_fresh_zones(candles_1h, price, "BSL")
     ssl_fresh = _select_fresh_zones(candles_1h, price, "SSL")
 
-    # 1H
     bsl_1h = _select_zones(cluster_levels(find_swing_highs(confirmed_1h)),
-                           price, confirmed_1h, candles_15m,
-                           "BSL", MIN_MAJOR_STRENGTH, MAX_LEVEL_AGE_1H,
+                           price, confirmed_1h, candles_15m, "BSL",
+                           MIN_MAJOR_STRENGTH, MAX_LEVEL_AGE_1H,
                            SWEEP_RECENT_LOOKBACK_1H, "1H")
     ssl_1h = _select_zones(cluster_levels(find_swing_lows(confirmed_1h)),
-                           price, confirmed_1h, candles_15m,
-                           "SSL", MIN_MAJOR_STRENGTH, MAX_LEVEL_AGE_1H,
+                           price, confirmed_1h, candles_15m, "SSL",
+                           MIN_MAJOR_STRENGTH, MAX_LEVEL_AGE_1H,
                            SWEEP_RECENT_LOOKBACK_1H, "1H")
 
-    # 15M
     bsl_15m, ssl_15m = [], []
     need_bsl = len(bsl_1h) + len(bsl_fresh) < MIN_LEVELS_PER_SIDE_1H
     need_ssl = len(ssl_1h) + len(ssl_fresh) < MIN_LEVELS_PER_SIDE_1H
@@ -874,26 +843,22 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
         if len(confirmed_15m) >= 10:
             if need_bsl:
                 bsl_15m = _select_zones(cluster_levels(find_swing_highs_15m(confirmed_15m)),
-                                        price, confirmed_15m, candles_15m,
-                                        "BSL", MIN_MINOR_STRENGTH, MAX_LEVEL_AGE_15M,
+                                        price, confirmed_15m, candles_15m, "BSL",
+                                        MIN_MINOR_STRENGTH, MAX_LEVEL_AGE_15M,
                                         SWEEP_RECENT_LOOKBACK_15M, "15M")
             if need_ssl:
                 ssl_15m = _select_zones(cluster_levels(find_swing_lows_15m(confirmed_15m)),
-                                        price, confirmed_15m, candles_15m,
-                                        "SSL", MIN_MINOR_STRENGTH, MAX_LEVEL_AGE_15M,
+                                        price, confirmed_15m, candles_15m, "SSL",
+                                        MIN_MINOR_STRENGTH, MAX_LEVEL_AGE_15M,
                                         SWEEP_RECENT_LOOKBACK_15M, "15M")
 
-    # ATH/ATL
     bsl_ath = []
     ssl_atl = []
-
     if len(bsl_1h) + len(bsl_15m) + len(bsl_fresh) < MIN_LEVELS_PER_SIDE_1H:
         bsl_ath = detect_ath_extension(confirmed_1h, price)
-
     if len(ssl_1h) + len(ssl_15m) + len(ssl_fresh) < MIN_LEVELS_PER_SIDE_1H:
         ssl_atl = detect_atl_extension(confirmed_1h, price)
 
-    # ROUND
     bsl_round = find_round_number_levels(price, "BSL") if len(bsl_1h) + len(bsl_15m) + len(bsl_ath) + len(bsl_fresh) < MIN_LEVELS_PER_SIDE_1H else []
     ssl_round = find_round_number_levels(price, "SSL") if len(ssl_1h) + len(ssl_15m) + len(ssl_atl) + len(ssl_fresh) < MIN_LEVELS_PER_SIDE_1H else []
 
@@ -1041,27 +1006,19 @@ def get_market_data(symbol="SOLUSDT"):
         candles_1m = f_1m.result()
 
     price = float(candles_1m[-1]["close"]) if candles_1m else get_current_price(symbol)
-
     major_liquidity = _build_major_liquidity(candles_1h, candles_15m, price)
     d1_context = _analyze_d1_context(candles_d1, price)
     fvgs = collect_fvgs(candles_5m, candles_15m, price)
 
     return {
-        "symbol": symbol,
-        "price": price,
-        "candles_d1": candles_d1,
-        "candles_1h": candles_1h,
-        "candles_15m": candles_15m,
-        "candles_5m": candles_5m,
+        "symbol": symbol, "price": price,
+        "candles_d1": candles_d1, "candles_1h": candles_1h,
+        "candles_15m": candles_15m, "candles_5m": candles_5m,
         "candles_1m": candles_1m,
-        "candles": {
-            "1d": candles_d1, "1h": candles_1h, "15m": candles_15m,
-            "5m": candles_5m, "1m": candles_1m,
-        },
-        "major_liquidity": major_liquidity,
-        "d1_context": d1_context,
-        "fvgs": fvgs,
-        "updated_at": time.time(),
+        "candles": {"1d": candles_d1, "1h": candles_1h,
+                    "15m": candles_15m, "5m": candles_5m, "1m": candles_1m},
+        "major_liquidity": major_liquidity, "d1_context": d1_context,
+        "fvgs": fvgs, "updated_at": time.time(),
         "market_version": MARKET_VERSION,
     }
 
@@ -1088,13 +1045,9 @@ def format_major_liquidity(data):
     fvgs = data.get("fvgs", [])
 
     lines = [
-        f"💠 {symbol}",
-        f"💰 Цена: ${price:.6f}",
-        "",
-        "📅 D1 CONTEXT",
-        f"Trend: {d1.get('trend', 'NEUTRAL')}",
-        f"A: {d1.get('point_a')}  B: {d1.get('point_b')}",
-        "",
+        f"💠 {symbol}", f"💰 Цена: ${price:.6f}", "",
+        "📅 D1 CONTEXT", f"Trend: {d1.get('trend', 'NEUTRAL')}",
+        f"A: {d1.get('point_a')}  B: {d1.get('point_b')}", "",
     ]
 
     lines.append("🔴 BSL")
