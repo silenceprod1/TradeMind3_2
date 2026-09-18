@@ -1,6 +1,7 @@
 """
-Диагностический бэктест v6.
-Добавлен параметр hours в run_multi_backtest_with_hours.
+Диагностический бэктест v7.
+- 40 дней истории (пагинация)
+- Trailing stop: breakeven @ +2%, trailing @ +4% (2% от max)
 """
 
 import argparse
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 
 from market import (
     get_klines,
+    get_klines_history,
     _normalize_symbol,
     find_major_liquidity,
     detect_sweep,
@@ -17,13 +19,17 @@ from market import (
 from strategy import analyze, get_1h_direction
 
 
-BT_LOOKBACK_1H = 500
-BT_LOOKBACK_15M = 500
-BT_LOOKBACK_5M = 1000
-BT_LOOKBACK_1M = 500
+BT_LOOKBACK_1H = 1000
+BT_LOOKBACK_15M = 4000
+BT_LOOKBACK_5M = 12000
+BT_LOOKBACK_1M = 200
 
 WARMUP_1H = 150
-DEFAULT_MAX_HOURS = 12
+DEFAULT_MAX_HOURS = 24
+
+BREAKEVEN_TRIGGER_PCT = 2.0
+TRAILING_TRIGGER_PCT = 4.0
+TRAILING_DISTANCE_PCT = 2.0
 
 
 def log(msg):
@@ -100,11 +106,14 @@ def classify_reason(result, market_info):
     return f"stage_{stage.lower()}"
 
 
-def simulate_trade(trade, candles_5m, start_ts, max_hours):
+def simulate_trade(trade, candles_5m, start_ts, max_hours, use_trailing=False):
     direction = trade["direction"]
-    sl = trade["sl"]
+    original_sl = trade["sl"]
     tp = trade["tp"]
     entry = trade["entry"]
+
+    current_sl = original_sl
+    best_price = entry
 
     deadline = start_ts + max_hours * 3600 * 1000
     last_seen = None
@@ -124,32 +133,55 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours):
 
         if direction == "LONG":
             hit_tp = high >= tp
-            hit_sl = low <= sl
+            hit_sl = low <= current_sl
         else:
             hit_tp = low <= tp
-            hit_sl = high >= sl
+            hit_sl = high >= current_sl
 
         if hit_tp and hit_sl:
-            return ("SL", sl, c["open_time"], held)
+            return ("SL", current_sl, c["open_time"], held)
         if hit_tp:
             return ("TP", tp, c["open_time"], held)
         if hit_sl:
-            return ("SL", sl, c["open_time"], held)
+            return ("SL", current_sl, c["open_time"], held)
+
+        if use_trailing:
+            if direction == "LONG":
+                if high > best_price:
+                    best_price = high
+                move_pct = (best_price - entry) / entry * 100
+                if move_pct >= TRAILING_TRIGGER_PCT:
+                    new_sl = best_price * (1 - TRAILING_DISTANCE_PCT / 100)
+                    if new_sl > current_sl:
+                        current_sl = new_sl
+                elif move_pct >= BREAKEVEN_TRIGGER_PCT:
+                    if entry > current_sl:
+                        current_sl = entry
+            else:
+                if low < best_price:
+                    best_price = low
+                move_pct = (entry - best_price) / entry * 100
+                if move_pct >= TRAILING_TRIGGER_PCT:
+                    new_sl = best_price * (1 + TRAILING_DISTANCE_PCT / 100)
+                    if new_sl < current_sl:
+                        current_sl = new_sl
+                elif move_pct >= BREAKEVEN_TRIGGER_PCT:
+                    if entry < current_sl:
+                        current_sl = entry
 
     if last_seen is not None:
-        return ("TIMEOUT", last_seen["close"],
-                last_seen["open_time"], held)
+        return ("TIMEOUT", last_seen["close"], last_seen["open_time"], held)
 
     return ("TIMEOUT", entry, start_ts, 0)
 
 
-def run_backtest(symbol, max_hours):
+def run_backtest(symbol, max_hours, use_trailing=False):
     symbol = _normalize_symbol(symbol)
-    log(f"Символ: {symbol}")
+    log(f"Символ: {symbol} (trailing={use_trailing})")
 
-    candles_1h = get_klines("1h", BT_LOOKBACK_1H, symbol)
-    candles_15m = get_klines("15m", BT_LOOKBACK_15M, symbol)
-    candles_5m = get_klines("5m", BT_LOOKBACK_5M, symbol)
+    candles_1h = get_klines_history("1h", BT_LOOKBACK_1H, symbol)
+    candles_15m = get_klines_history("15m", BT_LOOKBACK_15M, symbol)
+    candles_5m = get_klines_history("5m", BT_LOOKBACK_5M, symbol)
     candles_1m = get_klines("1m", BT_LOOKBACK_1M, symbol)
 
     if not candles_1h:
@@ -167,7 +199,6 @@ def run_backtest(symbol, max_hours):
     reason_counter = Counter()
     exception_counter = Counter()
     market_stats = Counter()
-
     near_misses = []
 
     total = len(candles_1h) - WARMUP_1H
@@ -211,17 +242,13 @@ def run_backtest(symbol, max_hours):
 
         try:
             direction = get_1h_direction(c1h)
-
             sweep = None
             if direction != "NEUTRAL":
                 sweep = detect_sweep(c1h, price, direction, levels)
 
             result = analyze(
-                c1h, c15, c5, price,
-                levels, sweep,
-                candles_1m=c1,
-                d1_context=None,
-                fvgs=[],
+                c1h, c15, c5, price, levels, sweep,
+                candles_1m=c1, d1_context=None, fvgs=[],
             )
 
         except Exception as exc:
@@ -242,39 +269,28 @@ def run_backtest(symbol, max_hours):
 
         if score >= 50 and stage != "READY":
             near_misses.append({
-                "ts": ts_now,
-                "direction": result.get("direction", "?"),
-                "stage": stage,
-                "score": score,
-                "reason_key": reason_key,
+                "ts": ts_now, "direction": result.get("direction", "?"),
+                "stage": stage, "score": score, "reason_key": reason_key,
                 "reason": str(result.get("reason", ""))[:80],
                 "trend": result.get("trend_activity", 0),
-                "bsl": n_bsl,
-                "ssl": n_ssl,
+                "bsl": n_bsl, "ssl": n_ssl,
             })
 
         if stage != "READY":
             continue
 
-        entry = result.get("entry")
-        sl = result.get("sl")
-        tp = result.get("tp")
+        entry = result.get("entry"); sl = result.get("sl"); tp = result.get("tp")
         if entry is None or sl is None or tp is None:
             continue
 
         trade = {
-            "coin": symbol,
-            "direction": result["direction"],
-            "entry": float(entry),
-            "sl": float(sl),
-            "tp": float(tp),
-            "rr": result.get("rr"),
-            "score": score,
-            "open_ts": ts_now,
+            "coin": symbol, "direction": result["direction"],
+            "entry": float(entry), "sl": float(sl), "tp": float(tp),
+            "rr": result.get("rr"), "score": score, "open_ts": ts_now,
         }
 
         res_type, exit_price, exit_ts, held = simulate_trade(
-            trade, candles_5m, ts_now, max_hours)
+            trade, candles_5m, ts_now, max_hours, use_trailing=use_trailing)
 
         trade["result"] = res_type
         trade["exit_price"] = exit_price
@@ -284,31 +300,25 @@ def run_backtest(symbol, max_hours):
 
         trades.append(trade)
 
-        log(
-            f"[{i:3}] {trade['direction']:5} "
+        log(f"[{i:4}] {trade['direction']:5} "
             f"entry={entry:.4f} sl={sl:.4f} tp={tp:.4f} "
             f"rr={trade['rr']:.2f} score={score} "
-            f"→ {res_type:7} pnl={trade['pnl']:+.2f}%"
-        )
+            f"→ {res_type:7} pnl={trade['pnl']:+.2f}%")
 
     near_misses.sort(key=lambda x: x["score"], reverse=True)
-
     diag = {
-        "stage_counter": stage_counter,
-        "reason_counter": reason_counter,
-        "exception_counter": exception_counter,
-        "market_stats": market_stats,
+        "stage_counter": stage_counter, "reason_counter": reason_counter,
+        "exception_counter": exception_counter, "market_stats": market_stats,
         "near_misses": near_misses[:15],
     }
-
     return trades, diag
 
 
-def print_report(symbol, trades, diag):
-
+def print_report(symbol, trades, diag, use_trailing=False):
+    label = "С TRAILING" if use_trailing else "БЕЗ TRAILING"
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v6 — {symbol}")
+    print(f"ОТЧЁТ БЭКТЕСТА v7 — {symbol} ({label})")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -326,12 +336,12 @@ def print_report(symbol, trades, diag):
     print()
 
     if exception_counter:
-        print("EXCEPTIONS (что падало):")
+        print("EXCEPTIONS:")
         for k, v in exception_counter.most_common(10):
             print(f"  {k:40} {v}")
         print()
 
-    print("MARKET: сколько уровней находил find_major_liquidity:")
+    print("MARKET:")
     for k in ["both", "only_ssl", "only_bsl", "empty"]:
         v = market_stats.get(k, 0)
         pct = v / total * 100 if total else 0
@@ -361,15 +371,13 @@ def print_report(symbol, trades, diag):
               f"{'Score':<6}{'Trend':<7}{'BSL/SSL':<10}{'Reason'}")
         print("-" * 70)
         for nm in near_misses:
-            print(
-                f"{ts_to_str(nm['ts']):<17}"
-                f"{nm['direction']:<6}"
-                f"{nm['stage']:<16}"
-                f"{nm['score']:<6}"
-                f"{nm['trend']:<7.2f}"
-                f"{nm['bsl']}/{nm['ssl']:<7}"
-                f"{nm['reason_key']}"
-            )
+            print(f"{ts_to_str(nm['ts']):<17}"
+                  f"{nm['direction']:<6}"
+                  f"{nm['stage']:<16}"
+                  f"{nm['score']:<6}"
+                  f"{nm['trend']:<7.2f}"
+                  f"{nm['bsl']}/{nm['ssl']:<7}"
+                  f"{nm['reason_key']}")
 
     print()
     print("=" * 70)
@@ -394,16 +402,12 @@ def print_report(symbol, trades, diag):
     avg_win = sum(wins) / len(wins) if wins else 0
     avg_loss = sum(losses) / len(losses) if losses else 0
 
-    equity = 0
-    peak = 0
-    max_dd = 0
+    equity = 0; peak = 0; max_dd = 0
     for t in trades:
         equity += t["pnl"]
-        if equity > peak:
-            peak = equity
+        if equity > peak: peak = equity
         dd = peak - equity
-        if dd > max_dd:
-            max_dd = dd
+        if dd > max_dd: max_dd = dd
 
     print(f"Всего сделок: {len(trades)}")
     print(f"  TP:      {tp}")
@@ -417,7 +421,7 @@ def print_report(symbol, trades, diag):
     print(f"Max DD:    -{max_dd:.2f}%")
 
 
-def run_multi_backtest_with_hours(max_hours):
+def run_multi_backtest_with_hours(max_hours, use_trailing=False):
     symbols = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT",
         "BNBUSDT", "XRPUSDT", "DOGEUSDT",
@@ -425,12 +429,18 @@ def run_multi_backtest_with_hours(max_hours):
         "ARBUSDT",
     ]
 
-    all_summary = []
+    label = "С TRAILING" if use_trailing else "БЕЗ TRAILING"
 
+    print()
+    print("#" * 70)
+    print(f"### MULTI BACKTEST — {label} — {len(symbols)} монет × 40 дней")
+    print("#" * 70)
+
+    all_summary = []
     for sym in symbols:
         try:
-            trades, diag = run_backtest(sym, max_hours)
-            print_report(sym, trades, diag)
+            trades, diag = run_backtest(sym, max_hours, use_trailing=use_trailing)
+            print_report(sym, trades, diag, use_trailing=use_trailing)
 
             if trades:
                 tp = sum(1 for t in trades if t["result"] == "TP")
@@ -439,8 +449,7 @@ def run_multi_backtest_with_hours(max_hours):
                 resolved = tp + sl
                 wr = tp / resolved * 100 if resolved else 0
                 pnl = sum(t["pnl"] for t in trades)
-                all_summary.append((sym, len(trades), tp, sl,
-                                    timeout, wr, pnl))
+                all_summary.append((sym, len(trades), tp, sl, timeout, wr, pnl))
             else:
                 all_summary.append((sym, 0, 0, 0, 0, 0, 0.0))
         except Exception as exc:
@@ -449,55 +458,35 @@ def run_multi_backtest_with_hours(max_hours):
 
     print()
     print("=" * 70)
-    print(f"СВОДКА ПО ВСЕМ МОНЕТАМ (max_hours={max_hours})")
+    print(f"СВОДКА — {label} (max_hours={max_hours}, 40 дней)")
     print("=" * 70)
     print(f"{'Символ':<10}{'Сделок':<8}{'TP':<5}{'SL':<5}"
           f"{'TO':<5}{'WinRate':<10}{'PnL':<10}")
     print("-" * 70)
 
-    total_trades = 0
-    total_tp = 0
-    total_sl = 0
-    total_to = 0
-    total_pnl = 0.0
+    total_trades = 0; total_tp = 0; total_sl = 0; total_to = 0; total_pnl = 0.0
 
     for sym, cnt, tp, sl, timeout, wr, pnl in all_summary:
         print(f"{sym:<10}{cnt:<8}{tp:<5}{sl:<5}"
               f"{timeout:<5}{wr:<10.1f}{pnl:+.2f}%")
-        total_trades += cnt
-        total_tp += tp
-        total_sl += sl
-        total_to += timeout
-        total_pnl += pnl
+        total_trades += cnt; total_tp += tp; total_sl += sl
+        total_to += timeout; total_pnl += pnl
 
     print("-" * 70)
-
     resolved = total_tp + total_sl
     total_wr = total_tp / resolved * 100 if resolved else 0
     print(f"{'ИТОГО':<10}{total_trades:<8}{total_tp:<5}{total_sl:<5}"
           f"{total_to:<5}{total_wr:<10.1f}{total_pnl:+.2f}%")
-
     print()
     print(f"Всего сделок: {total_trades}")
     print(f"  TP: {total_tp}  SL: {total_sl}  Timeout: {total_to}")
     print(f"Win rate: {total_wr:.1f}% (от {resolved} закрытых)")
     print(f"Sum PnL: {total_pnl:+.2f}%")
-
-    if total_trades < 20:
-        print()
-        print("Мало данных для статистики. Нужно 30+ сделок.")
-    elif total_trades < 50:
-        print()
-        print("Данных ещё маловато. Идеально 100+ сделок.")
-    else:
-        print()
-        print("Достаточно данных для оценки.")
-
     print("=" * 70)
 
 
 def run_multi_backtest():
-    run_multi_backtest_with_hours(DEFAULT_MAX_HOURS)
+    run_multi_backtest_with_hours(DEFAULT_MAX_HOURS, use_trailing=False)
 
 
 def main():
@@ -505,13 +494,15 @@ def main():
     parser.add_argument("--symbol", default="SOLUSDT")
     parser.add_argument("--max-hours", type=int, default=DEFAULT_MAX_HOURS)
     parser.add_argument("--multi", action="store_true")
+    parser.add_argument("--trailing", action="store_true")
     args = parser.parse_args()
 
     if args.multi:
-        run_multi_backtest_with_hours(args.max_hours)
+        run_multi_backtest_with_hours(args.max_hours, use_trailing=args.trailing)
     else:
-        trades, diag = run_backtest(args.symbol, args.max_hours)
-        print_report(args.symbol, trades, diag)
+        trades, diag = run_backtest(args.symbol, args.max_hours,
+                                     use_trailing=args.trailing)
+        print_report(args.symbol, trades, diag, use_trailing=args.trailing)
 
 
 if __name__ == "__main__":
