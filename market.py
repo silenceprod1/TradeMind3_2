@@ -1,21 +1,37 @@
+# ============================================================
+# TradeMind 6.7
 # market.py
-# TradeMind 6.6
+#
 # Binance Spot — источник рыночных данных
 #
-# Логика:
-# 1H -> MAJOR liquidity
-# 15M -> confirmation
-# 5M -> ILM
-# 1M -> только local context
+# Система:
+#
+# 1H → Main Structure
+#    ↓
+# Major Liquidity
+#    ↓
+# Sweep
+#    ↓
+# 15M Confirmation
+#    ↓
+# 5M ILM
+#    ↓
+# Entry
 #
 # ВАЖНО:
-# MAJOR liquidity пересчитывается заново при каждом get_market_data().
-# Слишком близкие к текущей цене уровни НЕ считаются MAJOR.
+# - D1/W1 НЕ используются
+# - 19 монет поддерживаются
+# - LONG и SHORT анализируются независимо
+# - LONG → SSL
+# - SHORT → BSL
+# - мелкие уровни возле цены не считаются MAJOR
+# - Major Liquidity пересчитывается при каждом скане
+# ============================================================
 
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -25,80 +41,143 @@ import requests
 # ============================================================
 
 BASE_URL = "https://api.binance.com/api/v3"
-SYMBOL = "SOLUSDT"
 
 REQUEST_TIMEOUT = 10
 
-# Сколько свечей загружаем
+# ------------------------------------------------------------
+# 19 MONETS
+# ------------------------------------------------------------
+
+COINS = {
+    "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "SOL": "SOLUSDT",
+    "BNB": "BNBUSDT",
+    "XRP": "XRPUSDT",
+    "DOGE": "DOGEUSDT",
+    "ADA": "ADAUSDT",
+    "AVAX": "AVAXUSDT",
+    "LINK": "LINKUSDT",
+    "HYPE": "HYPEUSDT",
+    "SUI": "SUIUSDT",
+    "TRX": "TRXUSDT",
+    "DOT": "DOTUSDT",
+    "LTC": "LTCUSDT",
+    "BCH": "BCHUSDT",
+    "NEAR": "NEARUSDT",
+    "APT": "APTUSDT",
+    "ARB": "ARBUSDT",
+    "OP": "OPUSDT",
+}
+
+
+# ------------------------------------------------------------
+# LOOKBACK
+# ------------------------------------------------------------
+
 LOOKBACK_1H = 180
 LOOKBACK_15M = 200
 LOOKBACK_5M = 200
 LOOKBACK_1M = 200
 
-# Свинг:
-# 2 свечи слева + сама свеча + 2 справа
+
+# ------------------------------------------------------------
+# SWING
+# ------------------------------------------------------------
+
 SWING_LEFT = 2
 SWING_RIGHT = 2
 
-# Кластеризация ликвидности
+
+# ------------------------------------------------------------
+# LIQUIDITY
+# ------------------------------------------------------------
+
 CLUSTER_DISTANCE_PCT = 0.15
 
-# Размер рабочей зоны вокруг уровня
 ZONE_WIDTH_PCT = 0.20
 
-# Минимальное расстояние между MAJOR зонами
+# Минимальная дистанция между двумя Major зонами
 MIN_ZONE_GAP_PCT = 0.70
 
 # ============================================================
-# НОВОЕ
+# КРИТИЧЕСКИЙ ФИЛЬТР
 # ============================================================
 
-# Уровень ближе этого расстояния к текущей цене
-# НЕ МОЖЕТ быть MAJOR.
+# Никакой Major Liquidity практически на текущей цене.
 #
-# Пример:
-# SOL = 106.10
-# MIN_MAJOR_DISTANCE_PCT = 0.30
+# Например:
 #
-# 106.12 -> 0.019% -> ОТБРАСЫВАЕМ
-# 106.40 -> 0.282% -> ОТБРАСЫВАЕМ
-# 106.55 -> 0.424% -> МОЖЕТ быть MAJOR
+# цена 106.10
+#
+# 106.12 = 0.019% → NO MAJOR
+# 106.20 = 0.094% → NO MAJOR
+# 106.40 = 0.282% → NO MAJOR
+# 106.55 = 0.424% → может пройти
 #
 MIN_MAJOR_DISTANCE_PCT = 0.30
 
-# Минимальная сила структуры
+
+# ------------------------------------------------------------
+# MAJOR STRENGTH
+# ------------------------------------------------------------
+
 MIN_MAJOR_STRENGTH = 58
 
-# Максимальное количество зон на сторону
+
+# ------------------------------------------------------------
+# LIMITS
+# ------------------------------------------------------------
+
 MAX_LEVELS_PER_SIDE = 4
 
-# Максимум всех зон
 MAX_TOTAL_LEVELS = 8
 
-# Возраст MAJOR-свича в 1H
+
+# ------------------------------------------------------------
+# AGE
+# ------------------------------------------------------------
+
 MAX_LEVEL_AGE_1H = 120
 
-# Local touch
+
+# ------------------------------------------------------------
+# LOCAL TOUCH
+# ------------------------------------------------------------
+
 LOCAL_TOUCH_DISTANCE_PCT = 0.20
+
+
+# ------------------------------------------------------------
+# SWEEP
+# ------------------------------------------------------------
+
+MIN_SWEEP_DEPTH_PCT = 0.08
+
+
+# ============================================================
+# HTTP SESSION
+# ============================================================
+
+_session = requests.Session()
+
+_session.headers.update(
+    {
+        "User-Agent": "TradeMind/6.7",
+        "Accept": "application/json",
+    }
+)
 
 
 # ============================================================
 # HTTP
 # ============================================================
 
-_session = requests.Session()
-_session.headers.update(
-    {
-        "User-Agent": "TradeMind/6.6",
-        "Accept": "application/json",
-    }
-)
-
-
 def _get(
     endpoint: str,
     params: Dict[str, Any],
 ) -> Any:
+
     url = f"{BASE_URL}/{endpoint}"
 
     response = _session.get(
@@ -113,26 +192,66 @@ def _get(
 
 
 # ============================================================
-# BINANCE
+# SYMBOL NORMALIZATION
 # ============================================================
 
-def get_current_price() -> float:
+def _normalize_symbol(
+    symbol: Optional[str],
+) -> str:
+
+    if not symbol:
+        return "SOLUSDT"
+
+    symbol = str(symbol).upper().strip()
+
+    # Разрешаем название монеты:
+    # SOL → SOLUSDT
+    if symbol in COINS:
+        return COINS[symbol]
+
+    # Уже полный Binance symbol
+    if symbol.endswith("USDT"):
+        return symbol
+
+    return symbol + "USDT"
+
+
+# ============================================================
+# CURRENT PRICE
+# ============================================================
+
+def get_current_price(
+    symbol: str = "SOLUSDT",
+) -> float:
+
+    symbol = _normalize_symbol(symbol)
+
     data = _get(
         "ticker/price",
-        {"symbol": SYMBOL},
+        {
+            "symbol": symbol,
+        },
     )
 
     return float(data["price"])
 
 
+# ============================================================
+# KLINES
+# ============================================================
+
 def get_klines(
     interval: str,
     limit: int,
+    symbol: str = "SOLUSDT",
 ) -> List[Dict[str, Any]]:
+
+    symbol = _normalize_symbol(symbol)
+
     raw = _get(
         "klines",
         {
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "interval": interval,
             "limit": limit,
         },
@@ -141,6 +260,7 @@ def get_klines(
     candles: List[Dict[str, Any]] = []
 
     for x in raw:
+
         candles.append(
             {
                 "open_time": int(x[0]),
@@ -157,37 +277,66 @@ def get_klines(
 
 
 # ============================================================
-# HELPERS
+# MARKET CANDLES
+# ============================================================
+
+def get_market_candles(
+    symbol: str,
+) -> Dict[str, List[Dict[str, Any]]]:
+
+    symbol = _normalize_symbol(symbol)
+
+    return {
+        "1h": get_klines(
+            "1h",
+            LOOKBACK_1H,
+            symbol,
+        ),
+
+        "15m": get_klines(
+            "15m",
+            LOOKBACK_15M,
+            symbol,
+        ),
+
+        "5m": get_klines(
+            "5m",
+            LOOKBACK_5M,
+            symbol,
+        ),
+
+        "1m": get_klines(
+            "1m",
+            LOOKBACK_1M,
+            symbol,
+        ),
+    }
+
+
+# ============================================================
+# BASIC HELPERS
 # ============================================================
 
 def pct_distance(
     price_a: float,
     price_b: float,
 ) -> float:
+
     if price_b == 0:
         return 999.0
 
-    return abs(price_a - price_b) / price_b * 100.0
-
-
-def is_above(
-    level: float,
-    price: float,
-) -> bool:
-    return level > price
-
-
-def is_below(
-    level: float,
-    price: float,
-) -> bool:
-    return level < price
+    return (
+        abs(price_a - price_b)
+        / abs(price_b)
+        * 100.0
+    )
 
 
 def _safe_float(
     value: Any,
     default: float = 0.0,
 ) -> float:
+
     try:
         return float(value)
     except Exception:
@@ -201,13 +350,20 @@ def _safe_float(
 def find_swing_highs(
     candles: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+
     swings: List[Dict[str, Any]] = []
 
+    if not candles:
+        return swings
+
     start = SWING_LEFT
+
     end = len(candles) - SWING_RIGHT
 
     for i in range(start, end):
+
         current = candles[i]
+
         high = current["high"]
 
         left = candles[
@@ -215,11 +371,21 @@ def find_swing_highs(
         ]
 
         right = candles[
-            i + 1:i + 1 + SWING_RIGHT
+            i + 1:
+            i + 1 + SWING_RIGHT
         ]
 
-        if all(high >= x["high"] for x in left) and \
-           all(high >= x["high"] for x in right):
+        if (
+            all(
+                high >= x["high"]
+                for x in left
+            )
+            and
+            all(
+                high >= x["high"]
+                for x in right
+            )
+        ):
 
             swings.append(
                 {
@@ -236,13 +402,20 @@ def find_swing_highs(
 def find_swing_lows(
     candles: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+
     swings: List[Dict[str, Any]] = []
 
+    if not candles:
+        return swings
+
     start = SWING_LEFT
+
     end = len(candles) - SWING_RIGHT
 
     for i in range(start, end):
+
         current = candles[i]
+
         low = current["low"]
 
         left = candles[
@@ -250,11 +423,21 @@ def find_swing_lows(
         ]
 
         right = candles[
-            i + 1:i + 1 + SWING_RIGHT
+            i + 1:
+            i + 1 + SWING_RIGHT
         ]
 
-        if all(low <= x["low"] for x in left) and \
-           all(low <= x["low"] for x in right):
+        if (
+            all(
+                low <= x["low"]
+                for x in left
+            )
+            and
+            all(
+                low <= x["low"]
+                for x in right
+            )
+        ):
 
             swings.append(
                 {
@@ -275,6 +458,7 @@ def find_swing_lows(
 def cluster_levels(
     levels: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+
     if not levels:
         return []
 
@@ -283,20 +467,30 @@ def cluster_levels(
         key=lambda x: x["price"],
     )
 
-    clusters: List[List[Dict[str, Any]]] = []
+    clusters: List[
+        List[Dict[str, Any]]
+    ] = []
 
     for level in levels:
 
         if not clusters:
-            clusters.append([level])
+
+            clusters.append(
+                [level]
+            )
+
             continue
 
         current_cluster = clusters[-1]
 
-        average_price = sum(
-            x["price"]
-            for x in current_cluster
-        ) / len(current_cluster)
+        average_price = (
+            sum(
+                x["price"]
+                for x in current_cluster
+            )
+            /
+            len(current_cluster)
+        )
 
         distance = pct_distance(
             level["price"],
@@ -304,11 +498,20 @@ def cluster_levels(
         )
 
         if distance <= CLUSTER_DISTANCE_PCT:
-            current_cluster.append(level)
-        else:
-            clusters.append([level])
 
-    result: List[Dict[str, Any]] = []
+            current_cluster.append(
+                level
+            )
+
+        else:
+
+            clusters.append(
+                [level]
+            )
+
+    result: List[
+        Dict[str, Any]
+    ] = []
 
     for cluster in clusters:
 
@@ -327,11 +530,15 @@ def cluster_levels(
             for x in cluster
         ]
 
-        avg_price = sum(prices) / len(prices)
+        average_price = (
+            sum(prices)
+            /
+            len(prices)
+        )
 
         result.append(
             {
-                "price": avg_price,
+                "price": average_price,
                 "touches": len(cluster),
                 "first_time": min(times),
                 "last_time": max(times),
@@ -352,9 +559,15 @@ def freshness_score(
     candles: List[Dict[str, Any]],
 ) -> float:
 
-    index = int(level["last_index"])
+    index = int(
+        level["last_index"]
+    )
 
-    age = len(candles) - 1 - index
+    age = (
+        len(candles)
+        - 1
+        - index
+    )
 
     if age <= 10:
         return 25.0
@@ -385,9 +598,13 @@ def count_local_touches(
 
     touches = 0
 
+    if not candles:
+        return touches
+
     for candle in candles:
 
         high = candle["high"]
+
         low = candle["low"]
 
         high_distance = pct_distance(
@@ -400,17 +617,25 @@ def count_local_touches(
             level_price,
         )
 
-        if high_distance <= LOCAL_TOUCH_DISTANCE_PCT:
+        if (
+            high_distance
+            <= LOCAL_TOUCH_DISTANCE_PCT
+        ):
+
             touches += 1
 
-        elif low_distance <= LOCAL_TOUCH_DISTANCE_PCT:
+        elif (
+            low_distance
+            <= LOCAL_TOUCH_DISTANCE_PCT
+        ):
+
             touches += 1
 
     return touches
 
 
 # ============================================================
-# SWEPT DETECTION
+# SWEEP DETECTION
 # ============================================================
 
 def level_has_been_swept(
@@ -419,26 +644,43 @@ def level_has_been_swept(
     candles: List[Dict[str, Any]],
 ) -> bool:
 
+    if not candles:
+        return False
+
     for candle in candles:
 
         high = candle["high"]
+
         low = candle["low"]
+
         close = candle["close"]
 
-        # BSL:
-        # цена забрала хай,
-        # затем закрылась обратно ниже уровня
+        # ----------------------------------------------------
+        # BSL
+        # ----------------------------------------------------
+
         if level_type == "BSL":
 
-            if high > level_price and close < level_price:
+            if (
+                high > level_price
+                and
+                close < level_price
+            ):
+
                 return True
 
-        # SSL:
-        # цена забрала лоу,
-        # затем закрылась обратно выше уровня
+        # ----------------------------------------------------
+        # SSL
+        # ----------------------------------------------------
+
         elif level_type == "SSL":
 
-            if low < level_price and close > level_price:
+            if (
+                low < level_price
+                and
+                close > level_price
+            ):
+
                 return True
 
     return False
@@ -457,10 +699,16 @@ def calculate_strength(
     score = 50.0
 
     touches = int(
-        level.get("touches", 1)
+        level.get(
+            "touches",
+            1,
+        )
     )
 
-    # Повторные тесты уровня
+    # --------------------------------------------------------
+    # REPEATED TOUCHES
+    # --------------------------------------------------------
+
     if touches >= 2:
         score += 8
 
@@ -470,13 +718,19 @@ def calculate_strength(
     if touches >= 4:
         score += 5
 
-    # Свежесть
+    # --------------------------------------------------------
+    # FRESHNESS
+    # --------------------------------------------------------
+
     score += freshness_score(
         level,
         candles_1h,
     )
 
-    # Локальные подтверждения
+    # --------------------------------------------------------
+    # 15M LOCAL CONFIRMATION
+    # --------------------------------------------------------
+
     local_touches = count_local_touches(
         level["price"],
         candles_15m,
@@ -495,7 +749,7 @@ def calculate_strength(
 
 
 # ============================================================
-# MAJOR ZONE SELECTION
+# SELECT MAJOR ZONES
 # ============================================================
 
 def select_major_zones(
@@ -506,14 +760,21 @@ def select_major_zones(
     level_type: str,
 ) -> List[Dict[str, Any]]:
 
-    candidates: List[Dict[str, Any]] = []
+    candidates: List[
+        Dict[str, Any]
+    ] = []
 
     for level in levels:
 
-        level_price = level["price"]
+        level_price = _safe_float(
+            level.get("price")
+        )
+
+        if level_price <= 0:
+            continue
 
         # ----------------------------------------------------
-        # Направление
+        # DIRECTION
         # ----------------------------------------------------
 
         if level_type == "BSL":
@@ -526,8 +787,11 @@ def select_major_zones(
             if level_price >= price:
                 continue
 
+        else:
+            continue
+
         # ----------------------------------------------------
-        # НОВЫЙ ФИЛЬТР ДИСТАНЦИИ
+        # DISTANCE FROM CURRENT PRICE
         # ----------------------------------------------------
 
         distance = pct_distance(
@@ -535,26 +799,29 @@ def select_major_zones(
             level_price,
         )
 
-        if distance < MIN_MAJOR_DISTANCE_PCT:
-            # Это уже практически текущая цена.
-            # Такой уровень не должен называться MAJOR.
+        if (
+            distance
+            < MIN_MAJOR_DISTANCE_PCT
+        ):
             continue
 
         # ----------------------------------------------------
-        # Слишком старый уровень
+        # AGE
         # ----------------------------------------------------
 
         age = (
             len(candles_1h)
             - 1
-            - int(level["last_index"])
+            - int(
+                level["last_index"]
+            )
         )
 
         if age > MAX_LEVEL_AGE_1H:
             continue
 
         # ----------------------------------------------------
-        # Sweep
+        # SWEPT
         # ----------------------------------------------------
 
         if level_has_been_swept(
@@ -565,7 +832,7 @@ def select_major_zones(
             continue
 
         # ----------------------------------------------------
-        # Strength
+        # STRENGTH
         # ----------------------------------------------------
 
         strength = calculate_strength(
@@ -574,35 +841,84 @@ def select_major_zones(
             candles_15m,
         )
 
-        if strength < MIN_MAJOR_STRENGTH:
+        if (
+            strength
+            < MIN_MAJOR_STRENGTH
+        ):
             continue
+
+        # ----------------------------------------------------
+        # ZONE
+        # ----------------------------------------------------
 
         zone_low = (
             level_price
-            * (1 - ZONE_WIDTH_PCT / 100)
+            * (
+                1
+                - ZONE_WIDTH_PCT / 100
+            )
         )
 
         zone_high = (
             level_price
-            * (1 + ZONE_WIDTH_PCT / 100)
+            * (
+                1
+                + ZONE_WIDTH_PCT / 100
+            )
         )
 
         candidates.append(
             {
-                "price": round(level_price, 4),
-                "zone_low": round(zone_low, 4),
-                "zone_high": round(zone_high, 4),
+                "price": round(
+                    level_price,
+                    8,
+                ),
+
+                "zone_low": round(
+                    zone_low,
+                    8,
+                ),
+
+                "zone_high": round(
+                    zone_high,
+                    8,
+                ),
+
                 "type": level_type,
-                "strength": round(strength, 2),
-                "touches": level["touches"],
-                "distance_pct": round(distance, 3),
+
+                "strength": round(
+                    strength,
+                    2,
+                ),
+
+                "touches": int(
+                    level.get(
+                        "touches",
+                        1,
+                    )
+                ),
+
+                "distance_pct": round(
+                    distance,
+                    4,
+                ),
+
                 "age_1h": age,
+
                 "status": "FRESH",
+
+                "swept": False,
+
+                "taken": False,
+
+                "used": False,
+
+                "consumed": False,
             }
         )
 
     # --------------------------------------------------------
-    # Сначала сильные зоны
+    # СИЛЬНЫЕ ПЕРВЫМИ
     # --------------------------------------------------------
 
     candidates.sort(
@@ -614,7 +930,13 @@ def select_major_zones(
         reverse=True,
     )
 
-    selected: List[Dict[str, Any]] = []
+    selected: List[
+        Dict[str, Any]
+    ] = []
+
+    # --------------------------------------------------------
+    # УБИРАЕМ БЛИЗКИЕ ДУБЛИКАТЫ
+    # --------------------------------------------------------
 
     for candidate in candidates:
 
@@ -627,339 +949,66 @@ def select_major_zones(
                 existing["price"],
             )
 
-            if distance < MIN_ZONE_GAP_PCT:
+            if (
+                distance
+                < MIN_ZONE_GAP_PCT
+            ):
+
                 too_close = True
+
                 break
 
         if too_close:
             continue
 
-        selected.append(candidate)
+        selected.append(
+            candidate
+        )
 
-        if len(selected) >= MAX_LEVELS_PER_SIDE:
+        if (
+            len(selected)
+            >= MAX_LEVELS_PER_SIDE
+        ):
             break
 
     # --------------------------------------------------------
-    # Для отображения сортируем по близости к цене
+    # UI → БЛИЖАЙШИЕ ПЕРВЫМИ
     # --------------------------------------------------------
 
     selected.sort(
-        key=lambda x: x["distance_pct"]
+        key=lambda x:
+        x["distance_pct"]
     )
 
     return selected
 
 
 # ============================================================
-# MAJOR LIQUIDITY
+# MAJOR LIQUIDITY INTERNAL
 # ============================================================
 
-def find_major_liquidity(
+def _build_major_liquidity(
     candles_1h: List[Dict[str, Any]],
     candles_15m: List[Dict[str, Any]],
     price: float,
 ) -> Dict[str, List[Dict[str, Any]]]:
 
+    if not candles_1h:
+        return {
+            "BSL": [],
+            "SSL": [],
+        }
+
     # --------------------------------------------------------
-    # ВАЖНО:
-    # последняя 1H свеча может быть ещё формирующейся.
-    # Не используем её как окончательный swing.
+    # НЕ ИСПОЛЬЗУЕМ ФОРМИРУЮЩУЮСЯ 1H СВЕЧУ
     # --------------------------------------------------------
 
     confirmed_1h = candles_1h[:-1]
 
-    swing_highs = find_swing_highs(
-        confirmed_1h
-    )
-
-    swing_lows = find_swing_lows(
-        confirmed_1h
-    )
-
-    # --------------------------------------------------------
-    # Кластеры
-    # --------------------------------------------------------
-
-    bsl_clusters = cluster_levels(
-        swing_highs
-    )
-
-    ssl_clusters = cluster_levels(
-        swing_lows
-    )
-
-    # --------------------------------------------------------
-    # Выбор MAJOR
-    # --------------------------------------------------------
-
-    bsl = select_major_zones(
-        bsl_clusters,
-        price,
-        confirmed_1h,
-        candles_15m,
-        "BSL",
-    )
-
-    ssl = select_major_zones(
-        ssl_clusters,
-        price,
-        confirmed_1h,
-        candles_15m,
-        "SSL",
-    )
-
-    # --------------------------------------------------------
-    # Общий лимит
-    # --------------------------------------------------------
-
-    combined = (
-        [("BSL", x) for x in bsl]
-        + [("SSL", x) for x in ssl]
-    )
-
-    combined.sort(
-        key=lambda item: item[1]["strength"],
-        reverse=True,
-    )
-
-    combined = combined[
-        :MAX_TOTAL_LEVELS
-    ]
-
-    result_bsl = [
-        x for side, x in combined
-        if side == "BSL"
-    ]
-
-    result_ssl = [
-        x for side, x in combined
-        if side == "SSL"
-    ]
-
-    # После общего лимита снова сортируем
-    result_bsl.sort(
-        key=lambda x: x["distance_pct"]
-    )
-
-    result_ssl.sort(
-        key=lambda x: x["distance_pct"]
-    )
-
-    return {
-        "BSL": result_bsl,
-        "SSL": result_ssl,
-    }
-
-
-# ============================================================
-# TARGET LIQUIDITY
-# ============================================================
-
-def get_target_liquidity(
-    major_liquidity: Dict[str, List[Dict[str, Any]]],
-    direction: str,
-    entry: float,
-) -> Optional[Dict[str, Any]]:
-
-    if direction == "LONG":
-
-        levels = major_liquidity.get(
-            "BSL",
-            [],
-        )
-
-        candidates = [
-            x
-            for x in levels
-            if x["price"] > entry
-        ]
-
-    else:
-
-        levels = major_liquidity.get(
-            "SSL",
-            [],
-        )
-
-        candidates = [
-            x
-            for x in levels
-            if x["price"] < entry
-        ]
-
-    if not candidates:
-        return None
-
-    candidates.sort(
-        key=lambda x: abs(
-            x["price"] - entry
-        )
-    )
-
-    return candidates[0]
-
-
-# ============================================================
-# MARKET DATA
-# ============================================================
-
-def get_market_data() -> Dict[str, Any]:
-
-    # --------------------------------------------------------
-    # ВАЖНО:
-    # всё загружается заново.
-    # Никакого старого кеша зон.
-    # --------------------------------------------------------
-
-    candles_1h = get_klines(
-        "1h",
-        LOOKBACK_1H,
-    )
-
-    candles_15m = get_klines(
-        "15m",
-        LOOKBACK_15M,
-    )
-
-    candles_5m = get_klines(
-        "5m",
-        LOOKBACK_5M,
-    )
-
-    candles_1m = get_klines(
-        "1m",
-        LOOKBACK_1M,
-    )
-
-    price = get_current_price()
-
-    # --------------------------------------------------------
-    # ПОЛНЫЙ ПЕРЕСЧЁТ MAJOR
-    # --------------------------------------------------------
-
-    major_liquidity = find_major_liquidity(
-        candles_1h,
-        candles_15m,
-        price,
-    )
-
-    return {
-        "symbol": SYMBOL,
-        "price": price,
-
-        "candles": {
-            "1h": candles_1h,
-            "15m": candles_15m,
-            "5m": candles_5m,
-            "1m": candles_1m,
-        },
-
-        "major_liquidity": major_liquidity,
-
-        "updated_at": time.time(),
-    }
-
-
-# ============================================================
-# COMPATIBILITY
-# ============================================================
-
-def get_major_liquidity(
-    price: Optional[float] = None,
-) -> Dict[str, List[Dict[str, Any]]]:
-
-    candles_1h = get_klines(
-        "1h",
-        LOOKBACK_1H,
-    )
-
-    candles_15m = get_klines(
-        "15m",
-        LOOKBACK_15M,
-    )
-
-    if price is None:
-        price = get_current_price()
-
-    return find_major_liquidity(
-        candles_1h,
-        candles_15m,
-        price,
-    )
-
-
-def market_snapshot() -> Dict[str, Any]:
-    return get_market_data()
-
-
-# ============================================================
-# DEBUG
-# ============================================================
-
-def format_major_liquidity(
-    data: Dict[str, Any],
-) -> str:
-
-    price = data["price"]
-    liquidity = data["major_liquidity"]
-
-    lines = []
-
-    lines.append(
-        f"💰 SOL: ${price:.4f}"
-    )
-
-    lines.append("")
-    lines.append("🔴 BSL MAJOR")
-
-    bsl = liquidity.get("BSL", [])
-
-    if not bsl:
-        lines.append("— нет актуальных зон")
-
-    for i, zone in enumerate(bsl, 1):
-
-        lines.append(
-            f"{i}. ${zone['price']:.4f} "
-            f"• {zone['distance_pct']:.2f}% "
-            f"• S{zone['strength']:.0f}"
-        )
-
-    lines.append("")
-    lines.append("🟢 SSL MAJOR")
-
-    ssl = liquidity.get("SSL", [])
-
-    if not ssl:
-        lines.append("— нет актуальных зон")
-
-    for i, zone in enumerate(ssl, 1):
-
-        lines.append(
-            f"{i}. ${zone['price']:.4f} "
-            f"• {zone['distance_pct']:.2f}% "
-            f"• S{zone['strength']:.0f}"
-        )
-
-    return "\n".join(lines)
-
-
-# ============================================================
-# TEST
-# ============================================================
-
-if __name__ == "__main__":
-
-    print("TradeMind market.py 6.6")
-
-    try:
-        data = get_market_data()
-
-        print(
-            format_major_liquidity(data)
-        )
-
-    except Exception as e:
-        print(
-            f"MARKET ERROR: {e}"
-        )
+    if len(confirmed_1h) < 10:
+        return {
+            "BSL": [],
+            "SSL": [],
+        }
+
+    #
