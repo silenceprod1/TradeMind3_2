@@ -1,38 +1,31 @@
 """
-TradeMind 6.10
+TradeMind 6.11
 
-Изменения vs 6.9:
-- MAX_SWEEP_AGE_1H: 8 -> 24 (окно sweep расширено до суток)
-- MAX_15M_CONFIRM_CANDLES: 12 -> 24 (окно 15M подтверждения)
-- confirmation_15m упрощён: убрано требование пробоя локального
-  хая/лоу. Осталось только "бычья/медвежья свеча с телом >= 0.35".
-  Это классическое поглощение, работает чаще.
+Изменения vs 6.10:
+- MIN_5M_RECOVERY_RATIO: 0.33 -> 0.25
+- MIN_V_RECOVERY_FOR_READY: 0.45 -> 0.40
+- MAX_5M_ILM_CANDLES: 40 -> 60
+- MIN_5M_ILM_SWEEP_DISTANCE_PCT: 0.75 -> 1.5
 """
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "6.10"
+STRATEGY_VERSION = "6.11"
 
 
 MIN_SCORE_READY = 80
 MIN_RR = 2.0
 SL_BUFFER_PCT = 0.20
 MIN_SWEEP_DEPTH_PCT = 0.15
-MIN_5M_RECOVERY_RATIO = 0.33
-MIN_V_RECOVERY_FOR_READY = 0.45
+MIN_5M_RECOVERY_RATIO = 0.25
+MIN_V_RECOVERY_FOR_READY = 0.40
 MIN_BODY_RATIO = 0.35
-
-# Было 8, стало 24 — sweep актуален сутки
 MAX_SWEEP_AGE_1H = 24
-
-MAX_5M_ILM_CANDLES = 40
-
-# Было 12, стало 24 — окно подтверждения больше
+MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
-
-MIN_5M_ILM_SWEEP_DISTANCE_PCT = 0.75
+MIN_5M_ILM_SWEEP_DISTANCE_PCT = 1.5
 MIN_TARGET_DISTANCE_PCT = 0.30
 COUNTER_TREND_MIN_SCORE = 90
 
@@ -383,14 +376,10 @@ def find_sweep(candles_1h, major_levels, direction):
 
 
 # ============================================================
-# 15M CONFIRMATION (упрощённая версия)
+# 15M CONFIRMATION
 # ============================================================
 
 def confirmation_15m(candles_15m, sweep, direction):
-    """
-    Упрощено: ищем просто свечу-поглощение в направлении сделки
-    с телом >= MIN_BODY_RATIO. Без требования пробоя локального хая.
-    """
     if not sweep or direction not in {"LONG", "SHORT"} or not candles_15m:
         return False, None, None
 
