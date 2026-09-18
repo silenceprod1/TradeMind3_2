@@ -5,10 +5,6 @@
 данным одной монеты. Считает win rate, средний PnL, max drawdown.
 
 БЕЗ LOOKAHEAD: на каждом шаге используются только закрытые свечи.
-
-Запуск:
-    python backtest.py --symbol SOLUSDT
-    python backtest.py --symbol BTCUSDT --max-hours 12
 """
 
 import argparse
@@ -23,29 +19,18 @@ from market import (
 from strategy import analyze, get_1h_direction
 
 
-# ============================================================
-# CONFIG
-# ============================================================
+BT_LOOKBACK_1H = 500
+BT_LOOKBACK_15M = 500
+BT_LOOKBACK_5M = 1000
+BT_LOOKBACK_1M = 500
 
-# Сколько свечей загружаем
-BT_LOOKBACK_1H = 500      # 20 дней
-BT_LOOKBACK_15M = 500     # 5 дней
-BT_LOOKBACK_5M = 1000     # 83 часа
-BT_LOOKBACK_1M = 500      # 8 часов
-
-# Сколько первых свечей 1H пропустить для "прогрева"
 WARMUP_1H = 150
 
-# Максимум удержания сделки (часов)
 DEFAULT_MAX_HOURS = 12
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
 def log(msg):
-    print(f"[BT] {msg}")
+    print(f"[BT] {msg}", flush=True)
 
 
 def ts_to_str(ms):
@@ -57,12 +42,10 @@ def ts_to_str(ms):
 
 
 def candles_until(candles, ts):
-    """Все свечи, которые закрылись ДО момента ts."""
     return [c for c in candles if c["close_time"] < ts]
 
 
 def has_active_position(trades, ts_now):
-    """Есть ли незакрытая позиция (по времени exit_ts)."""
     if not trades:
         return False
     return trades[-1]["exit_ts"] > ts_now
@@ -75,23 +58,7 @@ def pnl_pct(entry, exit_price, direction):
         return (entry - exit_price) / entry * 100
 
 
-# ============================================================
-# СИМУЛЯЦИЯ СДЕЛКИ
-# ============================================================
-
 def simulate_trade(trade, candles_5m, start_ts, max_hours):
-    """
-    Идём по 5M свечам после start_ts.
-    Проверяем каждую свечу на TP/SL.
-
-    Возвращает: (result, exit_price, exit_ts, candles_held)
-
-    result:
-      - "TP"      — достигнут тейк
-      - "SL"      — сработал стоп
-      - "TIMEOUT" — превысили max_hours, закрываем по маркету
-    """
-
     direction = trade["direction"]
     sl = trade["sl"]
     tp = trade["tp"]
@@ -122,8 +89,6 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours):
             hit_sl = high >= sl
 
         if hit_tp and hit_sl:
-            # Внутри одной свечи сработали оба уровня.
-            # Консервативно: считаем SL.
             return ("SL", sl, c["open_time"], held)
 
         if hit_tp:
@@ -132,21 +97,11 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours):
         if hit_sl:
             return ("SL", sl, c["open_time"], held)
 
-    # Таймаут
     if last_seen is not None:
-        return (
-            "TIMEOUT",
-            last_seen["close"],
-            last_seen["open_time"],
-            held,
-        )
+        return ("TIMEOUT", last_seen["close"], last_seen["open_time"], held)
 
     return ("TIMEOUT", entry, start_ts, 0)
 
-
-# ============================================================
-# ОСНОВНОЙ ЦИКЛ
-# ============================================================
 
 def run_backtest(symbol, max_hours):
     symbol = _normalize_symbol(symbol)
@@ -160,21 +115,17 @@ def run_backtest(symbol, max_hours):
     candles_1m = get_klines("1m", BT_LOOKBACK_1M, symbol)
 
     if not candles_1h:
-        log("Нет данных по 1H. Проверь символ.")
+        log("Нет данных по 1H.")
         return []
 
-    log(f"Загружено: "
-        f"1H={len(candles_1h)} "
-        f"15M={len(candles_15m)} "
-        f"5M={len(candles_5m)} "
-        f"1M={len(candles_1m)}")
+    log(f"Загружено: 1H={len(candles_1h)} 15M={len(candles_15m)} "
+        f"5M={len(candles_5m)} 1M={len(candles_1m)}")
 
     if len(candles_1h) <= WARMUP_1H:
         log(f"Мало данных 1H (нужно > {WARMUP_1H}).")
         return []
 
     trades = []
-
     total = len(candles_1h) - WARMUP_1H
     log(f"Шагов бэктеста: {total}")
 
@@ -182,11 +133,9 @@ def run_backtest(symbol, max_hours):
 
         ts_now = candles_1h[i]["open_time"]
 
-        # Пропускаем, если позиция ещё активна
         if has_active_position(trades, ts_now):
             continue
 
-        # Все свечи строго до ts_now
         c1h = candles_1h[:i]
         c15 = candles_until(candles_15m, ts_now)
         c5 = candles_until(candles_5m, ts_now)
@@ -195,25 +144,19 @@ def run_backtest(symbol, max_hours):
         if len(c15) < 60 or len(c5) < 60:
             continue
 
-        # Текущая цена
         if c1:
             price = c1[-1]["close"]
         else:
             price = c1h[-1]["close"]
 
         try:
-            levels = find_major_liquidity(
-                c1h, price, 12, c15, c5, c1,
-            )
+            levels = find_major_liquidity(c1h, price, 12, c15, c5, c1)
             direction = get_1h_direction(c1h)
 
             sweep = None
             if direction != "NEUTRAL":
                 sweep = detect_sweep(c1h, price, direction, levels)
 
-            # D1 контекст и FVG мы не передаём — чтобы не тянуть
-            # дополнительные данные. Это влияет на score (штраф),
-            # но не на саму логику цепочки.
             result = analyze(
                 c1h, c15, c5, price,
                 levels, sweep,
@@ -222,7 +165,7 @@ def run_backtest(symbol, max_hours):
                 fvgs=[],
             )
 
-        except Exception as e:
+        except Exception:
             continue
 
         if result.get("stage") != "READY":
@@ -264,16 +207,11 @@ def run_backtest(symbol, max_hours):
             f"entry={entry:.4f} sl={sl:.4f} tp={tp:.4f} "
             f"rr={trade['rr']:.2f} score={trade['score']} "
             f"→ {res_type:7} "
-            f"pnl={trade['pnl']:+.2f}% "
-            f"({held} × 5m)"
+            f"pnl={trade['pnl']:+.2f}% ({held} × 5m)"
         )
 
     return trades
 
-
-# ============================================================
-# ОТЧЁТ
-# ============================================================
 
 def print_report(symbol, trades):
 
@@ -289,8 +227,8 @@ def print_report(symbol, trades):
         print()
         print("Возможные причины:")
         print("  1. Фильтры слишком строгие")
-        print("  2. Мало данных (увеличь LOOKBACK или период)")
-        print("  3. Стратегия не подходит этому инструменту на этом периоде")
+        print("  2. Мало данных")
+        print("  3. Стратегия не подходит инструменту на этом периоде")
         return
 
     tp = sum(1 for t in trades if t["result"] == "TP")
@@ -309,7 +247,6 @@ def print_report(symbol, trades):
     avg_win = sum(wins) / len(wins) if wins else 0
     avg_loss = sum(losses) / len(losses) if losses else 0
 
-    # Equity curve & max drawdown
     equity = 0
     peak = 0
     max_dd = 0
@@ -329,19 +266,18 @@ def print_report(symbol, trades):
     print(f"  LONG:  {len(longs)}")
     print(f"  SHORT: {len(shorts)}")
     print()
-    print(f"Результаты:")
-    print(f"  ✅ TP:      {tp}")
-    print(f"  ❌ SL:      {sl}")
-    print(f"  ⏱  Timeout: {timeout}")
+    print("Результаты:")
+    print(f"  TP:      {tp}")
+    print(f"  SL:      {sl}")
+    print(f"  Timeout: {timeout}")
     print()
-    print(f"Win rate:   {win_rate:.1f}%  (от {resolved} закрытых по TP/SL)")
-    print(f"Total PnL:  {total_pnl:+.2f}%")
-    print(f"Avg PnL:    {avg_pnl:+.2f}%")
-    print(f"Avg win:    {avg_win:+.2f}%")
-    print(f"Avg loss:   {avg_loss:+.2f}%")
-    print(f"Max DD:     -{max_dd:.2f}%")
+    print(f"Win rate:      {win_rate:.1f}%  (от {resolved} закрытых по TP/SL)")
+    print(f"Total PnL:     {total_pnl:+.2f}%")
+    print(f"Avg PnL:       {avg_pnl:+.2f}%")
+    print(f"Avg win:       {avg_win:+.2f}%")
+    print(f"Avg loss:      {avg_loss:+.2f}%")
+    print(f"Max DD:        -{max_dd:.2f}%")
 
-    # Profit factor
     gross_win = sum(wins)
     gross_loss = abs(sum(losses))
     if gross_loss > 0:
@@ -352,15 +288,8 @@ def print_report(symbol, trades):
     print("=" * 70)
     print("ВСЕ СДЕЛКИ")
     print("=" * 70)
-    print(
-        f"{'Дата (UTC)':<17}"
-        f"{'Напр.':<6}"
-        f"{'Entry':<12}"
-        f"{'RR':<6}"
-        f"{'Score':<6}"
-        f"{'Результат':<10}"
-        f"{'PnL':<10}"
-    )
+    print(f"{'Дата (UTC)':<17}{'Напр.':<6}{'Entry':<12}"
+          f"{'RR':<6}{'Score':<6}{'Результат':<10}{'PnL':<10}")
     print("-" * 70)
 
     for t in trades:
@@ -375,29 +304,13 @@ def print_report(symbol, trades):
         )
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="TradeMind walk-forward backtest"
-    )
-    parser.add_argument(
-        "--symbol", default="SOLUSDT",
-        help="Символ или имя монеты (SOL / SOLUSDT)",
-    )
-    parser.add_argument(
-        "--max-hours", type=int, default=DEFAULT_MAX_HOURS,
-        help="Максимум часов удержания сделки",
-    )
-    parser.add_argument(
-        "--multi", action="store_true",
-        help="Прогнать по нескольким монетам",
-    )
+    parser = argparse.ArgumentParser(description="TradeMind backtest")
+    parser.add_argument("--symbol", default="SOLUSDT")
+    parser.add_argument("--max-hours", type=int, default=DEFAULT_MAX_HOURS)
+    parser.add_argument("--multi", action="store_true")
 
     args = parser.parse_args()
-
     symbols = [args.symbol]
 
     if args.multi:
@@ -408,9 +321,9 @@ def main():
 
     for sym in symbols:
         print()
-        print("━" * 70)
-        print(f"▶ {sym}")
-        print("━" * 70)
+        print("-" * 70)
+        print(f"> {sym}")
+        print("-" * 70)
 
         trades = run_backtest(sym, args.max_hours)
         print_report(sym, trades)
@@ -425,9 +338,9 @@ def main():
 
     if args.multi and all_summary:
         print()
-        print("━" * 70)
-        print("СВОДКА ПО ВСЕМ МОНЕТАМ")
-        print("━" * 70)
+        print("-" * 70)
+        print("СВОДКА")
+        print("-" * 70)
         print(f"{'Символ':<12}{'Сделок':<10}{'WinRate':<12}{'PnL':<12}")
         print("-" * 70)
         for sym, cnt, wr, pnl in all_summary:
