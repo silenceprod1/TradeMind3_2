@@ -1,64 +1,30 @@
 """
-TradeMind Strategy 7.0
+TradeMind Strategy 7.8
 
-Основная логика:
+АКТУАЛЬНАЯ СХЕМА:
 
-1H → Major Liquidity → Sweep → 15M Confirmation → 5M ILM → Entry
+1H → Major Liquidity → Sweep → 15M Confirmation → 5M ILM → Entry → Major TP
 
-Правила:
+ВАЖНО:
 - D1/W1 НЕ участвуют в торговом решении.
-- Направление берём только с 1H.
-- Major Liquidity = только 1H liquidity.
-- LONG:
-    1H LONG
-    ↓
-    SSL sweep
-    ↓
-    15M bullish confirmation
-    ↓
-    5M V-ILM
-    ↓
-    Entry
-    ↓
-    следующая Major BSL
-- SHORT:
-    1H SHORT
-    ↓
-    BSL sweep
-    ↓
-    15M bearish confirmation
-    ↓
-    5M L-ILM
-    ↓
-    Entry
-    ↓
-    следующая Major SSL
-
-TP:
-- только следующая свежая Major Liquidity;
-- D1 Point B НЕ используется;
-- локальные 5M/15M swing НЕ используются как основной TP;
-- если ближайшая Major Liquidity даёт RR < 1:2 — вход запрещён;
-- TP не отодвигается искусственно ради RR.
-
-SL:
-- за sweep/ILM extreme;
-- buffer = 0.20%.
-
-READY:
-- score >= 80;
-- trend activity >= 0.45;
-- recovery >= 0.45;
-- RR >= 1:2;
-- все обязательные этапы пройдены.
-
-Контртрендовые сделки НЕ разрешаются.
+- Направление только 1H.
+- Major Liquidity = ТОЛЬКО 1H.
+- LONG → SSL sweep → 15M bullish confirmation → 5M V-ILM → LONG.
+- SHORT → BSL sweep → 15M bearish confirmation → 5M L-ILM → SHORT.
+- Контртренд запрещён.
+- TP = следующая свежая Major Liquidity 1H.
+- Local 5M/15M swing НЕ является TP рабочего сетапа.
+- D1 Point B НЕ используется.
+- RR должен быть >= 1:2.
+- Если ближайшая Major Liquidity даёт RR < 1:2 → вход запрещён.
+- TP никогда не отодвигается искусственно ради RR.
+- SL = за sweep/ILM extreme + buffer 0.20%.
 """
 
 from typing import Any, Dict, List, Optional
 
 
-STRATEGY_VERSION = "7.0"
+STRATEGY_VERSION = "7.8"
 
 # ============================================================
 # CORE SETTINGS
@@ -82,13 +48,12 @@ MAX_5M_ILM_CANDLES = 40
 
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 0.75
 
-# Только для проверки, что target не совпадает со sweep.
-MIN_TARGET_DISTANCE_PCT = 0.30
+# Только защита от совпадения TP со sweep level.
+MIN_TARGET_DISTANCE_PCT = 0.05
 
 MIN_TREND_ACTIVITY_READY = 0.45
 
-# Fallback targets НЕ используются как TP сделки.
-# Оставлены только для совместимости API.
+# Compatibility only.
 FALLBACK_5M_LOOKBACK = 60
 FALLBACK_15M_LOOKBACK = 60
 MIN_FALLBACK_DISTANCE_PCT = 0.30
@@ -229,16 +194,6 @@ def _distance_pct(a, b):
 # ============================================================
 
 def measure_trend_activity(candles_1h, direction):
-    """
-    Насколько последние 1H свечи реально поддерживают направление.
-
-    LONG:
-        сумма bullish bodies / сумма всех bodies
-
-    SHORT:
-        сумма bearish bodies / сумма всех bodies
-    """
-
     if not candles_1h or len(candles_1h) < 15:
         return 0.0
 
@@ -354,15 +309,11 @@ def _swing_lows(candles):
 
 def get_1h_direction(candles):
     """
-    Основное направление.
+    1H является единственным источником направления.
 
-    Приоритет:
-    1. HH + HL → LONG
-    2. LH + LL → SHORT
-    3. если структура недостаточно чистая —
-       body activity последних 8 свечей.
-
-    D1/W1 здесь намеренно отсутствуют.
+    HH + HL → LONG
+    LH + LL → SHORT
+    Иначе body activity последних свечей.
     """
 
     if not candles or len(candles) < 15:
@@ -436,12 +387,6 @@ def get_higher_timeframe_direction(
     candles_d1=None,
     candles_w1=None,
 ):
-    """
-    Совместимость со старым bot.py.
-
-    D1/W1 намеренно игнорируются.
-    """
-
     return get_1h_direction(candles_1h)
 
 
@@ -451,55 +396,165 @@ def get_higher_timeframe_direction(
 
 def _level_price(level):
     if isinstance(level, dict):
-        return _f(level.get("price"))
+        return _f(
+            level.get("price")
+            or level.get("level")
+            or level.get("value")
+        )
 
     return _f(level)
 
 
 def _level_side(level):
     if not isinstance(level, dict):
-        return None
+        return ""
 
-    return str(
+    value = (
         level.get("side")
         or level.get("direction")
+        or level.get("liquidity_side")
         or ""
-    ).upper()
+    )
+
+    return str(value).upper().strip()
 
 
 def _level_type(level):
     if not isinstance(level, dict):
         return ""
 
-    return str(
+    value = (
         level.get("type")
+        or level.get("liquidity_type")
+        or level.get("level_type")
+        or ""
+    )
+
+    return str(value).upper().strip()
+
+
+def _normalized_liquidity_type(level):
+    """
+    Приводим все возможные варианты к BSL / SSL.
+
+    Поддерживает:
+
+        SSL
+        SSL_1H
+        SSL 1H
+        SSL-1H
+        SSL_MAJOR
+        BSL
+        BSL_1H
+        BSL 1H
+        BSL-1H
+        BSL_MAJOR
+    """
+
+    level_type = _level_type(level)
+    side = _level_side(level)
+
+    text = f"{level_type} {side}".upper()
+
+    if "SSL" in text:
+        return "SSL"
+
+    if "BSL" in text:
+        return "BSL"
+
+    # Дополнительная совместимость.
+    if "SELL SIDE" in text or "SELL_SIDE" in text:
+        return "SSL"
+
+    if "BUY SIDE" in text or "BUY_SIDE" in text:
+        return "BSL"
+
+    return ""
+
+
+def _is_1h_major(level):
+    """
+    Проверяем, что уровень действительно Major 1H.
+
+    market.py 7.8 должен передавать:
+        source = 1H
+        type = SSL_1H / BSL_1H
+
+    Но здесь оставляем совместимость.
+    """
+
+    if not isinstance(level, dict):
+        return False
+
+    source = str(
+        level.get("source")
+        or level.get("timeframe")
+        or level.get("tf")
         or ""
     ).upper()
+
+    level_type = _level_type(level)
+
+    if source in {
+        "1H",
+        "1H_MAJOR",
+        "MAJOR_1H",
+        "H1",
+    }:
+        return True
+
+    if (
+        "_1H" in level_type
+        or "1H" in level_type
+        or "H1" in level_type
+    ):
+        return True
+
+    # Если market.py уже отдаёт major_levels,
+    # допускаем отсутствие source.
+    if (
+        "MAJOR" in level_type
+        and (
+            "SSL" in level_type
+            or "BSL" in level_type
+        )
+    ):
+        return True
+
+    # Для старого формата.
+    if (
+        level_type in {
+            "SSL",
+            "BSL",
+        }
+        and source == ""
+    ):
+        return True
+
+    return False
 
 
 def _level_strength(level):
     if not isinstance(level, dict):
         return 0.0
 
-    value = (
-        level.get("strength")
-        or level.get("touches")
-        or 0
-    )
+    for key in (
+        "strength",
+        "score",
+        "touches",
+    ):
+        value = level.get(key)
 
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+        try:
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            pass
+
+    return 0.0
 
 
 def _is_swept_level(level):
-    """
-    Не используем swept как основной фильтр Major Liquidity,
-    но если market.py явно пометил уровень consumed/taken,
-    для TP его использовать нельзя.
-    """
-
     if not isinstance(level, dict):
         return False
 
@@ -516,20 +571,28 @@ def _levels_for_direction(
     direction,
 ):
     """
-    LONG → SSL.
-    SHORT → BSL.
+    КЛЮЧЕВАЯ ФУНКЦИЯ.
 
-    ВАЖНО:
-    Major Liquidity предполагается 1H.
+    LONG → ТОЛЬКО SSL.
+    SHORT → ТОЛЬКО BSL.
+
+    Не пытаемся определить направление
+    через поле side, если type уже однозначен.
+
+    SSL_1H → SSL
+    BSL_1H → BSL
     """
 
     result = []
 
-    expected_type = (
-        "SSL"
-        if direction == "LONG"
-        else "BSL"
-    )
+    if direction == "LONG":
+        expected = "SSL"
+
+    elif direction == "SHORT":
+        expected = "BSL"
+
+    else:
+        return result
 
     for level in major_levels or []:
 
@@ -538,19 +601,100 @@ def _levels_for_direction(
         if price is None:
             continue
 
-        side = _level_side(level)
-        level_type = _level_type(level)
+        liquidity_type = _normalized_liquidity_type(
+            level
+        )
 
-        if (
-            side == direction
-            or level_type == expected_type
-            or level_type.startswith(
-                expected_type + "_"
-            )
-        ):
-            result.append(level)
+        if liquidity_type != expected:
+            continue
+
+        # Major Liquidity должна быть 1H.
+        if not _is_1h_major(level):
+            continue
+
+        result.append(level)
+
+    # Самая сильная Major первой.
+    result.sort(
+        key=lambda x: (
+            -_level_strength(x),
+            _level_price(x)
+            if _level_price(x) is not None
+            else 0,
+        )
+    )
 
     return result
+
+
+def get_major_level(
+    major_levels,
+    direction,
+    current_price=None,
+):
+    """
+    Возвращает ОСНОВНОЙ рабочий Major level.
+
+    LONG:
+        ближайший SSL ниже текущей цены.
+
+    SHORT:
+        ближайший BSL выше текущей цены.
+
+    Если текущая цена не передана:
+        выбираем самый сильный уровень.
+    """
+
+    levels = _levels_for_direction(
+        major_levels,
+        direction,
+    )
+
+    if not levels:
+        return None
+
+    price = _f(current_price)
+
+    valid = []
+
+    for level in levels:
+
+        level_price = _level_price(level)
+
+        if level_price is None:
+            continue
+
+        if price is None:
+            valid.append(level)
+            continue
+
+        if (
+            direction == "LONG"
+            and level_price < price
+        ):
+            valid.append(level)
+
+        elif (
+            direction == "SHORT"
+            and level_price > price
+        ):
+            valid.append(level)
+
+    if not valid:
+        return None
+
+    if price is None:
+        return max(
+            valid,
+            key=_level_strength,
+        )
+
+    return min(
+        valid,
+        key=lambda level: abs(
+            _level_price(level) - price
+        ),
+    )
 
 
 # ============================================================
@@ -579,7 +723,9 @@ def is_inside_fvg(
         if not isinstance(fvg, dict):
             continue
 
-        if fvg.get("type") != expected:
+        if str(
+            fvg.get("type", "")
+        ).lower() != expected:
             continue
 
         top = _f(fvg.get("top"))
@@ -589,7 +735,9 @@ def is_inside_fvg(
             continue
 
         tolerance = (
-            top * tolerance_pct / 100.0
+            top
+            * tolerance_pct
+            / 100.0
         )
 
         if (
@@ -608,14 +756,6 @@ def compute_fvg_bonus(
     fvgs,
     direction,
 ):
-    """
-    Возвращает:
-
-    bonus,
-    sweep_inside,
-    entry_inside
-    """
-
     if not fvgs:
         return 0, False, False
 
@@ -651,7 +791,10 @@ def compute_fvg_bonus(
         bonus += FVG_ENTRY_BONUS
 
     return (
-        min(bonus, FVG_MAX_BONUS),
+        min(
+            bonus,
+            FVG_MAX_BONUS,
+        ),
         sweep_inside,
         entry_inside,
     )
@@ -674,6 +817,11 @@ def _sweep_candidate_score(
         else 1
     )
 
+    try:
+        touches = float(touches)
+    except (TypeError, ValueError):
+        touches = 1
+
     return (
         depth * 4.0
         + strength / 20.0
@@ -687,18 +835,17 @@ def find_sweep(
     direction,
 ):
     """
-    Ищем только свежий sweep последних MAX_SWEEP_AGE_1H
-    подтверждённых 1H свечей.
-
     LONG:
-        цена прокалывает SSL
-        затем закрывается выше SSL
-        bullish body
+        SSL sweep:
+            low < SSL
+            close > SSL
+            bullish candle
 
     SHORT:
-        цена прокалывает BSL
-        затем закрывается ниже BSL
-        bearish body
+        BSL sweep:
+            high > BSL
+            close < BSL
+            bearish candle
     """
 
     if direction not in {
@@ -730,8 +877,6 @@ def find_sweep(
 
         for level in levels:
 
-            # Если market.py пометил уровень consumed,
-            # текущий sweep по нему больше не рассматриваем.
             if _is_swept_level(level):
                 continue
 
@@ -740,9 +885,9 @@ def find_sweep(
             if level_price is None:
                 continue
 
-            # -----------------------------
+            # =================================================
             # LONG
-            # -----------------------------
+            # =================================================
 
             if direction == "LONG":
 
@@ -753,7 +898,10 @@ def find_sweep(
                     continue
 
                 depth = (
-                    (level_price - low)
+                    (
+                        level_price
+                        - low
+                    )
                     / level_price
                     * 100.0
                 )
@@ -785,6 +933,7 @@ def find_sweep(
                         0,
                     ),
                     "depth_pct": depth,
+                    "major_level": level,
                     "_score": (
                         _sweep_candidate_score(
                             candle,
@@ -795,9 +944,9 @@ def find_sweep(
                     ),
                 })
 
-            # -----------------------------
+            # =================================================
             # SHORT
-            # -----------------------------
+            # =================================================
 
             else:
 
@@ -808,7 +957,10 @@ def find_sweep(
                     continue
 
                 depth = (
-                    (high - level_price)
+                    (
+                        high
+                        - level_price
+                    )
                     / level_price
                     * 100.0
                 )
@@ -840,6 +992,7 @@ def find_sweep(
                         0,
                     ),
                     "depth_pct": depth,
+                    "major_level": level,
                     "_score": (
                         _sweep_candidate_score(
                             candle,
@@ -914,18 +1067,6 @@ def confirmation_15m(
     sweep,
     direction,
 ):
-    """
-    После 1H sweep ждём структурное подтверждение на 15M.
-
-    LONG:
-        bullish displacement
-        close выше последнего локального high
-
-    SHORT:
-        bearish displacement
-        close ниже последнего локального low
-    """
-
     if (
         not sweep
         or direction not in {
@@ -980,9 +1121,9 @@ def confirmation_15m(
         if close is None:
             continue
 
-        # ====================================================
+        # =====================================================
         # LONG
-        # ====================================================
+        # =====================================================
 
         if direction == "LONG":
 
@@ -1021,9 +1162,9 @@ def confirmation_15m(
                     _t(candle),
                 )
 
-        # ====================================================
+        # =====================================================
         # SHORT
-        # ====================================================
+        # =====================================================
 
         else:
 
@@ -1246,7 +1387,6 @@ def _ilm_long_candidate(
 
     trigger_close = _c(trigger)
 
-    # Distance from 1H sweep
     if sweep_level is not None:
 
         distance = (
@@ -1264,8 +1404,6 @@ def _ilm_long_candidate(
         ):
             return None
 
-    # ILM extreme must remain reasonably
-    # close to the original sweep extreme.
     if (
         sweep_extreme is not None
         and manipulation_low
@@ -1289,11 +1427,6 @@ def _ilm_long_candidate(
         ),
         "recovery_ratio": recovery,
         "manipulation_pct": manipulation_pct,
-        "_score": (
-            recovery * 30.0
-            + _body_ratio(trigger) * 20.0
-            + manipulation_pct * 5.0
-        ),
     }
 
 
@@ -1472,11 +1605,6 @@ def _ilm_short_candidate(
         ),
         "recovery_ratio": recovery,
         "manipulation_pct": manipulation_pct,
-        "_score": (
-            recovery * 30.0
-            + _body_ratio(trigger) * 20.0
-            + manipulation_pct * 5.0
-        ),
     }
 
 
@@ -1561,12 +1689,26 @@ def detect_5m_ilm(
     if not candidates:
         return False, None
 
+    def ilm_score(x):
+        recovery = x.get(
+            "recovery_ratio",
+            0,
+        )
+
+        manipulation = x.get(
+            "manipulation_pct",
+            0,
+        )
+
+        return (
+            recovery * 30.0
+            + manipulation * 5.0
+        )
+
     best = max(
         candidates,
-        key=lambda x: x["_score"],
+        key=ilm_score,
     )
-
-    best.pop("_score", None)
 
     return True, best
 
@@ -1582,23 +1724,23 @@ def next_target(
     exclude_level=None,
 ):
     """
-    Только следующая Major Liquidity.
-
-    LONG → ближайший unswept BSL выше Entry.
-    SHORT → ближайший unswept SSL ниже Entry.
-
-    Никаких D1.
-    Никаких local fallback.
+    LONG → next fresh BSL above entry.
+    SHORT → next fresh SSL below entry.
     """
 
     price = _f(current_price)
-
     excluded = _f(exclude_level)
 
     if price is None:
         return None
 
     candidates = []
+
+    expected = (
+        "BSL"
+        if direction == "LONG"
+        else "SSL"
+    )
 
     for level in major_levels or []:
 
@@ -1608,6 +1750,15 @@ def next_target(
         level_price = _level_price(level)
 
         if level_price is None:
+            continue
+
+        if not _is_1h_major(level):
+            continue
+
+        if (
+            _normalized_liquidity_type(level)
+            != expected
+        ):
             continue
 
         if excluded is not None:
@@ -1645,7 +1796,9 @@ def next_target(
 
     return min(
         candidates,
-        key=lambda x: abs(x - price),
+        key=lambda x: abs(
+            x - price
+        ),
     )
 
 
@@ -1660,13 +1813,6 @@ def _scan_local_targets(
     lookback,
     label,
 ):
-    """
-    Оставлено для совместимости.
-
-    НЕ используется для реального TP
-    в resolve_target().
-    """
-
     results = []
 
     if not candles or len(candles) < 5:
@@ -1748,12 +1894,6 @@ def detect_local_swing_target(
     direction,
     entry,
 ):
-    """
-    Совместимость со старым кодом.
-
-    Не используется как TP рабочего сетапа.
-    """
-
     entry = _f(entry)
 
     if entry is None or entry <= 0:
@@ -1800,22 +1940,6 @@ def resolve_target(
     candles_15m,
     d1_context=None,
 ):
-    """
-    НОВАЯ ЦЕЛЬ:
-
-    D1 полностью исключён.
-
-    TP:
-        следующая Major Liquidity.
-
-    Если Major TP отсутствует:
-        TP отсутствует.
-
-    Мы НЕ используем local swing,
-    потому что пользователь закрепил
-    Major Liquidity как основной target.
-    """
-
     tp_major = next_target(
         major_levels=major_levels,
         direction=direction,
@@ -2031,18 +2155,9 @@ def _score(
     tp_source="major",
     fvg_bonus=0,
 ):
-    """
-    Score только по рабочей структуре.
-
-    D1 больше НЕ участвует.
-    """
-
     score = 0
 
-    # --------------------------------------------------------
     # 1H direction
-    # --------------------------------------------------------
-
     if direction == context_direction:
         score += 20
 
@@ -2050,13 +2165,9 @@ def _score(
         score += 0
 
     else:
-        # Контртренд запрещаем отдельно.
         score -= 20
 
-    # --------------------------------------------------------
-    # SWEEP
-    # --------------------------------------------------------
-
+    # Sweep
     if sweep:
 
         depth = sweep.get(
@@ -2076,10 +2187,7 @@ def _score(
         else:
             score += 5
 
-    # --------------------------------------------------------
-    # 15M confirmation
-    # --------------------------------------------------------
-
+    # 15M
     if confirmation_strength >= 0.75:
         score += 15
 
@@ -2089,10 +2197,7 @@ def _score(
     elif confirmation_strength > 0:
         score += 7
 
-    # --------------------------------------------------------
-    # 5M ILM
-    # --------------------------------------------------------
-
+    # 5M
     if ilm:
 
         recovery = ilm.get(
@@ -2109,10 +2214,7 @@ def _score(
         else:
             score += 7
 
-    # --------------------------------------------------------
     # RR
-    # --------------------------------------------------------
-
     if rr is not None:
 
         if rr >= 4.0:
@@ -2127,25 +2229,14 @@ def _score(
         elif rr >= 2.0:
             score += 8
 
-    # --------------------------------------------------------
     # Major strength
-    # --------------------------------------------------------
-
     score += min(
         10,
         major_strength / 10.0,
     )
 
-    # --------------------------------------------------------
     # FVG
-    # --------------------------------------------------------
-
     score += fvg_bonus
-
-    # --------------------------------------------------------
-    # Local TP should never be used for
-    # actual READY setup.
-    # --------------------------------------------------------
 
     if tp_source == "local":
         score *= 0.9
@@ -2162,25 +2253,19 @@ def _score(
 
 
 # ============================================================
-# SINGLE SCENARIO
+# EMPTY SCENARIO
 # ============================================================
 
-def _analyze_scenario(
-    candles_1h,
-    candles_15m,
-    candles_5m,
-    current_price,
-    major_levels,
+def _empty_scenario(
     direction,
-    context_direction,
-    d1_context=None,
-    fvgs=None,
+    major_levels,
+    reason,
 ):
-    result = {
+    return {
         "stage": "WAIT",
         "direction": direction,
         "score": 0,
-        "reason": "",
+        "reason": reason,
 
         "entry": None,
         "sl": None,
@@ -2190,7 +2275,15 @@ def _analyze_scenario(
         "rr": None,
 
         "sweep": None,
-        "major_levels": major_levels or [],
+
+        "major_levels": (
+            major_levels or []
+        ),
+
+        "major_level": None,
+        "major_level_price": None,
+        "major_level_type": None,
+        "major_level_distance_pct": None,
 
         "confirmation_15m": False,
         "confirmation_15m_time": None,
@@ -2209,6 +2302,28 @@ def _analyze_scenario(
         "fvg_entry": False,
     }
 
+
+# ============================================================
+# SINGLE SCENARIO
+# ============================================================
+
+def _analyze_scenario(
+    candles_1h,
+    candles_15m,
+    candles_5m,
+    current_price,
+    major_levels,
+    direction,
+    context_direction,
+    d1_context=None,
+    fvgs=None,
+):
+    result = _empty_scenario(
+        direction,
+        major_levels,
+        "",
+    )
+
     price = _f(current_price)
 
     if (
@@ -2224,15 +2339,13 @@ def _analyze_scenario(
         return result
 
     # ========================================================
-    # 1H direction gate
+    # 1H DIRECTION GATE
     # ========================================================
 
     if (
         context_direction == "NEUTRAL"
         or direction != context_direction
     ):
-        result["score"] = 0
-
         result["reason"] = (
             "1H направление не разрешает этот сценарий."
         )
@@ -2240,7 +2353,7 @@ def _analyze_scenario(
         return result
 
     # ========================================================
-    # Trend activity
+    # TREND ACTIVITY
     # ========================================================
 
     trend_activity = measure_trend_activity(
@@ -2254,7 +2367,7 @@ def _analyze_scenario(
     )
 
     # ========================================================
-    # Major Liquidity
+    # MAJOR LIQUIDITY
     # ========================================================
 
     levels = _levels_for_direction(
@@ -2262,19 +2375,67 @@ def _analyze_scenario(
         direction,
     )
 
+    # ========================================================
+    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ:
+    # ЯВНО СОХРАНЯЕМ MAJOR LEVEL.
+    # ========================================================
+
+    major_level = get_major_level(
+        major_levels,
+        direction,
+        current_price=price,
+    )
+
+    if major_level is not None:
+
+        major_price = _level_price(
+            major_level
+        )
+
+        result["major_level"] = (
+            major_level
+        )
+
+        result["major_level_price"] = (
+            major_price
+        )
+
+        result["major_level_type"] = (
+            _normalized_liquidity_type(
+                major_level
+            )
+        )
+
+        if major_price is not None:
+            result[
+                "major_level_distance_pct"
+            ] = round(
+                _distance_pct(
+                    price,
+                    major_price,
+                ),
+                3,
+            )
+
     if not levels:
+
+        expected_text = (
+            "SSL"
+            if direction == "LONG"
+            else "BSL"
+        )
 
         result["score"] = 20
 
         result["reason"] = (
-            "Нет актуальной Major "
-            f"{'SSL' if direction == 'LONG' else 'BSL'} 1H."
+            "Нет Major "
+            f"{expected_text} 1H."
         )
 
         return result
 
     # ========================================================
-    # Sweep
+    # SWEEP
     # ========================================================
 
     sweep = find_sweep(
@@ -2289,10 +2450,39 @@ def _analyze_scenario(
 
         result["score"] = 25
 
-        result["reason"] = (
-            "Ждём "
-            f"{'SSL sweep' if direction == 'LONG' else 'BSL sweep'}."
-        )
+        if major_level is not None:
+
+            major_price = _level_price(
+                major_level
+            )
+
+            distance = _distance_pct(
+                price,
+                major_price,
+            )
+
+            if direction == "LONG":
+
+                result["reason"] = (
+                    f"Ждём SSL sweep. "
+                    f"Major SSL ${major_price:.4f}, "
+                    f"расстояние {distance:.2f}%."
+                )
+
+            else:
+
+                result["reason"] = (
+                    f"Ждём BSL sweep. "
+                    f"Major BSL ${major_price:.4f}, "
+                    f"расстояние {distance:.2f}%."
+                )
+
+        else:
+
+            result["reason"] = (
+                "Major Liquidity найдена, "
+                "но рабочий уровень не определён."
+            )
 
         return result
 
@@ -2303,7 +2493,7 @@ def _analyze_scenario(
     )
 
     # ========================================================
-    # 15M confirmation
+    # 15M CONFIRMATION
     # ========================================================
 
     (
@@ -2333,7 +2523,8 @@ def _analyze_scenario(
         result["score"] = 50
 
         result["reason"] = (
-            "Sweep есть. Ждём 15M confirmation."
+            "Sweep есть. "
+            "Ждём 15M confirmation."
         )
 
         return result
@@ -2367,7 +2558,7 @@ def _analyze_scenario(
         return result
 
     # ========================================================
-    # Entry
+    # ENTRY
     # ========================================================
 
     entry = calculate_entry(
@@ -2386,7 +2577,7 @@ def _analyze_scenario(
         return result
 
     # ========================================================
-    # SL extreme
+    # SL
     # ========================================================
 
     ilm_extreme = _f(
@@ -2465,7 +2656,7 @@ def _analyze_scenario(
         return result
 
     # ========================================================
-    # TP — ONLY MAJOR
+    # TP — ONLY MAJOR 1H
     # ========================================================
 
     tp, tp_source, tp_reason = resolve_target(
@@ -2484,13 +2675,12 @@ def _analyze_scenario(
     if tp is None:
 
         result["score"] = 70
-
         result["reason"] = tp_reason
 
         return result
 
     # ========================================================
-    # TP direction
+    # TP DIRECTION
     # ========================================================
 
     if not validate_target(
@@ -2508,7 +2698,7 @@ def _analyze_scenario(
         return result
 
     # ========================================================
-    # Geometry
+    # GEOMETRY
     # ========================================================
 
     if not validate_trade_geometry(
@@ -2566,7 +2756,7 @@ def _analyze_scenario(
     })
 
     # ========================================================
-    # Major strength
+    # MAJOR STRENGTH
     # ========================================================
 
     try:
@@ -2580,6 +2770,7 @@ def _analyze_scenario(
         )
 
     except Exception:
+
         major_strength = 0
 
     # ========================================================
@@ -2610,7 +2801,7 @@ def _analyze_scenario(
     )
 
     # ========================================================
-    # RR < 1:2 → NO ENTRY
+    # RR < 1:2
     # ========================================================
 
     if rr_value < MIN_RR:
@@ -2638,14 +2829,14 @@ def _analyze_scenario(
 
         result["reason"] = (
             f"RR 1:{rr_value:.2f} < 1:2. "
-            "Вход запрещён. "
-            "Ближайшая Major Liquidity слишком близко."
+            "Вход запрещён: "
+            "ближайшая Major Liquidity слишком близко."
         )
 
         return result
 
     # ========================================================
-    # Score
+    # SCORE
     # ========================================================
 
     score = _score(
@@ -2663,7 +2854,7 @@ def _analyze_scenario(
     result["score"] = score
 
     # ========================================================
-    # READY conditions
+    # READY CONDITIONS
     # ========================================================
 
     trend_ok = (
@@ -2694,6 +2885,7 @@ def _analyze_scenario(
         and ilm_ok
         and tp_source == "major"
         and result["geometry_valid"]
+        and major_level is not None
     )
 
     ready_ok = (
@@ -2738,7 +2930,8 @@ def _analyze_scenario(
             f"Trend {trend_activity:.2f}, "
             f"Recovery {recovery:.2f}, "
             f"RR 1:{rr_value:.2f}. "
-            f"TP = Major 1H.{fvg_tag}"
+            "TP = Major 1H."
+            f"{fvg_tag}"
         )
 
         return result
@@ -2811,28 +3004,6 @@ def analyze(
     d1_context=None,
     fvgs=None,
 ):
-    """
-    Главная функция стратегии.
-
-    D1/W1 полностью исключены из торгового решения.
-
-    Всегда:
-
-        1H
-         ↓
-        Major 1H
-         ↓
-        Sweep
-         ↓
-        15M
-         ↓
-        5M ILM
-         ↓
-        Entry
-         ↓
-        Major TP
-    """
-
     price = _f(
         current_price
     )
@@ -2852,8 +3023,7 @@ def analyze(
             context_direction
         ),
 
-        # Compatibility fields.
-        # D1 не участвует.
+        # Compatibility.
         "d1_trend": "NEUTRAL",
         "d1_point_a": None,
         "d1_point_b": None,
@@ -2869,9 +3039,19 @@ def analyze(
         "rr": None,
 
         "sweep": None,
+
         "major_levels": (
             major_levels or []
         ),
+
+        # ====================================================
+        # НОВЫЕ ЯВНЫЕ ПОЛЯ ДЛЯ DASHBOARD
+        # ====================================================
+
+        "major_level": None,
+        "major_level_price": None,
+        "major_level_type": None,
+        "major_level_distance_pct": None,
 
         "confirmation_15m": False,
         "confirmation_15m_time": None,
@@ -2912,7 +3092,7 @@ def analyze(
         return base
 
     # ========================================================
-    # NEUTRAL 1H
+    # NEUTRAL
     # ========================================================
 
     if context_direction == "NEUTRAL":
@@ -2925,9 +3105,6 @@ def analyze(
             "1H NEUTRAL. "
             "Направление сделки не разрешено."
         )
-
-        # Для dashboard всё равно оставляем
-        # сценарии LONG/SHORT для диагностики.
 
         long_result = _analyze_scenario(
             candles_1h,
@@ -2953,18 +3130,13 @@ def analyze(
             fvgs=fvgs,
         )
 
-        base["long"] = (
-            long_result
-        )
-
-        base["short"] = (
-            short_result
-        )
+        base["long"] = long_result
+        base["short"] = short_result
 
         return base
 
     # ========================================================
-    # ONLY ALIGNED DIRECTION
+    # ALIGNED DIRECTION ONLY
     # ========================================================
 
     if context_direction == "LONG":
@@ -2981,36 +3153,11 @@ def analyze(
             fvgs=fvgs,
         )
 
-        # SHORT полностью запрещён.
-        short_result = {
-            "stage": "WAIT",
-            "direction": "SHORT",
-            "score": 0,
-            "reason": (
-                "SHORT запрещён: "
-                "1H направление LONG."
-            ),
-            "entry": None,
-            "sl": None,
-            "tp": None,
-            "tp_source": None,
-            "rr": None,
-            "sweep": None,
-            "major_levels": (
-                major_levels or []
-            ),
-            "confirmation_15m": False,
-            "confirmation_15m_time": None,
-            "confirmation": None,
-            "ilm": None,
-            "sweep_extreme": None,
-            "tp_reason": None,
-            "geometry_valid": False,
-            "trend_activity": 0.0,
-            "fvg_bonus": 0,
-            "fvg_sweep": False,
-            "fvg_entry": False,
-        }
+        short_result = _empty_scenario(
+            "SHORT",
+            major_levels,
+            "SHORT запрещён: 1H направление LONG.",
+        )
 
         chosen = long_result
 
@@ -3028,36 +3175,11 @@ def analyze(
             fvgs=fvgs,
         )
 
-        # LONG полностью запрещён.
-        long_result = {
-            "stage": "WAIT",
-            "direction": "LONG",
-            "score": 0,
-            "reason": (
-                "LONG запрещён: "
-                "1H направление SHORT."
-            ),
-            "entry": None,
-            "sl": None,
-            "tp": None,
-            "tp_source": None,
-            "rr": None,
-            "sweep": None,
-            "major_levels": (
-                major_levels or []
-            ),
-            "confirmation_15m": False,
-            "confirmation_15m_time": None,
-            "confirmation": None,
-            "ilm": None,
-            "sweep_extreme": None,
-            "tp_reason": None,
-            "geometry_valid": False,
-            "trend_activity": 0.0,
-            "fvg_bonus": 0,
-            "fvg_sweep": False,
-            "fvg_entry": False,
-        }
+        long_result = _empty_scenario(
+            "LONG",
+            major_levels,
+            "LONG запрещён: 1H направление SHORT.",
+        )
 
         chosen = short_result
 
@@ -3065,16 +3187,11 @@ def analyze(
     # SAVE BOTH
     # ========================================================
 
-    base["long"] = (
-        long_result
-    )
-
-    base["short"] = (
-        short_result
-    )
+    base["long"] = long_result
+    base["short"] = short_result
 
     # ========================================================
-    # COPY CHOSEN RESULT
+    # COPY CHOSEN
     # ========================================================
 
     base.update({
@@ -3120,6 +3237,22 @@ def analyze(
 
         "sweep": chosen.get(
             "sweep"
+        ),
+
+        "major_level": chosen.get(
+            "major_level"
+        ),
+
+        "major_level_price": chosen.get(
+            "major_level_price"
+        ),
+
+        "major_level_type": chosen.get(
+            "major_level_type"
+        ),
+
+        "major_level_distance_pct": chosen.get(
+            "major_level_distance_pct"
         ),
 
         "confirmation_15m": chosen.get(
@@ -3173,12 +3306,10 @@ def analyze(
         ),
     })
 
-    # Compatibility.
     base["context_direction"] = (
         context_direction
     )
 
-    # D1 explicitly neutral.
     base["d1_trend"] = "NEUTRAL"
     base["d1_point_a"] = None
     base["d1_point_b"] = None
@@ -3223,6 +3354,8 @@ __all__ = [
     "get_higher_timeframe_direction",
 
     "measure_trend_activity",
+
+    "get_major_level",
 
     "is_inside_fvg",
     "compute_fvg_bonus",
