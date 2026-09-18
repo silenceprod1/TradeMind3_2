@@ -1,6 +1,6 @@
 """
-Диагностический бэктест v4.
-Исправлен классификатор: ILM проверяется раньше 15M.
+Диагностический бэктест v5.
+Добавлен multi-режим: прогон 10 монет и сводка.
 """
 
 import argparse
@@ -72,7 +72,6 @@ def classify_reason(result, market_info):
             return "no_levels_ssl"
         return "no_levels_matching"
 
-    # ILM проверяем РАНЬШЕ 15M — его reason содержит "15m"
     if "ilm" in reason or "5m ilm" in reason:
         return "no_5m_ilm"
 
@@ -309,7 +308,7 @@ def print_report(symbol, trades, diag):
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v4 — {symbol}")
+    print(f"ОТЧЁТ БЭКТЕСТА v5 — {symbol}")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -418,14 +417,103 @@ def print_report(symbol, trades, diag):
     print(f"Max DD:    -{max_dd:.2f}%")
 
 
+def run_multi_backtest():
+    """
+    Прогон стратегии по списку монет + сводка.
+    """
+    symbols = [
+        "BTCUSDT", "ETHUSDT", "SOLUSDT",
+        "BNBUSDT", "XRPUSDT", "DOGEUSDT",
+        "ADAUSDT", "AVAXUSDT", "LINKUSDT",
+        "ARBUSDT",
+    ]
+
+    all_summary = []
+
+    for sym in symbols:
+        try:
+            trades, diag = run_backtest(sym, DEFAULT_MAX_HOURS)
+            print_report(sym, trades, diag)
+
+            if trades:
+                tp = sum(1 for t in trades if t["result"] == "TP")
+                sl = sum(1 for t in trades if t["result"] == "SL")
+                timeout = sum(1 for t in trades if t["result"] == "TIMEOUT")
+                resolved = tp + sl
+                wr = tp / resolved * 100 if resolved else 0
+                pnl = sum(t["pnl"] for t in trades)
+                all_summary.append((sym, len(trades), tp, sl,
+                                    timeout, wr, pnl))
+            else:
+                all_summary.append((sym, 0, 0, 0, 0, 0, 0.0))
+
+        except Exception as exc:
+            print(f"[BT] {sym} FAILED: {exc}", flush=True)
+            all_summary.append((sym, 0, 0, 0, 0, 0, 0.0))
+
+    # Сводка
+    print()
+    print("=" * 70)
+    print("СВОДКА ПО ВСЕМ МОНЕТАМ")
+    print("=" * 70)
+    print(f"{'Символ':<10}{'Сделок':<8}{'TP':<5}{'SL':<5}"
+          f"{'TO':<5}{'WinRate':<10}{'PnL':<10}")
+    print("-" * 70)
+
+    total_trades = 0
+    total_tp = 0
+    total_sl = 0
+    total_to = 0
+    total_pnl = 0.0
+
+    for sym, cnt, tp, sl, timeout, wr, pnl in all_summary:
+        print(f"{sym:<10}{cnt:<8}{tp:<5}{sl:<5}"
+              f"{timeout:<5}{wr:<10.1f}{pnl:+.2f}%")
+        total_trades += cnt
+        total_tp += tp
+        total_sl += sl
+        total_to += timeout
+        total_pnl += pnl
+
+    print("-" * 70)
+
+    resolved = total_tp + total_sl
+    total_wr = total_tp / resolved * 100 if resolved else 0
+    print(f"{'ИТОГО':<10}{total_trades:<8}{total_tp:<5}{total_sl:<5}"
+          f"{total_to:<5}{total_wr:<10.1f}{total_pnl:+.2f}%")
+
+    print()
+    print(f"Всего сделок: {total_trades}")
+    print(f"  TP: {total_tp}  SL: {total_sl}  Timeout: {total_to}")
+    print(f"Win rate: {total_wr:.1f}% (от {resolved} закрытых)")
+    print(f"Sum PnL: {total_pnl:+.2f}%")
+
+    if total_trades < 20:
+        print()
+        print("Мало данных для статистики. Нужно 30+ сделок.")
+    elif total_trades < 50:
+        print()
+        print("Данных ещё маловато. Идеально 100+ сделок.")
+    else:
+        print()
+        print("Достаточно данных для оценки.")
+
+    print("=" * 70)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="SOLUSDT")
     parser.add_argument("--max-hours", type=int, default=DEFAULT_MAX_HOURS)
+    parser.add_argument("--multi", action="store_true",
+                        help="Прогнать 10 монет и дать сводку")
     args = parser.parse_args()
 
-    trades, diag = run_backtest(args.symbol, args.max_hours)
-    print_report(args.symbol, trades, diag)
+    if args.multi:
+        run_multi_backtest()
+    else:
+        trades, diag = run_backtest(args.symbol, args.max_hours)
+        print_report(args.symbol, trades, diag)
 
 
 if __name__ == "__main__":
