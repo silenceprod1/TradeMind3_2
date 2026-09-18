@@ -50,8 +50,8 @@ MIN_RR = 2.0
 
 SCAN_CACHE_TTL = 5.0
 
-# Флаг: прогнать бэктест при старте бота.
-# Поменяй на False после первого запуска.
+# Бэктест при старте — включён.
+# После анализа результатов поменяй на False.
 RUN_BACKTEST_ON_START = True
 BACKTEST_SYMBOL = "SOLUSDT"
 
@@ -2068,12 +2068,12 @@ async def callbacks(update, context):
 
 
 # ============================================================
-# POST INIT (с бэктестом при старте)
+# POST INIT (с диагностическим бэктестом)
 # ============================================================
 
 async def post_init(application):
-    # ВРЕМЕННЫЙ БЛОК — прогнать бэктест при старте бота.
-    # После анализа результатов поменяй RUN_BACKTEST_ON_START на False.
+    # ВРЕМЕННЫЙ БЛОК — прогнать бэктест при старте.
+    # После анализа поменяй RUN_BACKTEST_ON_START на False.
     if RUN_BACKTEST_ON_START:
         try:
             print("=" * 70, flush=True)
@@ -2082,8 +2082,8 @@ async def post_init(application):
 
             import backtest
 
-            trades = backtest.run_backtest(BACKTEST_SYMBOL, 12)
-            backtest.print_report(BACKTEST_SYMBOL, trades)
+            trades, diag = backtest.run_backtest(BACKTEST_SYMBOL, 12)
+            backtest.print_report(BACKTEST_SYMBOL, trades, diag)
 
             print("=" * 70, flush=True)
             print("BACKTEST: завершён", flush=True)
