@@ -1,14 +1,15 @@
 # ============================================================
-# TradeMind 7.6
+# TradeMind 7.7
 # market.py
 #
-# Изменения vs 7.5:
-# - Новый источник уровней: FRESH (локальные свинги 1/1
-#   за последние 24 свечи 1H, в радиусе 3% от цены).
-# - FRESH имеет приоритет выше 1H при слиянии, потому что
-#   отражает актуальную реакцию цены.
-# - Свежие уровни проходят мягкий фильтр swept (окно 6 свечей,
-#   а не 15), чтобы не выпадать из-за недавнего шума.
+# Изменения vs 7.6:
+# - Увеличены окна загрузки свечей:
+#   LOOKBACK_1H:  180 -> 500  (20 дней вместо 7.5)
+#   LOOKBACK_15M: 200 -> 500  (5 дней вместо 2)
+#   LOOKBACK_5M:  200 -> 500  (41 час вместо 16)
+#   LOOKBACK_1M:  30  -> 200  (3.3 часа вместо 30 мин)
+# - Weight лимит Binance учтён: 101-500 свечей = weight 2,
+#   501-1000 = weight 5. Оставлено 500 как безопасный оптимум.
 # ============================================================
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
-MARKET_VERSION = "7.6"
+MARKET_VERSION = "7.7"
 
 BASE_URL = "https://api.binance.com/api/v3"
 REQUEST_TIMEOUT = 10
@@ -40,11 +41,15 @@ COINS = {
 }
 
 
+# ============================================================
+# LOOKBACK (увеличены)
+# ============================================================
+
 LOOKBACK_D1 = 60
-LOOKBACK_1H = 180
-LOOKBACK_15M = 200
-LOOKBACK_5M = 200
-LOOKBACK_1M = 30
+LOOKBACK_1H = 500    # было 180  → 20 дней
+LOOKBACK_15M = 500   # было 200  → 5 дней
+LOOKBACK_5M = 500    # было 200  → ~41 час
+LOOKBACK_1M = 200    # было 30   → ~3.3 часа
 
 
 KLINES_TTL = {"1d": 300, "1h": 60, "15m": 30, "5m": 15, "1m": 5}
@@ -52,6 +57,10 @@ KLINES_TTL = {"1d": 300, "1h": 60, "15m": 30, "5m": 15, "1m": 5}
 _klines_cache: Dict[Tuple[str, str, int], Tuple[float, List[Dict[str, Any]]]] = {}
 _klines_lock = threading.RLock()
 
+
+# ============================================================
+# SWINGS
+# ============================================================
 
 SWING_LEFT = 2
 SWING_RIGHT = 2
@@ -62,10 +71,13 @@ SWING_RIGHT_15M = 1
 SWING_LEFT_D1 = 3
 SWING_RIGHT_D1 = 3
 
-# FRESH: быстрые локальные свинги
 FRESH_LEFT = 1
 FRESH_RIGHT = 1
 
+
+# ============================================================
+# LIQUIDITY
+# ============================================================
 
 CLUSTER_DISTANCE_PCT = 0.15
 ZONE_WIDTH_PCT = 0.20
@@ -81,11 +93,9 @@ MAX_LEVELS_PER_SIDE = 4
 MAX_TOTAL_LEVELS = 8
 MIN_LEVELS_PER_SIDE_1H = 3
 
-# FRESH
 FRESH_MAX_AGE_1H = 24
 FRESH_MAX_DISTANCE_PCT = 3.0
 FRESH_SWEEP_LOOKBACK = 6
-FRESH_PRIORITY = 0  # 0 — выше всех в merge
 
 ROUND_MAX_COUNT = 5
 ROUND_MAX_DISTANCE_PCT = 20.0
@@ -115,6 +125,10 @@ MIN_SWEEP_DEPTH_PCT = 0.08
 MAX_SWEEP_LOOKBACK_1H = 8
 
 
+# ============================================================
+# HTTP
+# ============================================================
+
 _thread_local = threading.local()
 
 
@@ -123,7 +137,7 @@ def _get_session():
     if session is None:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "TradeMind/7.6",
+            "User-Agent": "TradeMind/7.7",
             "Accept": "application/json",
         })
         adapter = requests.adapters.HTTPAdapter(
@@ -219,6 +233,10 @@ def get_klines(interval, limit, symbol="SOLUSDT"):
     return data
 
 
+# ============================================================
+# CANDLE HELPERS
+# ============================================================
+
 def candle_open(c): return float(c.get("open", 0))
 def candle_high(c): return float(c.get("high", 0))
 def candle_low(c): return float(c.get("low", 0))
@@ -279,8 +297,6 @@ def find_swing_highs_15m(c): return _find_swings(c, SWING_LEFT_15M, SWING_RIGHT_
 def find_swing_lows_15m(c): return _find_swings(c, SWING_LEFT_15M, SWING_RIGHT_15M, "low")
 def find_swing_highs_d1(c): return _find_swings(c, SWING_LEFT_D1, SWING_RIGHT_D1, "high")
 def find_swing_lows_d1(c): return _find_swings(c, SWING_LEFT_D1, SWING_RIGHT_D1, "low")
-
-# FRESH — быстрые свинги 1/1
 def find_fresh_highs(c): return _find_swings(c, FRESH_LEFT, FRESH_RIGHT, "high")
 def find_fresh_lows(c): return _find_swings(c, FRESH_LEFT, FRESH_RIGHT, "low")
 
@@ -691,9 +707,6 @@ def _select_zones(levels, price, candles_ref, candles_15m, level_type,
 
 
 def _select_fresh_zones(candles_1h, price, level_type):
-    """
-    Свежие локальные свинги за последние 24 часа, в радиусе 3% от цены.
-    """
     if not candles_1h:
         return []
 
@@ -732,7 +745,7 @@ def _select_fresh_zones(candles_1h, price, level_type):
         if level_has_been_swept(level_price, level_type, confirmed, FRESH_SWEEP_LOOKBACK):
             continue
 
-        strength = calculate_strength(level, confirmed, candles_15m if False else [], FRESH_MAX_AGE_1H)
+        strength = calculate_strength(level, confirmed, [], FRESH_MAX_AGE_1H)
         if strength < MIN_FRESH_STRENGTH:
             continue
 
@@ -811,10 +824,6 @@ def find_round_number_levels(price, side, max_count=ROUND_MAX_COUNT,
 
 
 def _merge_sources(sources, limit):
-    """
-    sources — список списков. Первый источник имеет приоритет.
-    FRESH передаётся первым.
-    """
     merged = []
     seen = []
     for source in sources:
@@ -841,11 +850,11 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
     if len(confirmed_1h) < 10:
         return {"BSL": [], "SSL": []}
 
-    # FR_ESHLOOK — приоритет выше
-    bBACKsl_fresh = _select_fresh__zones(candles_1h, price15, "BSL")
-    sMsl_fresh = _select_fresh_zones(candles_1h, price, "SSL")
+    # FRESH — приоритет
+    bsl_fresh = _select_fresh_zones(candles_1h, price, "BSL")
+    ssl_fresh = _select_fresh_zones(candles_1h, price, "SSL")
 
-    # 1H свинги
+    # 1H
     bsl_1h = _select_zones(cluster_levels(find_swing_highs(confirmed_1h)),
                            price, confirmed_1h, candles_15m,
                            "BSL", MIN_MAJOR_STRENGTH, MAX_LEVEL_AGE_1H,
@@ -872,7 +881,7 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
                 ssl_15m = _select_zones(cluster_levels(find_swing_lows_15m(confirmed_15m)),
                                         price, confirmed_15m, candles_15m,
                                         "SSL", MIN_MINOR_STRENGTH, MAX_LEVEL_AGE_15M,
-                                        SWEEP_RECENT, "15M")
+                                        SWEEP_RECENT_LOOKBACK_15M, "15M")
 
     # ATH/ATL
     bsl_ath = []
@@ -888,7 +897,6 @@ def _build_major_liquidity(candles_1h, candles_15m, price):
     bsl_round = find_round_number_levels(price, "BSL") if len(bsl_1h) + len(bsl_15m) + len(bsl_ath) + len(bsl_fresh) < MIN_LEVELS_PER_SIDE_1H else []
     ssl_round = find_round_number_levels(price, "SSL") if len(ssl_1h) + len(ssl_15m) + len(ssl_atl) + len(ssl_fresh) < MIN_LEVELS_PER_SIDE_1H else []
 
-    # Merge: FRESH первый
     bsl = _merge_sources([bsl_fresh, bsl_1h, bsl_15m, bsl_ath, bsl_round], MAX_LEVELS_PER_SIDE)
     ssl = _merge_sources([ssl_fresh, ssl_1h, ssl_15m, ssl_atl, ssl_round], MAX_LEVELS_PER_SIDE)
 
@@ -1133,6 +1141,7 @@ def debug_symbol(symbol):
     print("=" * 60)
     print(f"TradeMind Market {MARKET_VERSION}")
     print(f"Symbol: {symbol}")
+    print(f"LOOKBACK: 1h={LOOKBACK_1H} 15m={LOOKBACK_15M} 5m={LOOKBACK_5M} 1m={LOOKBACK_1M}")
     print("=" * 60)
     try:
         data = get_market_data(symbol)
