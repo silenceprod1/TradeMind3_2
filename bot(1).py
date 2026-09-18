@@ -324,6 +324,15 @@ def tp_source_label(source):
     }.get(source, "")
 
 
+def _scenario_rank(stage):
+    return {
+        "READY": 4,
+        "15M_CONFIRMED": 3,
+        "SWEPT": 2,
+        "WAIT": 1,
+    }.get(stage, 0)
+
+
 # ============================================================
 # LIQUIDITY TEXT
 # ============================================================
@@ -718,6 +727,7 @@ def checklist_text(result):
     """
     direction = result.get("direction", "NEUTRAL")
     stage = result.get("stage", "WAIT")
+    price = result.get("price")
 
     # Шаг 1: 1H direction
     if direction in ("LONG", "SHORT"):
@@ -787,7 +797,9 @@ def checklist_text(result):
     if stage == "WAIT":
         if target_level is not None:
             try:
-                dist = float(target_level.get("distance_pct", 0))
+                level_price = float(target_level.get("price"))
+                current_price = float(price)
+                dist = abs(level_price - current_price) / current_price * 100
             except Exception:
                 dist = 0.0
 
@@ -830,11 +842,35 @@ def checklist_text(result):
     return "\n".join(lines)
 
 
+def _scenario_mini_checklist(other_dir, other):
+    """
+    Компактный чек-лист для второго сценария.
+    """
+    stage = other.get("stage", "WAIT")
+    sweep = other.get("sweep")
+    ilm = other.get("ilm")
+    entry = other.get("entry")
+    rr = other.get("rr")
+
+    stage_rank = {
+        "WAIT": 0, "SWEPT": 1, "15M_CONFIRMED": 2, "READY": 3,
+    }.get(stage, 0)
+
+    marks = []
+    marks.append("✅ 1H" if other_dir in ("LONG", "SHORT") else "⬜ 1H")
+    marks.append("✅ Major" if other.get("major_levels") else "⬜ Major")
+    marks.append("✅ Sweep" if sweep else "⬜ Sweep")
+    marks.append("✅ 15M" if stage_rank >= 2 else "⬜ 15M")
+    marks.append("✅ ILM" if ilm else "⬜ ILM")
+    marks.append("✅ Entry" if (entry is not None and rr is not None) else "⬜ Entry")
+
+    return " · ".join(marks)
+
+
 def secondary_scenario_text(result):
     """
     Сводка по второму (противоположному) сценарию.
     """
-    stage = result.get("stage", "WAIT")
     direction = result.get("direction", "NEUTRAL")
 
     long_r = result.get("long") or {}
@@ -864,6 +900,7 @@ def secondary_scenario_text(result):
         f"🔄 <b>ВТОРОЙ СЦЕНАРИЙ ({other_dir})</b>",
         "",
         f"Score: <b>{other_score}/100</b>",
+        _scenario_mini_checklist(other_dir, other),
     ]
 
     levels = result.get("major_levels") or []
@@ -877,22 +914,24 @@ def secondary_scenario_text(result):
 
     if other_stage == "WAIT" and target is not None:
         try:
-            dist = float(target.get("distance_pct", 0))
+            level_price = float(target.get("price"))
+            current_price = float(result.get("price", level_price))
+            dist = abs(level_price - current_price) / current_price * 100
         except Exception:
             dist = 0.0
 
         lines.append(
-            f"Ждём {expected_type} sweep "
+            f"🎯 Ждём {expected_type} sweep "
             f"@ {format_price(target.get('price'))} ({dist:.2f}%)"
         )
     elif other_stage == "SWEPT":
-        lines.append("Sweep есть. Ждём 15M confirmation.")
+        lines.append("🎯 Sweep есть. Ждём 15M confirmation.")
     elif other_stage == "15M_CONFIRMED":
-        lines.append("15M есть. Ждём 5M ILM.")
+        lines.append("🎯 15M есть. Ждём 5M ILM.")
     elif other_stage == "READY":
-        lines.append("READY.")
+        lines.append("🎯 READY.")
     else:
-        lines.append("Ожидание.")
+        lines.append("🎯 Ожидание.")
 
     return "\n".join(lines)
 
@@ -915,9 +954,38 @@ def coin_message(coin, result):
     fvg_bonus = result.get("fvg_bonus", 0)
     score = result.get("score", 0)
 
+    # Проверка: активнее ли второй сценарий
+    long_r = result.get("long") or {}
+    short_r = result.get("short") or {}
+
+    if direction == "LONG":
+        other = short_r
+        other_dir = "SHORT"
+    elif direction == "SHORT":
+        other = long_r
+        other_dir = "LONG"
+    else:
+        other = None
+        other_dir = None
+
+    warning_line = None
+    if other is not None:
+        other_stage = other.get("stage", "WAIT")
+        if _scenario_rank(other_stage) > _scenario_rank(stage):
+            warning_line = (
+                f"⚠️ <b>{other_dir}-сценарий активнее: "
+                f"{other_stage}</b>"
+            )
+
     lines = [
         f"💠 <b>{escape(coin)}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    if warning_line:
+        lines.extend(["", warning_line])
+
+    lines.extend([
         "",
         f"💰 Цена: <b>{format_price(result.get('price'))}</b>",
         f"📐 1H: <b>{direction_icon(direction)} {direction}</b>",
@@ -935,7 +1003,7 @@ def coin_message(coin, result):
         "💧 <b>MAJOR LIQUIDITY</b>",
         "",
         levels_text(result.get("major_levels"), result.get("price")),
-    ]
+    ])
 
     d1_a = result.get("d1_point_a")
     d1_b = result.get("d1_point_b")
@@ -988,7 +1056,17 @@ def coin_message(coin, result):
 
     reason = result.get("reason")
     if reason:
-        lines.extend(["", f"ℹ️ {escape(str(reason))}"])
+        reason_str = str(reason)
+        is_dup = False
+        if stage == "WAIT" and "Ждём" in reason_str:
+            is_dup = True
+        elif stage == "SWEPT" and "15M" in reason_str and "Ждём" in reason_str:
+            is_dup = True
+        elif stage == "15M_CONFIRMED" and "Ждём 5M ILM" in reason_str:
+            is_dup = True
+
+        if not is_dup:
+            lines.extend(["", f"ℹ️ {escape(reason_str)}"])
 
     return "\n".join(lines)
 
@@ -2100,7 +2178,6 @@ def chart_png(result, trade=None):
         yy = top + chart_height * i // 9
         draw_line(pixels, left, yy, width - right, yy, grid_color, 1)
 
-    # FVG зоны — под свечами
     for fvg in fvgs:
         try:
             t = float(fvg["top"])
@@ -2113,7 +2190,6 @@ def chart_png(result, trade=None):
             zone_color = (45, 22, 28)
         fill_rect(pixels, left, y(t), width - right, y(b), zone_color)
 
-    # Major liquidity
     for level in levels:
         try:
             lp = float(level["price"])
@@ -2132,7 +2208,6 @@ def chart_png(result, trade=None):
         fill_rect(pixels, left, y(zh), width - right, y(zl), zone_color)
         draw_line(pixels, left, y(lp), width - right, y(lp), line_color, 2)
 
-    # Candles
     if candles:
         spacing = chart_width / max(len(candles), 1)
         candle_width = max(3, int(spacing * 0.58))
