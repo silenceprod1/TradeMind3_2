@@ -1,43 +1,63 @@
 """
-TradeMind 6.13
+TradeMind 7.0
+Модель входа полностью переделана.
 
-Изменения vs 6.12:
-- D1 gate: если D1 trend NEUTRAL — READY не даётся.
-  Это отсекает слабые сигналы (по бэктесту на 40 днях).
+Ключевые изменения vs 6.x:
+- Entry = ILM trigger_price (не текущая цена). Вход на ретесте.
+- SL = структурный swing 15M (не ILM extreme). Защита от шума.
+- TP = entry ± 2×risk (жёстко). Без поиска major liquidity.
+- RR всегда = 2.0 по построению.
+- Confirmation 15M усилена: BOS (break of structure).
+- READY даётся только если текущая цена близко к entry (0.5%).
+- Тайминги НЕ используются — бот работает 24/7.
+
+Логика:
+1. 1H sweep → контекст
+2. 15M BOS → подтверждение направления
+3. 5M ILM → точка входа (trigger_price)
+4. Entry = ILM trigger (лимитный ордер)
+5. SL = последний swing 15M + буфер 0.15%
+6. TP = entry + 2 × (entry - SL) для LONG
 """
 
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "6.13"
+STRATEGY_VERSION = "7.0"
 
+
+# ============================================================
+# SETTINGS
+# ============================================================
 
 MIN_SCORE_READY = 80
-MIN_RR = 2.0
-SL_BUFFER_PCT = 0.20
+SL_BUFFER_PCT = 0.15
+STRUCTURAL_SL_LOOKBACK_15M = 30
+ENTRY_TOLERANCE_PCT = 0.5
+FIXED_RR = 2.0
+
 MIN_SWEEP_DEPTH_PCT = 0.15
-MIN_5M_RECOVERY_RATIO = 0.20
-MIN_V_RECOVERY_FOR_READY = 0.40
-MIN_BODY_RATIO = 0.35
 MAX_SWEEP_AGE_1H = 24
+MIN_BODY_RATIO = 0.35
 MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
+MAX_ILM_AGE_CANDLES_5M = 36
+
+MIN_5M_RECOVERY_RATIO = 0.20
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 3.0
-MIN_TARGET_DISTANCE_PCT = 0.30
-COUNTER_TREND_MIN_SCORE = 90
 
 MIN_TREND_ACTIVITY_READY = 0.45
-
-FALLBACK_5M_LOOKBACK = 60
-FALLBACK_15M_LOOKBACK = 60
-MIN_FALLBACK_DISTANCE_PCT = 0.30
+COUNTER_TREND_MIN_SCORE = 90
 
 FVG_TOLERANCE_PCT = 0.10
 FVG_SWEEP_BONUS = 10
 FVG_ENTRY_BONUS = 5
 FVG_MAX_BONUS = 15
 
+
+# ============================================================
+# HELPERS
+# ============================================================
 
 def _f(x):
     try:
@@ -260,7 +280,7 @@ def _levels_for_direction(major_levels, direction):
 
 
 # ============================================================
-# FVG HELPERS
+# FVG
 # ============================================================
 
 def is_inside_fvg(price, fvgs, direction, tolerance_pct=FVG_TOLERANCE_PCT):
@@ -374,12 +394,39 @@ def find_sweep(candles_1h, major_levels, direction):
 
 
 # ============================================================
-# 15M CONFIRMATION
+# 15M BOS CONFIRMATION
 # ============================================================
 
+def _is_local_high_15m(c, i):
+    if i < 1 or i >= len(c) - 1:
+        return False
+    cur = _h(c[i])
+    l = _h(c[i - 1])
+    r = _h(c[i + 1])
+    if cur is None or l is None or r is None:
+        return False
+    return cur >= l and cur > r
+
+
+def _is_local_low_15m(c, i):
+    if i < 1 or i >= len(c) - 1:
+        return False
+    cur = _l(c[i])
+    l = _l(c[i - 1])
+    r = _l(c[i + 1])
+    if cur is None or l is None or r is None:
+        return False
+    return cur <= l and cur < r
+
+
 def confirmation_15m(candles_15m, sweep, direction):
+    """
+    Усиленная проверка 15M:
+    1. Бычья/медвежья свеча с телом >= MIN_BODY_RATIO
+    2. BOS — пробой локального экстремума
+    """
     if not sweep or direction not in {"LONG", "SHORT"} or not candles_15m:
-        return False, None, None
+        return False, None, None, False
 
     sweep_time = _f(sweep.get("open_time"))
 
@@ -390,21 +437,68 @@ def confirmation_15m(candles_15m, sweep, direction):
             candidates.append(candle)
 
     candidates = candidates[-MAX_15M_CONFIRM_CANDLES:]
-    if len(candidates) < 2:
-        return False, None, None
+    if len(candidates) < 3:
+        return False, None, None, False
 
-    for candle in candidates:
+    for i in range(1, len(candidates)):
+        candle = candidates[i]
+
         if _body_ratio(candle) < MIN_BODY_RATIO:
             continue
 
-        if direction == "LONG":
-            if _bull(candle):
-                return True, "15M bullish engulfing", _t(candle)
-        else:
-            if _bear(candle):
-                return True, "15M bearish engulfing", _t(candle)
+        close = _c(candle)
+        if close is None:
+            continue
 
-    return False, None, None
+        if direction == "LONG":
+            if not _bull(candle):
+                continue
+
+            local_highs = []
+            for j in range(i - 1):
+                if _is_local_high_15m(candidates, j):
+                    h = _h(candidates[j])
+                    if h is not None:
+                        local_highs.append(h)
+
+            if not local_highs:
+                continue
+
+            reference = max(local_highs[-3:])
+
+            bos = close > reference
+            return (
+                True,
+                "15M bullish engulfing",
+                _t(candle),
+                bos,
+            )
+
+        else:
+            if not _bear(candle):
+                continue
+
+            local_lows = []
+            for j in range(i - 1):
+                if _is_local_low_15m(candidates, j):
+                    lo = _l(candidates[j])
+                    if lo is not None:
+                        local_lows.append(lo)
+
+            if not local_lows:
+                continue
+
+            reference = min(local_lows[-3:])
+
+            bos = close < reference
+            return (
+                True,
+                "15M bearish engulfing",
+                _t(candle),
+                bos,
+            )
+
+    return False, None, None, False
 
 
 # ============================================================
@@ -494,10 +588,14 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
         return None
 
     return {
-        "direction": "LONG", "extreme": ml,
-        "trigger_time": _t(trig), "trigger_price": tc,
-        "reason": "5M V-ILM: downside manipulation + recovery + bullish displacement",
-        "recovery_ratio": recovery, "manipulation_pct": m_pct,
+        "direction": "LONG",
+        "extreme": ml,
+        "trigger_time": _t(trig),
+        "trigger_price": tc,
+        "reason": "5M V-ILM",
+        "recovery_ratio": recovery,
+        "manipulation_pct": m_pct,
+        "age_candles": len(candles) - 1 - trigger_idx,
         "_score": recovery * 30 + _body_ratio(trig) * 20 + m_pct * 5,
     }
 
@@ -563,10 +661,14 @@ def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
         return None
 
     return {
-        "direction": "SHORT", "extreme": mh,
-        "trigger_time": _t(trig), "trigger_price": tc,
-        "reason": "5M L-ILM: upside manipulation + recovery + bearish displacement",
-        "recovery_ratio": recovery, "manipulation_pct": m_pct,
+        "direction": "SHORT",
+        "extreme": mh,
+        "trigger_time": _t(trig),
+        "trigger_price": tc,
+        "reason": "5M L-ILM",
+        "recovery_ratio": recovery,
+        "manipulation_pct": m_pct,
+        "age_candles": len(candles) - 1 - trigger_idx,
         "_score": recovery * 30 + _body_ratio(trig) * 20 + m_pct * 5,
     }
 
@@ -606,210 +708,124 @@ def detect_5m_ilm(candles_5m, sweep, direction, confirmation_time=None):
 
 
 # ============================================================
-# TARGETS
+# ENTRY / SL / TP (NEW MODEL)
 # ============================================================
 
-def next_target(major_levels, direction, current_price, exclude_level=None):
-    price = _f(current_price)
-    excluded = _f(exclude_level)
-    if price is None:
+def calculate_entry(ilm, current_price, direction):
+    """
+    Entry = ILM trigger_price.
+    Это цена, к которой цена вернулась после манипуляции.
+    """
+    if not ilm:
         return None
-
-    candidates = []
-    for level in major_levels or []:
-        if _is_swept_level(level):
-            continue
-        lp = _level_price(level)
-        if lp is None:
-            continue
-        if excluded is not None:
-            d = _distance_pct(lp, excluded)
-            if d is not None and d < MIN_TARGET_DISTANCE_PCT:
-                continue
-        if direction == "LONG" and lp > price:
-            candidates.append(lp)
-        elif direction == "SHORT" and lp < price:
-            candidates.append(lp)
-
-    if not candidates:
+    trigger = _f(ilm.get("trigger_price"))
+    if trigger is None or trigger <= 0:
         return None
-    return min(candidates, key=lambda x: abs(x - price))
+    return trigger
 
 
-def _scan_local_targets(candles, direction, entry, lookback, label):
-    results = []
-    if not candles or len(candles) < 5:
-        return results
-    recent = candles[-lookback:]
-    if len(recent) < 5:
-        return results
+def find_structural_stop_level(candles_15m, direction, entry, ilm_extreme):
+    """
+    Ищем структурный SL — последний swing low (для LONG) / swing high (SHORT)
+    на 15M в пределах STRUCTURAL_SL_LOOKBACK_15M свечей.
 
-    for i in range(1, len(recent) - 1):
-        candle = recent[i]
-        if direction == "LONG":
-            if not _is_local_high(recent, i):
-                continue
-            p = _h(candle)
-            if p is None or p <= entry:
-                continue
-            d = (p - entry) / entry * 100
-        else:
-            if not _is_local_low(recent, i):
-                continue
-            p = _l(candle)
-            if p is None or p >= entry:
-                continue
-            d = (entry - p) / entry * 100
-        if d < MIN_FALLBACK_DISTANCE_PCT:
-            continue
-        results.append({"price": p, "distance_pct": d,
-                        "source": label, "time": _t(candle)})
-    return results
+    Если не находим — используем ilm_extreme как fallback.
+    """
+    if not candles_15m or len(candles_15m) < 10:
+        return ilm_extreme
 
+    window = candles_15m[-STRUCTURAL_SL_LOOKBACK_15M:]
 
-def detect_local_swing_target(candles_5m, candles_15m, direction, entry):
-    entry = _f(entry)
-    if entry is None or entry <= 0:
-        return None
-    candidates = []
-    candidates.extend(_scan_local_targets(
-        candles_5m, direction, entry, FALLBACK_5M_LOOKBACK, "5M local swing"))
-    candidates.extend(_scan_local_targets(
-        candles_15m, direction, entry, FALLBACK_15M_LOOKBACK, "15M local swing"))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: x["distance_pct"])
-    return candidates[0]
-
-
-def resolve_target(major_levels, direction, entry, sl, sweep_level,
-                   candles_5m, candles_15m, d1_context=None):
     entry_f = _f(entry)
-    sl_f = _f(sl)
-    if entry_f is None or sl_f is None:
-        return None, None, "Entry/SL некорректны."
+    ilm_ext = _f(ilm_extreme)
 
-    risk = abs(entry_f - sl_f)
-    if risk <= 0:
-        return None, None, "Risk <= 0."
+    if entry_f is None:
+        return ilm_extreme
 
-    min_reward = risk * MIN_RR
-
-    if d1_context:
-        pb = _f(d1_context.get("point_b"))
-        if pb is not None:
-            if direction == "LONG" and pb > entry_f:
-                reward = pb - entry_f
-                if reward >= min_reward:
-                    return pb, "d1", f"TP = D1 Point B ({pb:.4f})."
-            elif direction == "SHORT" and pb < entry_f:
-                reward = entry_f - pb
-                if reward >= min_reward:
-                    return pb, "d1", f"TP = D1 Point B ({pb:.4f})."
-
-    major_candidates = []
-    for level in major_levels or []:
-        if _is_swept_level(level):
-            continue
-        lp = _level_price(level)
-        if lp is None:
-            continue
-        if sweep_level is not None:
-            d_excl = _distance_pct(lp, sweep_level)
-            if d_excl is not None and d_excl < MIN_TARGET_DISTANCE_PCT:
-                continue
-        if direction == "LONG" and lp > entry_f:
-            major_candidates.append(lp)
-        elif direction == "SHORT" and lp < entry_f:
-            major_candidates.append(lp)
-
-    major_candidates.sort(key=lambda x: abs(x - entry_f))
-
-    for candidate in major_candidates:
-        reward = abs(candidate - entry_f)
-        if reward >= min_reward:
-            return (candidate, "major",
-                    "TP = свежая Major Liquidity (RR >= 2).")
-
-    if major_candidates:
-        farthest = major_candidates[-1]
-        return (farthest, "major",
-                "TP = самый дальний Major (RR < 2).")
-
-    fb = detect_local_swing_target(candles_5m, candles_15m, direction, entry_f)
-    if fb is not None:
-        return fb["price"], "local", f"TP = ближайший {fb['source']}."
-
-    return None, None, "Ни major, ни local TP не найдены."
-
-
-# ============================================================
-# ENTRY / STOP / RR / GEOMETRY
-# ============================================================
-
-def calculate_entry(current_price, direction):
-    p = _f(current_price)
-    if p is None or direction not in {"LONG", "SHORT"}:
-        return None
-    return p
-
-
-def calculate_stop(entry, extreme, direction):
-    e, x = _f(entry), _f(extreme)
-    if e is None or x is None:
-        return None
     if direction == "LONG":
-        sl = x * (1 - SL_BUFFER_PCT / 100)
-        return sl if sl < e else None
+        swings = _swing_lows(window)
+        if not swings:
+            return ilm_extreme
+
+        reference = min(entry_f, ilm_ext) if ilm_ext is not None else entry_f
+
+        candidates = [p for i, p in swings if p < reference]
+        if not candidates:
+            return ilm_extreme
+
+        return max(candidates)
+
+    elif direction == "SHORT":
+        swings = _swing_highs(window)
+        if not swings:
+            return ilm_extreme
+
+        reference = max(entry_f, ilm_ext) if ilm_ext is not None else entry_f
+
+        candidates = [p for i, p in swings if p > reference]
+        if not candidates:
+            return ilm_extreme
+
+        return min(candidates)
+
+    return ilm_extreme
+
+
+def calculate_stop(entry, structural_level, direction):
+    entry = _f(entry)
+    level = _f(structural_level)
+    if entry is None or level is None:
+        return None
+
+    if direction == "LONG":
+        sl = level * (1 - SL_BUFFER_PCT / 100)
+        return sl if sl < entry else None
     if direction == "SHORT":
-        sl = x * (1 + SL_BUFFER_PCT / 100)
-        return sl if sl > e else None
+        sl = level * (1 + SL_BUFFER_PCT / 100)
+        return sl if sl > entry else None
     return None
 
 
-def calculate_take_profit(major_levels, direction, entry, sweep_level=None):
-    return next_target(major_levels, direction, entry, sweep_level)
-
-
-def calculate_rr(entry, sl, tp, direction=None):
-    e, s, t = _f(entry), _f(sl), _f(tp)
-    if e is None or s is None or t is None:
+def calculate_tp_by_rr(entry, sl, direction, rr=FIXED_RR):
+    entry = _f(entry)
+    sl = _f(sl)
+    if entry is None or sl is None:
         return None
+
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None
+
     if direction == "LONG":
-        if not (s < e < t):
-            return None
-    elif direction == "SHORT":
-        if not (t < e < s):
-            return None
-    else:
-        if s == e or t == e:
-            return None
-    risk = abs(e - s)
-    reward = abs(t - e)
+        return entry + rr * risk
+    if direction == "SHORT":
+        return entry - rr * risk
+    return None
+
+
+def calculate_rr(entry, sl, tp):
+    entry = _f(entry)
+    sl = _f(sl)
+    tp = _f(tp)
+    if entry is None or sl is None or tp is None:
+        return None
+    risk = abs(entry - sl)
+    reward = abs(tp - entry)
     if risk <= 0:
         return None
     return reward / risk
 
 
-def validate_trade_geometry(entry, sl, tp, direction):
-    e, s, t = _f(entry), _f(sl), _f(tp)
-    if e is None or s is None or t is None:
+def validate_geometry(entry, sl, tp, direction):
+    entry = _f(entry)
+    sl = _f(sl)
+    tp = _f(tp)
+    if entry is None or sl is None or tp is None:
         return False
     if direction == "LONG":
-        return s < e < t
+        return sl < entry < tp
     if direction == "SHORT":
-        return t < e < s
-    return False
-
-
-def validate_target(entry, tp, direction):
-    e, t = _f(entry), _f(tp)
-    if e is None or t is None:
-        return False
-    if direction == "LONG":
-        return t > e
-    if direction == "SHORT":
-        return t < e
+        return tp < entry < sl
     return False
 
 
@@ -817,24 +833,23 @@ def validate_target(entry, tp, direction):
 # SCORE
 # ============================================================
 
-def _score(direction, context_direction, d1_context, sweep,
-           confirmation_strength, ilm, rr, major_strength,
-           tp_source="major", fvg_bonus=0):
+def _score(
+    direction,
+    context_direction,
+    sweep,
+    confirmation_strength,
+    bos,
+    ilm,
+    rr,
+    major_strength,
+    fvg_bonus,
+):
     score = 0
 
     if direction == context_direction:
         score += 15
     elif context_direction == "NEUTRAL":
         score += 5
-
-    if d1_context:
-        d1t = d1_context.get("trend", "NEUTRAL")
-        if d1t == direction:
-            score += 10
-        elif d1t == "NEUTRAL":
-            score += 3
-        else:
-            score -= 10
 
     if sweep:
         depth = sweep.get("depth_pct", 0)
@@ -854,6 +869,9 @@ def _score(direction, context_direction, d1_context, sweep,
     elif confirmation_strength > 0:
         score += 7
 
+    if bos:
+        score += 10
+
     if ilm:
         rec = ilm.get("recovery_ratio", 0)
         if rec >= 0.66:
@@ -863,21 +881,11 @@ def _score(direction, context_direction, d1_context, sweep,
         else:
             score += 7
 
-    if rr is not None:
-        if rr >= 4.0:
-            score += 20
-        elif rr >= 3.0:
-            score += 16
-        elif rr >= 2.5:
-            score += 12
-        elif rr >= 2.0:
-            score += 8
+    if rr is not None and rr >= FIXED_RR:
+        score += 15
 
     score += min(10, major_strength / 10.0)
     score += fvg_bonus
-
-    if tp_source == "local":
-        score = score * 0.9
 
     return int(min(100, max(0, round(score))))
 
@@ -886,18 +894,41 @@ def _score(direction, context_direction, d1_context, sweep,
 # SINGLE SCENARIO
 # ============================================================
 
-def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
-                      major_levels, direction, context_direction,
-                      d1_context=None, fvgs=None):
-
+def _analyze_scenario(
+    candles_1h,
+    candles_15m,
+    candles_5m,
+    current_price,
+    major_levels,
+    direction,
+    context_direction,
+    d1_context=None,
+    fvgs=None,
+):
     result = {
-        "stage": "WAIT", "direction": direction, "score": 0, "reason": "",
-        "entry": None, "sl": None, "tp": None, "tp_source": None, "rr": None,
-        "sweep": None, "major_levels": major_levels or [],
-        "confirmation_15m": False, "confirmation_15m_time": None,
-        "confirmation": None, "ilm": None, "sweep_extreme": None,
-        "tp_reason": None, "geometry_valid": False, "trend_activity": 0.0,
-        "fvg_bonus": 0, "fvg_sweep": False, "fvg_entry": False,
+        "stage": "WAIT",
+        "direction": direction,
+        "score": 0,
+        "reason": "",
+        "entry": None,
+        "sl": None,
+        "tp": None,
+        "tp_source": "fixed_rr",
+        "rr": None,
+        "sweep": None,
+        "major_levels": major_levels or [],
+        "confirmation_15m": False,
+        "confirmation_15m_time": None,
+        "confirmation": None,
+        "bos": False,
+        "ilm": None,
+        "sweep_extreme": None,
+        "tp_reason": None,
+        "geometry_valid": False,
+        "trend_activity": 0.0,
+        "fvg_bonus": 0,
+        "fvg_sweep": False,
+        "fvg_entry": False,
     }
 
     price = _f(current_price)
@@ -930,11 +961,17 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     result["stage"] = "SWEPT"
     result["sweep_extreme"] = sweep.get("extreme")
 
-    conf_ok, conf_text, conf_time = confirmation_15m(
-        candles_15m, sweep, direction)
+    (
+        conf_ok,
+        conf_text,
+        conf_time,
+        bos,
+    ) = confirmation_15m(candles_15m, sweep, direction)
+
     result["confirmation_15m"] = conf_ok
     result["confirmation_15m_time"] = conf_time
     result["confirmation"] = conf_text
+    result["bos"] = bos
 
     if not conf_ok:
         result["score"] = 50
@@ -951,81 +988,68 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
         result["reason"] = "15M подтверждение есть. Ждём 5M ILM."
         return result
 
-    entry = calculate_entry(price, direction)
+    # ---------- Проверка возраста ILM ----------
+    ilm_age = int(ilm.get("age_candles", 0))
+    if ilm_age > MAX_ILM_AGE_CANDLES_5M:
+        result["score"] = 65
+        result["reason"] = f"ILM устарел ({ilm_age} свечей 5M)."
+        return result
+
+    # ---------- Entry = ILM trigger ----------
+    entry = calculate_entry(ilm, price, direction)
     if entry is None:
         result["score"] = 68
-        result["reason"] = "Не удалось определить Entry."
+        result["reason"] = "Не удалось определить Entry (ILM trigger)."
         return result
 
-    ilm_extreme = _f((ilm or {}).get("extreme"))
-    sweep_extreme = _f(sweep.get("extreme"))
-    candidates = [x for x in (ilm_extreme, sweep_extreme) if x is not None]
-
-    if not candidates:
+    # ---------- Проверка: цена близко к entry ----------
+    dist_pct = _distance_pct(price, entry)
+    if dist_pct is None or dist_pct > ENTRY_TOLERANCE_PCT:
         result["score"] = 68
-        result["reason"] = "Не удалось определить экстремум для SL."
+        result["reason"] = (
+            f"Цена ушла от entry на {dist_pct:.2f}% "
+            f"(лимит {ENTRY_TOLERANCE_PCT}%)."
+        )
         return result
 
-    if direction == "LONG":
-        extreme = min(candidates)
-        if extreme >= entry:
-            result["score"] = 68
-            result["reason"] = "LONG invalid: extreme >= Entry."
-            return result
-    else:
-        extreme = max(candidates)
-        if extreme <= entry:
-            result["score"] = 68
-            result["reason"] = "SHORT invalid: extreme <= Entry."
-            return result
+    # ---------- Structural SL ----------
+    ilm_extreme = _f(ilm.get("extreme"))
+    structural_level = find_structural_stop_level(
+        candles_15m, direction, entry, ilm_extreme
+    )
 
-    sl = calculate_stop(entry, extreme, direction)
+    sl = calculate_stop(entry, structural_level, direction)
     if sl is None:
         result["score"] = 68
-        result["reason"] = "Не удалось построить корректный SL."
+        result["reason"] = "Не удалось построить структурный SL."
         return result
 
-    tp, tp_source, tp_reason = resolve_target(
-        major_levels=major_levels,
-        direction=direction,
-        entry=entry,
-        sl=sl,
-        sweep_level=sweep.get("level"),
-        candles_5m=candles_5m,
-        candles_15m=candles_15m,
-        d1_context=d1_context,
-    )
-    result["tp_reason"] = tp_reason
-    result["tp_source"] = tp_source
-
+    # ---------- TP = 2R ----------
+    tp = calculate_tp_by_rr(entry, sl, direction, FIXED_RR)
     if tp is None:
         result["score"] = 70
-        result["reason"] = tp_reason
+        result["reason"] = "Не удалось рассчитать TP."
         return result
 
-    if not validate_target(entry, tp, direction):
-        result["score"] = 70
-        result["reason"] = "TP находится не в направлении сделки."
-        return result
-
-    if not validate_trade_geometry(entry, sl, tp, direction):
+    if not validate_geometry(entry, sl, tp, direction):
         result["score"] = 68
         result["reason"] = "Некорректная геометрия сделки."
         return result
 
     result["geometry_valid"] = True
 
-    rr_value = calculate_rr(entry, sl, tp, direction)
+    rr_value = calculate_rr(entry, sl, tp)
     if rr_value is None:
         result["score"] = 68
         result["reason"] = "Не удалось рассчитать RR."
         return result
 
     result.update({
-        "entry": round(entry, 6),
-        "sl": round(sl, 6),
-        "tp": round(tp, 6),
-        "rr": rr_value,
+        "entry": round(entry, 8),
+        "sl": round(sl, 8),
+        "tp": round(tp, 8),
+        "rr": round(rr_value, 3),
+        "tp_reason": f"Fixed RR 1:{FIXED_RR}",
     })
 
     try:
@@ -1039,58 +1063,30 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     result["fvg_sweep"] = fvg_sweep
     result["fvg_entry"] = fvg_entry
 
-    if rr_value < MIN_RR:
-        result["score"] = min(
-            _score(direction, context_direction, d1_context, sweep,
-                   0.6, ilm, None, major_strength, tp_source, fvg_bonus),
-            79,
-        )
-        result["stage"] = "15M_CONFIRMED"
-        result["reason"] = (
-            f"RR 1:{rr_value:.2f} < 1:2. Вход запрещён. Ждём ретест."
-        )
-        return result
-
     conf_strength = 0.8 if conf_ok else 0.6
 
-    score = _score(direction, context_direction, d1_context, sweep,
-                   conf_strength, ilm, rr_value, major_strength,
-                   tp_source, fvg_bonus)
+    score = _score(
+        direction=direction,
+        context_direction=context_direction,
+        sweep=sweep,
+        confirmation_strength=conf_strength,
+        bos=bos,
+        ilm=ilm,
+        rr=rr_value,
+        major_strength=major_strength,
+        fvg_bonus=fvg_bonus,
+    )
     result["score"] = score
 
     trend_ok = trend_activity >= MIN_TREND_ACTIVITY_READY
-    recovery = (ilm or {}).get("recovery_ratio", 0)
-    v_ok = recovery >= MIN_V_RECOVERY_FOR_READY
-
-    # D1 gate: если D1 NEUTRAL — не даём READY
-    d1_ok = True
-    d1_trend_val = "NEUTRAL"
-    if d1_context:
-        d1_trend_val = d1_context.get("trend", "NEUTRAL")
-        if d1_trend_val == "NEUTRAL":
-            d1_ok = False
-
-    ready_ok = (
-        score >= MIN_SCORE_READY
-        and trend_ok
-        and v_ok
-        and d1_ok
-    )
+    ready_ok = score >= MIN_SCORE_READY and trend_ok
 
     if ready_ok:
         result["stage"] = "READY"
-        fvg_tag = ""
-        if fvg_sweep and fvg_entry:
-            fvg_tag = " FVG sweep+entry."
-        elif fvg_sweep:
-            fvg_tag = " FVG sweep."
-        elif fvg_entry:
-            fvg_tag = " FVG entry."
+        bos_tag = " BOS." if bos else ""
         result["reason"] = (
-            f"Sweep → 15M → 5M ILM. "
-            f"Trend {trend_activity:.2f}, "
-            f"Recovery {recovery:.2f}, "
-            f"TP {tp_source}.{fvg_tag}"
+            f"Sweep → 15M → 5M ILM → Entry=ILM trigger. "
+            f"Trend {trend_activity:.2f}. RR 1:{FIXED_RR}.{bos_tag}"
         )
     else:
         result["stage"] = "15M_CONFIRMED"
@@ -1099,42 +1095,60 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
             blocks.append(f"score {score}")
         if not trend_ok:
             blocks.append(f"trend {trend_activity:.2f}")
-        if not v_ok:
-            blocks.append(f"recovery {recovery:.2f}")
-        if not d1_ok:
-            blocks.append(f"d1_{d1_trend_val.lower()}")
-        result["reason"] = ("Сетап есть, READY заблокирован: "
-                            + ", ".join(blocks))
+        result["reason"] = ("READY заблокирован: " + ", ".join(blocks))
 
     return result
 
 
 # ============================================================
-# MAIN
+# MAIN ANALYZE
 # ============================================================
 
-def analyze(candles_1h, candles_15m, candles_5m, current_price,
-            major_levels=None, sweep=None, order_flow=None,
-            candles_1m=None, d1_context=None, fvgs=None):
-
+def analyze(
+    candles_1h,
+    candles_15m,
+    candles_5m,
+    current_price,
+    major_levels=None,
+    sweep=None,
+    order_flow=None,
+    candles_1m=None,
+    d1_context=None,
+    fvgs=None,
+):
     price = _f(current_price)
     context_direction = get_1h_direction(candles_1h)
 
     base = {
-        "stage": "WAIT", "direction": context_direction,
+        "stage": "WAIT",
+        "direction": context_direction,
         "context_direction": context_direction,
         "d1_trend": (d1_context or {}).get("trend", "NEUTRAL"),
         "d1_point_a": (d1_context or {}).get("point_a"),
         "d1_point_b": (d1_context or {}).get("point_b"),
-        "score": 0, "reason": "",
-        "entry": None, "sl": None, "tp": None,
-        "tp_source": None, "rr": None,
-        "sweep": None, "major_levels": major_levels or [],
-        "confirmation_15m": False, "confirmation_15m_time": None,
-        "confirmation": None, "ilm": None, "sweep_extreme": None,
-        "tp_reason": None, "geometry_valid": False, "trend_activity": 0.0,
-        "fvg_bonus": 0, "fvg_sweep": False, "fvg_entry": False,
-        "long": None, "short": None,
+        "score": 0,
+        "reason": "",
+        "entry": None,
+        "sl": None,
+        "tp": None,
+        "tp_source": "fixed_rr",
+        "rr": None,
+        "sweep": None,
+        "major_levels": major_levels or [],
+        "confirmation_15m": False,
+        "confirmation_15m_time": None,
+        "confirmation": None,
+        "bos": False,
+        "ilm": None,
+        "sweep_extreme": None,
+        "tp_reason": None,
+        "geometry_valid": False,
+        "trend_activity": 0.0,
+        "fvg_bonus": 0,
+        "fvg_sweep": False,
+        "fvg_entry": False,
+        "long": None,
+        "short": None,
     }
 
     if price is None or not candles_1h or not candles_15m or not candles_5m:
@@ -1146,6 +1160,7 @@ def analyze(candles_1h, candles_15m, candles_5m, current_price,
         major_levels, "LONG", context_direction,
         d1_context=d1_context, fvgs=fvgs,
     )
+
     short_result = _analyze_scenario(
         candles_1h, candles_15m, candles_5m, price,
         major_levels, "SHORT", context_direction,
@@ -1164,13 +1179,18 @@ def analyze(candles_1h, candles_15m, candles_5m, current_price,
             "direction": "NEUTRAL",
             "score": best.get("score", 0),
             "reason": "1H NEUTRAL. READY не разрешаем.",
-            "entry": best.get("entry"), "sl": best.get("sl"),
-            "tp": best.get("tp"), "tp_source": best.get("tp_source"),
-            "rr": best.get("rr"), "sweep": best.get("sweep"),
+            "entry": best.get("entry"),
+            "sl": best.get("sl"),
+            "tp": best.get("tp"),
+            "tp_source": best.get("tp_source"),
+            "rr": best.get("rr"),
+            "sweep": best.get("sweep"),
             "confirmation_15m": best.get("confirmation_15m", False),
             "confirmation_15m_time": best.get("confirmation_15m_time"),
             "confirmation": best.get("confirmation"),
-            "ilm": best.get("ilm"), "sweep_extreme": best.get("sweep_extreme"),
+            "bos": best.get("bos", False),
+            "ilm": best.get("ilm"),
+            "sweep_extreme": best.get("sweep_extreme"),
             "tp_reason": best.get("tp_reason"),
             "geometry_valid": best.get("geometry_valid", False),
             "trend_activity": best.get("trend_activity", 0.0),
@@ -1230,13 +1250,18 @@ def analyze(candles_1h, candles_15m, candles_5m, current_price,
         "direction": chosen.get("direction", context_direction),
         "score": chosen.get("score", 0),
         "reason": chosen.get("reason", ""),
-        "entry": chosen.get("entry"), "sl": chosen.get("sl"),
-        "tp": chosen.get("tp"), "tp_source": chosen.get("tp_source"),
-        "rr": chosen.get("rr"), "sweep": chosen.get("sweep"),
+        "entry": chosen.get("entry"),
+        "sl": chosen.get("sl"),
+        "tp": chosen.get("tp"),
+        "tp_source": chosen.get("tp_source"),
+        "rr": chosen.get("rr"),
+        "sweep": chosen.get("sweep"),
         "confirmation_15m": chosen.get("confirmation_15m", False),
         "confirmation_15m_time": chosen.get("confirmation_15m_time"),
         "confirmation": chosen.get("confirmation"),
-        "ilm": chosen.get("ilm"), "sweep_extreme": chosen.get("sweep_extreme"),
+        "bos": chosen.get("bos", False),
+        "ilm": chosen.get("ilm"),
+        "sweep_extreme": chosen.get("sweep_extreme"),
         "tp_reason": chosen.get("tp_reason"),
         "geometry_valid": chosen.get("geometry_valid", False),
         "trend_activity": chosen.get("trend_activity", 0.0),
@@ -1246,15 +1271,6 @@ def analyze(candles_1h, candles_15m, candles_5m, current_price,
     })
     base["context_direction"] = context_direction
 
-    if (context_direction == "LONG"
-            and short_result["stage"] in {"SWEPT", "15M_CONFIRMED", "READY"}):
-        base["reason"] = (f"{base['reason']} "
-                          f"SHORT-сценарий активен: {short_result['stage']}.")
-    elif (context_direction == "SHORT"
-            and long_result["stage"] in {"SWEPT", "15M_CONFIRMED", "READY"}):
-        base["reason"] = (f"{base['reason']} "
-                          f"LONG-сценарий активен: {long_result['stage']}.")
-
     return base
 
 
@@ -1263,15 +1279,22 @@ def analyze_sol(*args, **kwargs):
 
 
 __all__ = [
-    "STRATEGY_VERSION", "MIN_SCORE_READY", "MIN_RR", "SL_BUFFER_PCT",
-    "MIN_TREND_ACTIVITY_READY", "MIN_V_RECOVERY_FOR_READY",
-    "FVG_TOLERANCE_PCT", "FVG_SWEEP_BONUS", "FVG_ENTRY_BONUS",
-    "get_1h_direction", "get_higher_timeframe_direction",
+    "STRATEGY_VERSION",
+    "MIN_SCORE_READY",
+    "FIXED_RR",
+    "SL_BUFFER_PCT",
+    "get_1h_direction",
+    "get_higher_timeframe_direction",
     "measure_trend_activity",
-    "is_inside_fvg", "compute_fvg_bonus",
-    "find_sweep", "confirmation_15m", "detect_5m_ilm",
-    "calculate_entry", "calculate_stop", "calculate_take_profit", "calculate_rr",
-    "validate_trade_geometry", "validate_target",
-    "next_target", "detect_local_swing_target", "resolve_target",
-    "analyze", "analyze_sol",
+    "find_sweep",
+    "confirmation_15m",
+    "detect_5m_ilm",
+    "calculate_entry",
+    "calculate_stop",
+    "calculate_tp_by_rr",
+    "calculate_rr",
+    "find_structural_stop_level",
+    "validate_geometry",
+    "analyze",
+    "analyze_sol",
 ]
