@@ -1,5 +1,10 @@
 """
-Диагностический бэктест v9.1.
+Диагностический бэктест v9.2.
+
+Изменения v9.2 vs v9.1:
+- Поддержка cooldown после SL (CLI флаг --cooldown N)
+- Символ пропускается если был SL в последние N часов
+- Формат вывода сохранён
 """
 
 import argparse
@@ -33,6 +38,8 @@ PARTIAL_TP_TRIGGER_R = 1.0
 PARTIAL_TP_PERCENT = 50
 TRAILING_TRIGGER_R = 1.5
 TRAILING_DISTANCE_R = 1.0
+
+COOLDOWN_AFTER_SL_HOURS = 0
 
 
 def log(msg):
@@ -227,10 +234,12 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours,
 
 def run_backtest(symbol, max_hours,
                  use_breakeven=False, use_partial_tp=False,
-                 use_trailing=False):
+                 use_trailing=False,
+                 cooldown_hours=0):
     symbol = _normalize_symbol(symbol)
     log(f"Символ: {symbol} "
-        f"(BE={use_breakeven} partial={use_partial_tp} trail={use_trailing})")
+        f"(BE={use_breakeven} partial={use_partial_tp} "
+        f"trail={use_trailing} cooldown={cooldown_hours}h)")
 
     candles_d1 = get_klines_history("1d", BT_LOOKBACK_D1, symbol)
     candles_1h = get_klines_history("1h", BT_LOOKBACK_1H, symbol)
@@ -254,6 +263,7 @@ def run_backtest(symbol, max_hours,
     exception_counter = Counter()
     market_stats = Counter()
     near_misses = []
+    cooldown_skips = 0
 
     total = len(candles_1h) - WARMUP_1H
     log(f"Шагов: {total}")
@@ -263,6 +273,19 @@ def run_backtest(symbol, max_hours,
 
         if has_active_position(trades, ts_now):
             continue
+
+        # === v9.2 COOLDOWN ===
+        if cooldown_hours > 0:
+            last_sl_ts = None
+            for tr in reversed(trades):
+                if tr["result"] == "SL":
+                    last_sl_ts = tr["exit_ts"]
+                    break
+            if last_sl_ts is not None:
+                elapsed_h = (ts_now - last_sl_ts) / 3600000
+                if elapsed_h < cooldown_hours:
+                    cooldown_skips += 1
+                    continue
 
         c1h = candles_1h[:i]
         c15 = candles_until(candles_15m, ts_now)
@@ -372,17 +395,22 @@ def run_backtest(symbol, max_hours,
             f"rr={trade['rr']:.2f} score={score} "
             f"{partial_tag} -> {res_type:7} pnl={trade['pnl']:+.2f}%")
 
+    if cooldown_hours > 0:
+        log(f"Cooldown skips: {cooldown_skips}")
+
     near_misses.sort(key=lambda x: x["score"], reverse=True)
     diag = {
         "stage_counter": stage_counter, "reason_counter": reason_counter,
         "exception_counter": exception_counter, "market_stats": market_stats,
         "near_misses": near_misses[:15],
+        "cooldown_skips": cooldown_skips,
     }
     return trades, diag
 
 
 def print_report(symbol, trades, diag, use_breakeven=False,
-                 use_partial_tp=False, use_trailing=False):
+                 use_partial_tp=False, use_trailing=False,
+                 cooldown_hours=0):
     labels = []
     if use_breakeven:
         labels.append("BE")
@@ -390,11 +418,13 @@ def print_report(symbol, trades, diag, use_breakeven=False,
         labels.append("PARTIAL")
     if use_trailing:
         labels.append("TRAIL")
+    if cooldown_hours > 0:
+        labels.append(f"CD{cooldown_hours}h")
     label = "+".join(labels) if labels else "BASIC"
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v9.1 - {symbol} [{label}]")
+    print(f"ОТЧЁТ БЭКТЕСТА v9.2 - {symbol} [{label}]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -402,6 +432,7 @@ def print_report(symbol, trades, diag, use_breakeven=False,
     exception_counter = diag.get("exception_counter", Counter())
     market_stats = diag.get("market_stats", Counter())
     near_misses = diag.get("near_misses", [])
+    cooldown_skips = diag.get("cooldown_skips", 0)
 
     total = sum(stage_counter.values())
     total_exc = sum(exception_counter.values())
@@ -409,6 +440,8 @@ def print_report(symbol, trades, diag, use_breakeven=False,
     print()
     print(f"Всего шагов проанализировано: {total}")
     print(f"Пропущено через exception: {total_exc}")
+    if cooldown_hours > 0:
+        print(f"Пропущено через cooldown: {cooldown_skips}")
     print()
 
     if exception_counter:
@@ -506,7 +539,8 @@ def print_report(symbol, trades, diag, use_breakeven=False,
 
 
 def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
-                                  use_partial_tp=False, use_trailing=False):
+                                  use_partial_tp=False, use_trailing=False,
+                                  cooldown_hours=0):
     symbols = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
         "ADAUSDT", "AVAXUSDT", "LINKUSDT",
@@ -520,11 +554,13 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
         labels.append("PARTIAL")
     if use_trailing:
         labels.append("TRAIL")
+    if cooldown_hours > 0:
+        labels.append(f"CD{cooldown_hours}h")
     label = "+".join(labels) if labels else "BASIC"
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v9.1 - {label} - "
+    print(f"### MULTI BACKTEST v9.2 - {label} - "
           f"{len(symbols)} монет x 40 дней")
     print("#" * 70)
 
@@ -536,11 +572,13 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
                 use_breakeven=use_breakeven,
                 use_partial_tp=use_partial_tp,
                 use_trailing=use_trailing,
+                cooldown_hours=cooldown_hours,
             )
             print_report(sym, trades, diag,
                          use_breakeven=use_breakeven,
                          use_partial_tp=use_partial_tp,
-                         use_trailing=use_trailing)
+                         use_trailing=use_trailing,
+                         cooldown_hours=cooldown_hours)
 
             if trades:
                 tp = sum(1 for t in trades if t["result"] == "TP")
@@ -607,6 +645,8 @@ def main():
                         help="partial TP 50 на +1R")
     parser.add_argument("--trailing", action="store_true",
                         help="trailing по R")
+    parser.add_argument("--cooldown", type=int, default=0,
+                        help="cooldown после SL в часах (0 = выключено)")
     args = parser.parse_args()
 
     if args.multi:
@@ -615,6 +655,7 @@ def main():
             use_breakeven=args.be,
             use_partial_tp=args.partial,
             use_trailing=args.trailing,
+            cooldown_hours=args.cooldown,
         )
     else:
         trades, diag = run_backtest(
@@ -622,11 +663,13 @@ def main():
             use_breakeven=args.be,
             use_partial_tp=args.partial,
             use_trailing=args.trailing,
+            cooldown_hours=args.cooldown,
         )
         print_report(args.symbol, trades, diag,
                      use_breakeven=args.be,
                      use_partial_tp=args.partial,
-                     use_trailing=args.trailing)
+                     use_trailing=args.trailing,
+                     cooldown_hours=args.cooldown)
 
 
 if __name__ == "__main__":
