@@ -1,25 +1,27 @@
 """
-TradeMind 7.6 — strategy.py
+TradeMind 7.7 — strategy.py
 
-Изменения vs 7.5:
-- VOLUME_CONFIRMATION_ENABLED = False (гипотеза опровергнута бэктестом)
-- Откат к параметрам v7.4: MAX_SL_DISTANCE_PCT=3.0, MIN_SL_ATR_MULT=1.2
-- Функция _has_volume_confirmation оставлена — можно включить позже
+Изменения vs 7.6:
+- FIXED_RR: 2.0 -> 1.5 (WR растёт, PnL снижается, баланс)
+- MIN_SCORE_READY: 85 -> 90 (жёстче отбор)
+- Откат к SL 3.0% / ATR 1.2 (как в 7.6)
+- VOLUME_CONFIRMATION = False (гипотеза опровергнута)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "7.6"
+STRATEGY_VERSION = "7.7"
 
 ALLOW_SHORT = True
 
-MIN_SCORE_READY = 85
+# === v7.7 W/R BOOST ===
+MIN_SCORE_READY = 90
 REQUIRE_BOS_FOR_READY = True
 SL_BUFFER_PCT = 0.20
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 0.5
-FIXED_RR = 2.0
+FIXED_RR = 1.5
 
 # === v7.4 SL OPTIMIZATION ===
 SL_USE_1H_SWINGS = True
@@ -154,21 +156,17 @@ def _has_volume_confirmation(candles_1h, candle_index,
         return True
     if candle_index < lookback:
         return True
-
     start = candle_index - lookback
     vols = [_vol(candles_1h[i]) for i in range(start, candle_index)]
     vols = [v for v in vols if v > 0]
     if not vols:
         return True
-
     avg = sum(vols) / len(vols)
     if avg <= 0:
         return True
-
     current = _vol(candles_1h[candle_index])
     if current <= 0:
         return True
-
     return current >= avg * mult
 
 
