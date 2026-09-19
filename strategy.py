@@ -1,21 +1,18 @@
 """
-TradeMind 8.1 — strategy.py
+TradeMind 8.2 — strategy.py
 
-Изменения vs 8.0:
-- FIX: find_sweep — свинги вынесены из цикла (был O(n²) — бэктест висел)
-- FIX: is_sideways — ATR считается один раз, не внутри цикла
-- Фильтры SIDEWAYS/POSITION/D1 отключены (проверим по одному)
-- Оставлены структурные улучшения:
-  * MIN_SWEEP_DEPTH_PCT = 0.40
-  * Структурный BOS в confirmation_15m
-  * Возврат за sweep level в detect_5m_ilm
-  * ATR scaling SL
+Изменения vs 8.1:
+- ОТКАТ confirmation_15m к v7.6 (local highs, не структурный BOS)
+- ОТКАТ detect_5m_ilm к v7.6 (без tc > sweep_level)
+- MIN_SWEEP_DEPTH_PCT: 0.40 -> 0.25 (компромисс)
+- ATR scaling SL сохранён
+- Всё остальное как v7.6 (baseline: WR 22.5%, PnL +17.41%)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "8.1"
+STRATEGY_VERSION = "8.2"
 
 ALLOW_SHORT = True
 
@@ -26,31 +23,19 @@ STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
 
-# === v8.1 STRUKTURAL CHANGES ===
-MIN_SWEEP_DEPTH_PCT = 0.40
+MIN_SWEEP_DEPTH_PCT = 0.25
 MAX_SWEEP_AGE_1H = 24
-REQUIRE_SWEEP_BEYOND_SWING = True
 
-# === ATR-BASED SL ===
 USE_ATR_SCALING = True
 ATR_SL_MULT = 1.2
 ATR_SL_MAX_MULT = 3.0
 MIN_SL_DISTANCE_PCT = 0.35
 MAX_SL_DISTANCE_PCT = 4.0
 
-# === FILTERS — отключены в v8.1, включим по одному ===
 ENABLE_SIDEWAYS_FILTER = False
-SIDEWAYS_ATR_MULT = 1.5
-SIDEWAYS_LOOKBACK_4H = 4
-
 ENABLE_POSITION_FILTER = False
-POSITION_MIN = 0.35
-POSITION_MAX = 0.65
-POSITION_LOOKBACK_1H = 20
-
 ENABLE_D1_BLOCK = False
 
-# === SL OPTIMIZATION ===
 SL_USE_1H_SWINGS = True
 SL_USE_SWEEP_EXTREME = True
 MIN_SL_ATR_MULT = 1.2
@@ -170,66 +155,6 @@ def _avg_atr(candles, fast=14, slow=50):
     slow_val = calculate_atr(candles, slow)
     return fast_val, slow_val
 
-
-# ============================================================
-# v8.1 FILTERS (отключены, но функции на месте)
-# ============================================================
-
-def is_sideways(candles_1h, atr_cache=None):
-    if not candles_1h or len(candles_1h) < SIDEWAYS_LOOKBACK_4H + 5:
-        return False
-
-    recent = candles_1h[-SIDEWAYS_LOOKBACK_4H:]
-    highs = [_h(c) for c in recent if _h(c) is not None]
-    lows = [_l(c) for c in recent if _l(c) is not None]
-    if not highs or not lows:
-        return False
-
-    range_4h = max(highs) - min(lows)
-
-    atr_1h = atr_cache if atr_cache is not None else calculate_atr(candles_1h, 14)
-    if atr_1h is None or atr_1h <= 0:
-        return False
-
-    return range_4h < atr_1h * SIDEWAYS_ATR_MULT
-
-
-def position_in_range(candles_1h, lookback=POSITION_LOOKBACK_1H):
-    if not candles_1h or len(candles_1h) < lookback:
-        return None
-
-    window = candles_1h[-lookback:]
-    highs = [_h(c) for c in window if _h(c) is not None]
-    lows = [_l(c) for c in window if _l(c) is not None]
-    if not highs or not lows:
-        return None
-
-    high = max(highs)
-    low = min(lows)
-    if high <= low:
-        return None
-
-    price = _c(candles_1h[-1])
-    if price is None:
-        return None
-
-    return (price - low) / (high - low)
-
-
-def is_in_dead_zone(candles_1h, direction):
-    pos = position_in_range(candles_1h)
-    if pos is None:
-        return False
-
-    if direction == "LONG":
-        return pos > POSITION_MAX
-    else:
-        return pos < POSITION_MIN
-
-
-# ============================================================
-# SWINGS
-# ============================================================
 
 def _swing_high(c, i):
     if i < 2 or i >= len(c) - 2:
@@ -398,15 +323,7 @@ def _sweep_candidate_score(candle, level, depth):
     return depth * 4.0 + strength / 20.0 + min(touches, 5) * 3.0
 
 
-# ============================================================
-# v8.1 FIND SWEEP — оптимизирован
-# ============================================================
-
 def find_sweep(candles_1h, major_levels, direction):
-    """
-    v8.1: исправлено зависание.
-    Свинги теперь вычисляются один раз ВНЕ цикла.
-    """
     if direction not in {"LONG", "SHORT"}:
         return None
     if not candles_1h or len(candles_1h) < 3:
@@ -515,33 +432,30 @@ def measure_trend_activity(candles_1h, direction):
     return directional / total if total > 0 else 0.0
 
 
-# ============================================================
-# v8.1 CONFIRMATION 15M — структурный BOS
-# ============================================================
-
-def _swing_high_15m(c, i):
-    if i < 2 or i >= len(c) - 2:
+def _is_local_high_15m(c, i):
+    if i < 1 or i >= len(c) - 1:
         return False
     cur = _h(c[i])
-    l1, l2 = _h(c[i - 1]), _h(c[i - 2])
-    r1, r2 = _h(c[i + 1]), _h(c[i + 2])
-    if any(x is None for x in (cur, l1, l2, r1, r2)):
+    l = _h(c[i - 1])
+    r = _h(c[i + 1])
+    if cur is None or l is None or r is None:
         return False
-    return cur > l1 and cur >= l2 and cur >= r1 and cur > r2
+    return cur >= l and cur > r
 
 
-def _swing_low_15m(c, i):
-    if i < 2 or i >= len(c) - 2:
+def _is_local_low_15m(c, i):
+    if i < 1 or i >= len(c) - 1:
         return False
     cur = _l(c[i])
-    l1, l2 = _l(c[i - 1]), _l(c[i - 2])
-    r1, r2 = _l(c[i + 1]), _l(c[i + 2])
-    if any(x is None for x in (cur, l1, l2, r1, r2)):
+    l = _l(c[i - 1])
+    r = _l(c[i + 1])
+    if cur is None or l is None or r is None:
         return False
-    return cur < l1 and cur <= l2 and cur <= r1 and cur < r2
+    return cur <= l and cur < r
 
 
 def confirmation_15m(candles_15m, sweep, direction):
+    """v8.2: откат к v7.6 — local highs, не структурный BOS."""
     if not sweep or direction not in {"LONG", "SHORT"} or not candles_15m:
         return False, None, None, False
 
@@ -554,10 +468,10 @@ def confirmation_15m(candles_15m, sweep, direction):
             candidates.append(candle)
 
     candidates = candidates[-MAX_15M_CONFIRM_CANDLES:]
-    if len(candidates) < 5:
+    if len(candidates) < 3:
         return False, None, None, False
 
-    for i in range(3, len(candidates)):
+    for i in range(1, len(candidates)):
         candle = candidates[i]
 
         if _body_ratio(candle) < MIN_BODY_RATIO:
@@ -571,50 +485,40 @@ def confirmation_15m(candles_15m, sweep, direction):
             if not _bull(candle):
                 continue
 
-            structural_highs = []
-            for j in range(2, i - 1):
-                if _swing_high_15m(candidates, j):
+            local_highs = []
+            for j in range(i - 1):
+                if _is_local_high_15m(candidates, j):
                     h = _h(candidates[j])
                     if h is not None:
-                        structural_highs.append(h)
+                        local_highs.append(h)
 
-            if not structural_highs:
+            if not local_highs:
                 continue
 
-            reference = structural_highs[-1]
+            reference = max(local_highs[-3:])
             bos = close > reference
-            if not bos:
-                continue
-
-            return (True, "15M structural BOS", _t(candle), True)
+            return (True, "15M bullish engulfing", _t(candle), bos)
 
         else:
             if not _bear(candle):
                 continue
 
-            structural_lows = []
-            for j in range(2, i - 1):
-                if _swing_low_15m(candidates, j):
+            local_lows = []
+            for j in range(i - 1):
+                if _is_local_low_15m(candidates, j):
                     lo = _l(candidates[j])
                     if lo is not None:
-                        structural_lows.append(lo)
+                        local_lows.append(lo)
 
-            if not structural_lows:
+            if not local_lows:
                 continue
 
-            reference = structural_lows[-1]
+            reference = min(local_lows[-3:])
             bos = close < reference
-            if not bos:
-                continue
-
-            return (True, "15M structural BOS", _t(candle), True)
+            return (True, "15M bearish engulfing", _t(candle), bos)
 
     return False, None, None, False
 
-
-# ============================================================
-# 5M ILM
-# ============================================================
 
 def _is_local_high(c, i):
     if i < 1 or i >= len(c) - 1:
@@ -639,6 +543,7 @@ def _is_local_low(c, i):
 
 
 def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
+    """v8.2: откат — убрана проверка tc > sweep_level."""
     m = candles[i]
     if not _is_local_low(candles, i):
         return None
@@ -690,8 +595,6 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
     tc = _c(trig)
 
     if sweep_level is not None:
-        if tc <= sweep_level:
-            return None
         dist = abs(ml - sweep_level) / sweep_level * 100
         if dist > MIN_5M_ILM_SWEEP_DISTANCE_PCT:
             return None
@@ -714,6 +617,7 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
 
 
 def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
+    """v8.2: откат — убрана проверка tc < sweep_level."""
     m = candles[i]
     if not _is_local_high(candles, i):
         return None
@@ -765,8 +669,6 @@ def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
     tc = _c(trig)
 
     if sweep_level is not None:
-        if tc >= sweep_level:
-            return None
         dist = abs(mh - sweep_level) / sweep_level * 100
         if dist > MIN_5M_ILM_SWEEP_DISTANCE_PCT:
             return None
@@ -830,10 +732,6 @@ def calculate_entry(ilm, current_price, direction):
         return None
     return trigger
 
-
-# ============================================================
-# ATR-BASED SL
-# ============================================================
 
 def find_structural_stop_level(candles_15m, direction, entry,
                                 ilm_extreme, sweep_extreme=None,
@@ -910,22 +808,18 @@ def calculate_stop(entry, structural_level, direction, atr=None):
 
     if direction == "LONG":
         sl = level * (1 - SL_BUFFER_PCT / 100)
-
         if (entry - sl) < min_dist:
             sl = entry - min_dist
         if (entry - sl) > max_dist:
             sl = entry - max_dist
-
         return sl if sl < entry else None
 
     if direction == "SHORT":
         sl = level * (1 + SL_BUFFER_PCT / 100)
-
         if (sl - entry) < min_dist:
             sl = entry + min_dist
         if (sl - entry) > max_dist:
             sl = entry + max_dist
-
         return sl if sl > entry else None
 
     return None
@@ -936,11 +830,9 @@ def calculate_tp_by_rr(entry, sl, direction, rr=FIXED_RR):
     sl = _f(sl)
     if entry is None or sl is None:
         return None
-
     risk = abs(entry - sl)
     if risk <= 0:
         return None
-
     if direction == "LONG":
         return entry + rr * risk
     if direction == "SHORT":
@@ -1022,10 +914,6 @@ def _score(direction, context_direction, sweep, confirmation_strength,
     return int(min(100, max(0, round(score))))
 
 
-# ============================================================
-# ANALYZE SCENARIO
-# ============================================================
-
 def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
                        major_levels, direction, context_direction,
                        d1_context=None, fvgs=None):
@@ -1066,28 +954,6 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     if price is None or not candles_1h or not candles_15m or not candles_5m:
         result["reason"] = "Недостаточно рыночных данных."
         return result
-
-    # v8.1 D1 block (отключён)
-    if ENABLE_D1_BLOCK and d1_context:
-        d1_trend = d1_context.get("trend", "NEUTRAL")
-        if d1_trend not in ("NEUTRAL", direction):
-            result["score"] = 35
-            result["reason"] = f"Counter-D1 blocked ({d1_trend} vs {direction})"
-            return result
-
-    # v8.1 sideways filter (отключён)
-    if ENABLE_SIDEWAYS_FILTER:
-        if is_sideways(candles_1h):
-            result["score"] = 30
-            result["reason"] = "Sideways: рынок в узком боковике."
-            return result
-
-    # v8.1 position filter (отключён)
-    if ENABLE_POSITION_FILTER:
-        if is_in_dead_zone(candles_1h, direction):
-            result["score"] = 30
-            result["reason"] = "Position filter: цена в середине диапазона."
-            return result
 
     trend_activity = measure_trend_activity(candles_1h, direction)
     result["trend_activity"] = round(trend_activity, 3)
@@ -1261,7 +1127,7 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     if ready_ok:
         result["stage"] = "READY"
         result["reason"] = (
-            f"Sweep → 15M BOS → 5M ILM → Entry=ILM trigger. "
+            f"Sweep → 15M → 5M ILM → Entry=ILM trigger. "
             f"Trend {trend_activity:.2f}. RR 1:{FIXED_RR}. BOS."
         )
     else:
@@ -1451,9 +1317,6 @@ __all__ = [
     "SL_BUFFER_PCT",
     "MIN_SWEEP_DEPTH_PCT",
     "USE_ATR_SCALING",
-    "ENABLE_SIDEWAYS_FILTER",
-    "ENABLE_POSITION_FILTER",
-    "ENABLE_D1_BLOCK",
     "calculate_atr",
     "get_1h_direction",
     "get_higher_timeframe_direction",
@@ -1467,9 +1330,6 @@ __all__ = [
     "calculate_rr",
     "find_structural_stop_level",
     "validate_geometry",
-    "is_sideways",
-    "position_in_range",
-    "is_in_dead_zone",
     "analyze",
     "analyze_sol",
 ]
