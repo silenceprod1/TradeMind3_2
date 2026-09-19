@@ -1,17 +1,16 @@
 """
-TradeMind 7.5 — strategy.py
+TradeMind 7.6 — strategy.py
 
-Изменения vs 7.4:
-- Откат SL-дистанции: MIN_SL_ATR_MULT 1.0->1.2, MAX_SL_DISTANCE_PCT 2.0->3.0
-- Volume Confirmation: sweep-свеча должна быть на объёме выше среднего
-  (VOLUME_CONFIRMATION_MULT = 1.2)
-- Отсеивает "тонкие" sweep без реального давления
+Изменения vs 7.5:
+- VOLUME_CONFIRMATION_ENABLED = False (гипотеза опровергнута бэктестом)
+- Откат к параметрам v7.4: MAX_SL_DISTANCE_PCT=3.0, MIN_SL_ATR_MULT=1.2
+- Функция _has_volume_confirmation оставлена — можно включить позже
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "7.5"
+STRATEGY_VERSION = "7.6"
 
 ALLOW_SHORT = True
 
@@ -22,7 +21,7 @@ STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
 
-# === v7.5 SL OPTIMIZATION (откат к 7.4) ===
+# === v7.4 SL OPTIMIZATION ===
 SL_USE_1H_SWINGS = True
 SL_USE_SWEEP_EXTREME = True
 MIN_SL_DISTANCE_PCT = 0.35
@@ -32,8 +31,8 @@ MIN_BODY_RATIO_TRIGGER_5M = 0.50
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = True
 
-# === v7.5 VOLUME CONFIRMATION ===
-VOLUME_CONFIRMATION_ENABLED = True
+# === v7.6 VOLUME — отключено ===
+VOLUME_CONFIRMATION_ENABLED = False
 VOLUME_CONFIRMATION_MULT = 1.2
 VOLUME_CONFIRMATION_LOOKBACK = 20
 
@@ -151,10 +150,6 @@ def _avg_atr(candles, fast=14, slow=50):
 def _has_volume_confirmation(candles_1h, candle_index,
                              lookback=VOLUME_CONFIRMATION_LOOKBACK,
                              mult=VOLUME_CONFIRMATION_MULT):
-    """
-    Проверяет что объём sweep-свечи выше среднего за lookback.
-    Если истории мало — не блокируем.
-    """
     if not candles_1h or candle_index < 0 or candle_index >= len(candles_1h):
         return True
     if candle_index < lookback:
@@ -375,10 +370,8 @@ def find_sweep(candles_1h, major_levels, direction):
     total_candles = len(candles_1h)
 
     for idx, candle in enumerate(reversed(recent)):
-        # Оригинальный индекс в candles_1h
         candle_idx_1h = total_candles - 1 - idx
 
-        # v7.5 Volume Confirmation
         if VOLUME_CONFIRMATION_ENABLED:
             if not _has_volume_confirmation(candles_1h, candle_idx_1h):
                 continue
