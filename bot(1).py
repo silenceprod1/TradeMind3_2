@@ -50,19 +50,25 @@ MIN_RR = 2.0
 
 SCAN_CACHE_TTL = 5.0
 
-RUN_BACKTEST_ON_START = True
+RUN_BACKTEST_ON_START = False
 BACKTEST_SYMBOL = "SOLUSDT"
 BACKTEST_MULTI = True
 BACKTEST_MAX_HOURS = 24
 
+# Trailing (идентично бэктесту)
+BREAKEVEN_TRIGGER_PCT = 2.0
+TRAILING_TRIGGER_PCT = 4.0
+TRAILING_DISTANCE_PCT = 2.0
 
+
+# Убрали XRP и ARB (плохая статистика в бэктесте)
 COINS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
-    "BNB": "BNBUSDT", "XRP": "XRPUSDT", "DOGE": "DOGEUSDT",
+    "BNB": "BNBUSDT", "DOGE": "DOGEUSDT",
     "ADA": "ADAUSDT", "AVAX": "AVAXUSDT", "LINK": "LINKUSDT",
     "HYPE": "HYPEUSDT", "SUI": "SUIUSDT", "TRX": "TRXUSDT",
     "DOT": "DOTUSDT", "LTC": "LTCUSDT", "BCH": "BCHUSDT",
-    "NEAR": "NEARUSDT", "APT": "APTUSDT", "ARB": "ARBUSDT",
+    "NEAR": "NEARUSDT", "APT": "APTUSDT",
     "OP": "OPUSDT",
 }
 
@@ -440,9 +446,10 @@ def dashboard_message(results, chat_id=None):
         "D1 → 1H Major → Sweep",
         "→ 15M → 5M ILM → Entry",
         "",
-        "⚡ Активный тренд ≥ 0.45",
-        "🔺 V-Recovery ≥ 0.40",
-        "💠 FVG bonus +15 max",
+        "⚡ Trend ≥ 0.45",
+        "🔺 Recovery ≥ 0.40",
+        "📅 D1 обязателен",
+        "🎯 Trailing +2% / +4%",
         "",
         "🔔 Автоуведомление: только READY.",
     ])
@@ -830,9 +837,6 @@ def create_pending_setup(coin, result):
     sweep = result.get("sweep") or {}
     ilm = result.get("ilm") or {}
 
-    # ID строится ТОЛЬКО из стабильных параметров.
-    # entry меняется каждую секунду — его нельзя использовать,
-    # иначе спам уведомлениями.
     raw_id = (
         f"{coin}|{result['direction']}|"
         f"{sweep.get('open_time')}|"
@@ -890,13 +894,16 @@ def activate_trade(setup, chat_id):
             "direction": setup["direction"],
             "entry": float(setup["entry"]),
             "sl": float(setup["sl"]),
+            "sl_initial": float(setup["sl"]),
             "tp": float(setup["tp"]),
             "rr": float(setup["rr"]),
             "score": int(setup.get("score", 0)),
             "tp_source": setup.get("tp_source"),
             "opened_at": now_iso(), "opened_at_ms": now_ms(),
             "status": "OPEN", "last_price": current,
+            "best_price": current,
             "last_check_ms": now_ms(),
+            "trailing_active": False,
             "entry_source": "TradeMind READY snapshot",
         }
         active.append(trade)
@@ -931,6 +938,63 @@ def close_trade(trade, exit_price, result_type):
         save_journal(journal)
     return target
 
+
+# ============================================================
+# TRAILING STOP
+# ============================================================
+
+def apply_trailing(trade, current_price):
+    """
+    Trailing в live:
+    - move >= BREAKEVEN_TRIGGER_PCT (2%) -> SL в безубыток
+    - move >= TRAILING_TRIGGER_PCT (4%) -> SL за best_price на 2%
+
+    Никогда не двигаем SL против сделки.
+    """
+    try:
+        entry = float(trade["entry"])
+        current_sl = float(trade["sl"])
+        direction = trade["direction"]
+        best = float(trade.get("best_price", entry))
+    except Exception:
+        return
+
+    if direction == "LONG":
+        if current_price > best:
+            best = current_price
+        move_pct = (best - entry) / entry * 100
+
+        if move_pct >= TRAILING_TRIGGER_PCT:
+            new_sl = best * (1 - TRAILING_DISTANCE_PCT / 100)
+            if new_sl > current_sl:
+                trade["sl"] = round(new_sl, 8)
+                trade["trailing_active"] = True
+        elif move_pct >= BREAKEVEN_TRIGGER_PCT:
+            if entry > current_sl:
+                trade["sl"] = round(entry, 8)
+                trade["trailing_active"] = True
+
+    elif direction == "SHORT":
+        if current_price < best:
+            best = current_price
+        move_pct = (entry - best) / entry * 100
+
+        if move_pct >= TRAILING_TRIGGER_PCT:
+            new_sl = best * (1 + TRAILING_DISTANCE_PCT / 100)
+            if new_sl < current_sl:
+                trade["sl"] = round(new_sl, 8)
+                trade["trailing_active"] = True
+        elif move_pct >= BREAKEVEN_TRIGGER_PCT:
+            if entry < current_sl:
+                trade["sl"] = round(entry, 8)
+                trade["trailing_active"] = True
+
+    trade["best_price"] = round(best, 8)
+
+
+# ============================================================
+# PRICE CROSSING
+# ============================================================
 
 def level_between(prev, curr, level):
     try:
@@ -1028,6 +1092,10 @@ def trade_close_message(trade):
     pnl = trade.get("pnl_percent")
     pnl_text = f"{float(pnl):+.2f}%" if pnl is not None else "N/A"
 
+    trailing_tag = ""
+    if trade.get("trailing_active"):
+        trailing_tag = "\n🎯 Trailing был активен"
+
     return (
         f"{icon} <b>TRADEMIND — {title}</b>\n\n"
         f"💠 <b>{escape(str(trade.get('coin')))}</b>\n"
@@ -1038,7 +1106,7 @@ def trade_close_message(trade):
         f"TP: <b>{format_price(trade.get('tp'))}</b>"
         f"{tp_source_label(trade.get('tp_source'))}\n\n"
         f"📊 RR: <b>{format_rr(trade.get('rr'))}</b>\n"
-        f"📈 PnL: <b>{pnl_text}</b>"
+        f"📈 PnL: <b>{pnl_text}</b>{trailing_tag}"
     )
 
 
@@ -1095,8 +1163,13 @@ async def monitor_active_trades(app, results):
             trade.get("last_check_ms", trade.get("opened_at_ms", now_ms())))
         current_check_ms = now_ms()
 
+        # 1. Сначала проверяем TP/SL по ТЕКУЩЕМУ sl
         check = check_trade_price(trade, previous_price, current_price)
+
         if check is None:
+            # 2. Trailing (только если не закрываемся)
+            apply_trailing(trade, current_price)
+
             trade["last_price"] = current_price
             trade["last_check_ms"] = current_check_ms
             continue
@@ -1107,6 +1180,8 @@ async def monitor_active_trades(app, results):
                 trade, result.get("candles_1m", []),
                 previous_check_ms, current_check_ms)
             if resolved == "NO_DATA":
+                # Trailing всё равно применяем
+                apply_trailing(trade, current_price)
                 trade["last_price"] = current_price
                 trade["last_check_ms"] = current_check_ms
                 continue
@@ -1167,8 +1242,11 @@ def active_message(chat_id):
         entry = float(trade.get("entry"))
         pnl = calculate_pnl_percent(entry, curr, d)
         pnl_text = f"{pnl:+.2f}%" if pnl is not None else "N/A"
+
+        trailing_icon = " 🎯" if trade.get("trailing_active") else ""
+
         lines.extend([
-            f"💠 <b>{escape(str(coin))}</b>",
+            f"💠 <b>{escape(str(coin))}</b>{trailing_icon}",
             f"📐 {direction_icon(d)} <b>{d}</b>", "",
             f"💰 Entry: <b>{format_price(entry)}</b>",
             f"📍 Price: <b>{format_price(curr)}</b>",
@@ -1212,6 +1290,8 @@ def journal_message(chat_id):
                   if x.get("pnl_percent") is not None]
     total_pnl = sum(pnl_values)
 
+    trailing_count = sum(1 for x in journal if x.get("trailing_active"))
+
     lines = [
         "📒 <b>TRADEMIND JOURNAL</b>", "",
         "━━━━━━━━━━━━━━━━━━━━", "",
@@ -1219,6 +1299,7 @@ def journal_message(chat_id):
         f"✅ TP: <b>{tp}</b>",
         f"❌ SL: <b>{sl}</b>",
         f"⚪ Ambiguous: <b>{ambiguous}</b>",
+        f"🎯 С trailing: <b>{trailing_count}</b>",
         f"🎯 Win rate: <b>{win_rate:.1f}%</b>",
         f"📈 Sum PnL: <b>{total_pnl:+.2f}%</b>",
         "", "━━━━━━━━━━━━━━━━━━━━", "",
@@ -1230,9 +1311,10 @@ def journal_message(chat_id):
         icon = {"TP": "✅", "SL": "❌", "AMBIGUOUS": "⚪"}.get(rt, "❔")
         pnl = trade.get("pnl_percent")
         pnl_text = f"{float(pnl):+.2f}%" if pnl is not None else "N/A"
+        t_icon = " 🎯" if trade.get("trailing_active") else ""
         lines.append(
             f"{icon} <b>{escape(str(trade.get('coin')))}</b> "
-            f"{trade.get('direction')} • {rt} • {pnl_text}")
+            f"{trade.get('direction')} • {rt} • {pnl_text}{t_icon}")
     return "\n".join(lines)
 
 
@@ -1264,6 +1346,7 @@ def ready_message(coin, result, setup):
         f"RR: <b>{format_rr(setup.get('rr'))}</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🟢 <b>МОЖНО ВХОДИТЬ</b>\n\n"
+        "🎯 Trailing: +2% → безубыток, +4% → trailing\n\n"
         "Если вошёл — нажми «🟢 Я ЗАШЁЛ»."
     )
 
@@ -1762,7 +1845,7 @@ async def status_cmd(update, context):
          f"Active: <b>{active_count}</b>\n"
          f"Journal: <b>{len(journal)}</b>\n\n"
          "━━━━━━━━━━━━━━━━━━━━\n\n"
-         "📅 D1 context\n"
+         "📅 D1 context (обязателен)\n"
          "💧 1H Major + 15M + ROUND + FRESH\n"
          "💠 FVG (5M + 15M)\n"
          "🟠 Sweep internal\n"
@@ -1770,7 +1853,8 @@ async def status_cmd(update, context):
          "🎯 5M ILM\n"
          "⚡ Trend ≥ 0.45\n"
          "🔺 V-Recovery ≥ 0.40\n"
-         "📊 RR ≥ 1:2\n\n"
+         "📊 RR ≥ 1:2\n"
+         "🎯 Trailing +2% / +4%\n\n"
          "🕐 Работаем 24/7"),
         parse_mode="HTML",
         reply_markup=dashboard_keyboard())
@@ -1961,7 +2045,8 @@ async def callbacks(update, context):
              f"SL: <b>{format_price(trade.get('sl'))}</b>\n"
              f"TP: <b>{format_price(trade.get('tp'))}</b>\n"
              f"RR: <b>{format_rr(trade.get('rr'))}</b>\n\n"
-             "📌 Snapshot сохранён."),
+             "📌 Snapshot сохранён.\n"
+             "🎯 Trailing активируется при +2%"),
             active_keyboard(chat_id))
         return
 
@@ -2059,7 +2144,7 @@ async def callbacks(update, context):
              f"Active: <b>{active_count}</b>\n"
              f"Journal: <b>{len(journal)}</b>\n\n"
              "━━━━━━━━━━━━━━━━━━━━\n\n"
-             "📅 D1 context\n"
+             "📅 D1 context (обязателен)\n"
              "💧 1H Major + 15M + ROUND + FRESH\n"
              "💠 FVG (5M + 15M)\n"
              "🟠 Sweep internal\n"
@@ -2067,14 +2152,15 @@ async def callbacks(update, context):
              "🎯 5M ILM\n"
              "⚡ Trend ≥ 0.45\n"
              "🔺 V-Recovery ≥ 0.40\n"
-             "📊 RR ≥ 1:2\n\n"
+             "📊 RR ≥ 1:2\n"
+             "🎯 Trailing +2% / +4%\n\n"
              "🕐 Работаем 24/7"),
             dashboard_keyboard())
         return
 
 
 # ============================================================
-# POST INIT (с 40-дневным бэктестом + trailing)
+# POST INIT
 # ============================================================
 
 async def post_init(application):
