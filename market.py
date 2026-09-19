@@ -2,9 +2,10 @@
 # TradeMind 7.7
 # market.py
 #
-# Изменения vs 7.6:
+# Изменения:
 # - LOOKBACK увеличены (500 / 500 / 500 / 200)
-# - Добавлена get_klines_history() с пагинацией для бэктеста
+# - Добавлена get_klines_history() с пагинацией
+# - Убраны XRP и ARB из COINS (плохая статистика в бэктесте)
 # ============================================================
 
 from __future__ import annotations
@@ -27,11 +28,11 @@ HTTP_RETRIES = 3
 
 COINS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
-    "BNB": "BNBUSDT", "XRP": "XRPUSDT", "DOGE": "DOGEUSDT",
+    "BNB": "BNBUSDT", "DOGE": "DOGEUSDT",
     "ADA": "ADAUSDT", "AVAX": "AVAXUSDT", "LINK": "LINKUSDT",
     "HYPE": "HYPEUSDT", "SUI": "SUIUSDT", "TRX": "TRXUSDT",
     "DOT": "DOTUSDT", "LTC": "LTCUSDT", "BCH": "BCHUSDT",
-    "NEAR": "NEARUSDT", "APT": "APTUSDT", "ARB": "ARBUSDT",
+    "NEAR": "NEARUSDT", "APT": "APTUSDT",
     "OP": "OPUSDT",
 }
 
@@ -213,15 +214,10 @@ def get_klines(interval, limit, symbol="SOLUSDT"):
 
 
 # ============================================================
-# PAGINATED HISTORY (для бэктеста)
+# PAGINATED HISTORY
 # ============================================================
 
 def get_klines_history(interval, limit, symbol="SOLUSDT"):
-    """
-    Загружает историю свечей с пагинацией.
-    Binance отдаёт максимум 1000 свечей за один запрос.
-    Если limit > 1000 — делаем несколько запросов.
-    """
     symbol = _normalize_symbol(symbol)
 
     if limit <= 1000:
@@ -510,10 +506,6 @@ def cluster_levels(levels):
     return result
 
 
-# ============================================================
-# FRESHNESS / TOUCHES / SWEPT
-# ============================================================
-
 def freshness_score(level, candles, max_age):
     last_index = int(level.get("last_index", 0))
     age = len(candles) - 1 - last_index
@@ -689,10 +681,6 @@ def _select_fresh_zones(candles_1h, price, level_type):
     candidates.sort(key=lambda x: x["distance_pct"])
     return candidates[:MAX_LEVELS_PER_SIDE]
 
-
-# ============================================================
-# ATH / ATL
-# ============================================================
 
 def detect_ath_extension(candles_1h, price):
     if not candles_1h or len(candles_1h) < 20: return []
