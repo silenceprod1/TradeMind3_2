@@ -1,36 +1,22 @@
 """
-TradeMind 7.0
-Модель входа полностью переделана.
+TradeMind 7.2
 
-Ключевые изменения vs 6.x:
-- Entry = ILM trigger_price (не текущая цена). Вход на ретесте.
-- SL = структурный swing 15M (не ILM extreme). Защита от шума.
-- TP = entry ± 2×risk (жёстко). Без поиска major liquidity.
-- RR всегда = 2.0 по построению.
-- Confirmation 15M усилена: BOS (break of structure).
-- READY даётся только если текущая цена близко к entry (0.5%).
-- Тайминги НЕ используются — бот работает 24/7.
-
-Логика:
-1. 1H sweep → контекст
-2. 15M BOS → подтверждение направления
-3. 5M ILM → точка входа (trigger_price)
-4. Entry = ILM trigger (лимитный ордер)
-5. SL = последний swing 15M + буфер 0.15%
-6. TP = entry + 2 × (entry - SL) для LONG
+Изменения vs 7.1:
+- ALLOW_SHORT = True (SHORT вернули)
+- MIN_SCORE_READY: 80 -> 88
+- REQUIRE_BOS_FOR_READY = True (BOS обязателен для READY)
+- MIN_TREND_ACTIVITY_READY: 0.45 -> 0.55
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "7.0"
+STRATEGY_VERSION = "7.2"
 
+ALLOW_SHORT = True
 
-# ============================================================
-# SETTINGS
-# ============================================================
-
-MIN_SCORE_READY = 80
+MIN_SCORE_READY = 88
+REQUIRE_BOS_FOR_READY = True
 SL_BUFFER_PCT = 0.15
 STRUCTURAL_SL_LOOKBACK_15M = 30
 ENTRY_TOLERANCE_PCT = 0.5
@@ -46,18 +32,14 @@ MAX_ILM_AGE_CANDLES_5M = 36
 MIN_5M_RECOVERY_RATIO = 0.20
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 3.0
 
-MIN_TREND_ACTIVITY_READY = 0.45
-COUNTER_TREND_MIN_SCORE = 90
+MIN_TREND_ACTIVITY_READY = 0.55
+COUNTER_TREND_MIN_SCORE = 92
 
 FVG_TOLERANCE_PCT = 0.10
 FVG_SWEEP_BONUS = 10
 FVG_ENTRY_BONUS = 5
 FVG_MAX_BONUS = 15
 
-
-# ============================================================
-# HELPERS
-# ============================================================
 
 def _f(x):
     try:
@@ -125,10 +107,6 @@ def _distance_pct(a, b):
     return abs(a - b) / abs(b) * 100
 
 
-# ============================================================
-# TREND ACTIVITY
-# ============================================================
-
 def measure_trend_activity(candles_1h, direction):
     if not candles_1h or len(candles_1h) < 15:
         return 0.0
@@ -144,10 +122,6 @@ def measure_trend_activity(candles_1h, direction):
             directional += b
     return directional / total if total > 0 else 0.0
 
-
-# ============================================================
-# 1H SWINGS / DIRECTION
-# ============================================================
 
 def _swing_high(c, i):
     if i < 2 or i >= len(c) - 2:
@@ -228,10 +202,6 @@ def get_higher_timeframe_direction(candles_1h, candles_d1=None, candles_w1=None)
     return get_1h_direction(candles_1h)
 
 
-# ============================================================
-# LIQUIDITY HELPERS
-# ============================================================
-
 def _level_price(l):
     return _f(l.get("price")) if isinstance(l, dict) else _f(l)
 
@@ -279,10 +249,6 @@ def _levels_for_direction(major_levels, direction):
     return result
 
 
-# ============================================================
-# FVG
-# ============================================================
-
 def is_inside_fvg(price, fvgs, direction, tolerance_pct=FVG_TOLERANCE_PCT):
     p = _f(price)
     if p is None or not fvgs:
@@ -317,10 +283,6 @@ def compute_fvg_bonus(sweep, entry, fvgs, direction):
         bonus += FVG_ENTRY_BONUS
     return min(bonus, FVG_MAX_BONUS), sweep_inside, entry_inside
 
-
-# ============================================================
-# SWEEP
-# ============================================================
 
 def _sweep_candidate_score(candle, level, depth):
     strength = _level_strength(level)
@@ -393,10 +355,6 @@ def find_sweep(candles_1h, major_levels, direction):
     return best
 
 
-# ============================================================
-# 15M BOS CONFIRMATION
-# ============================================================
-
 def _is_local_high_15m(c, i):
     if i < 1 or i >= len(c) - 1:
         return False
@@ -420,11 +378,6 @@ def _is_local_low_15m(c, i):
 
 
 def confirmation_15m(candles_15m, sweep, direction):
-    """
-    Усиленная проверка 15M:
-    1. Бычья/медвежья свеча с телом >= MIN_BODY_RATIO
-    2. BOS — пробой локального экстремума
-    """
     if not sweep or direction not in {"LONG", "SHORT"} or not candles_15m:
         return False, None, None, False
 
@@ -500,10 +453,6 @@ def confirmation_15m(candles_15m, sweep, direction):
 
     return False, None, None, False
 
-
-# ============================================================
-# 5M ILM
-# ============================================================
 
 def _is_local_high(c, i):
     if i < 1 or i >= len(c) - 1:
@@ -707,15 +656,7 @@ def detect_5m_ilm(candles_5m, sweep, direction, confirmation_time=None):
     return True, best
 
 
-# ============================================================
-# ENTRY / SL / TP (NEW MODEL)
-# ============================================================
-
 def calculate_entry(ilm, current_price, direction):
-    """
-    Entry = ILM trigger_price.
-    Это цена, к которой цена вернулась после манипуляции.
-    """
     if not ilm:
         return None
     trigger = _f(ilm.get("trigger_price"))
@@ -725,12 +666,6 @@ def calculate_entry(ilm, current_price, direction):
 
 
 def find_structural_stop_level(candles_15m, direction, entry, ilm_extreme):
-    """
-    Ищем структурный SL — последний swing low (для LONG) / swing high (SHORT)
-    на 15M в пределах STRUCTURAL_SL_LOOKBACK_15M свечей.
-
-    Если не находим — используем ilm_extreme как fallback.
-    """
     if not candles_15m or len(candles_15m) < 10:
         return ilm_extreme
 
@@ -829,10 +764,6 @@ def validate_geometry(entry, sl, tp, direction):
     return False
 
 
-# ============================================================
-# SCORE
-# ============================================================
-
 def _score(
     direction,
     context_direction,
@@ -890,10 +821,6 @@ def _score(
     return int(min(100, max(0, round(score))))
 
 
-# ============================================================
-# SINGLE SCENARIO
-# ============================================================
-
 def _analyze_scenario(
     candles_1h,
     candles_15m,
@@ -930,6 +857,10 @@ def _analyze_scenario(
         "fvg_sweep": False,
         "fvg_entry": False,
     }
+
+    if direction == "SHORT" and not ALLOW_SHORT:
+        result["reason"] = "SHORT disabled"
+        return result
 
     price = _f(current_price)
     if price is None or not candles_1h or not candles_15m or not candles_5m:
@@ -988,21 +919,18 @@ def _analyze_scenario(
         result["reason"] = "15M подтверждение есть. Ждём 5M ILM."
         return result
 
-    # ---------- Проверка возраста ILM ----------
     ilm_age = int(ilm.get("age_candles", 0))
     if ilm_age > MAX_ILM_AGE_CANDLES_5M:
         result["score"] = 65
         result["reason"] = f"ILM устарел ({ilm_age} свечей 5M)."
         return result
 
-    # ---------- Entry = ILM trigger ----------
     entry = calculate_entry(ilm, price, direction)
     if entry is None:
         result["score"] = 68
         result["reason"] = "Не удалось определить Entry (ILM trigger)."
         return result
 
-    # ---------- Проверка: цена близко к entry ----------
     dist_pct = _distance_pct(price, entry)
     if dist_pct is None or dist_pct > ENTRY_TOLERANCE_PCT:
         result["score"] = 68
@@ -1012,7 +940,6 @@ def _analyze_scenario(
         )
         return result
 
-    # ---------- Structural SL ----------
     ilm_extreme = _f(ilm.get("extreme"))
     structural_level = find_structural_stop_level(
         candles_15m, direction, entry, ilm_extreme
@@ -1024,7 +951,6 @@ def _analyze_scenario(
         result["reason"] = "Не удалось построить структурный SL."
         return result
 
-    # ---------- TP = 2R ----------
     tp = calculate_tp_by_rr(entry, sl, direction, FIXED_RR)
     if tp is None:
         result["score"] = 70
@@ -1079,14 +1005,19 @@ def _analyze_scenario(
     result["score"] = score
 
     trend_ok = trend_activity >= MIN_TREND_ACTIVITY_READY
-    ready_ok = score >= MIN_SCORE_READY and trend_ok
+    bos_ok = (not REQUIRE_BOS_FOR_READY) or bos
+
+    ready_ok = (
+        score >= MIN_SCORE_READY
+        and trend_ok
+        and bos_ok
+    )
 
     if ready_ok:
         result["stage"] = "READY"
-        bos_tag = " BOS." if bos else ""
         result["reason"] = (
             f"Sweep → 15M → 5M ILM → Entry=ILM trigger. "
-            f"Trend {trend_activity:.2f}. RR 1:{FIXED_RR}.{bos_tag}"
+            f"Trend {trend_activity:.2f}. RR 1:{FIXED_RR}. BOS."
         )
     else:
         result["stage"] = "15M_CONFIRMED"
@@ -1095,14 +1026,12 @@ def _analyze_scenario(
             blocks.append(f"score {score}")
         if not trend_ok:
             blocks.append(f"trend {trend_activity:.2f}")
+        if not bos_ok:
+            blocks.append("no_bos")
         result["reason"] = ("READY заблокирован: " + ", ".join(blocks))
 
     return result
 
-
-# ============================================================
-# MAIN ANALYZE
-# ============================================================
 
 def analyze(
     candles_1h,
@@ -1270,7 +1199,6 @@ def analyze(
         "fvg_entry": chosen.get("fvg_entry", False),
     })
     base["context_direction"] = context_direction
-
     return base
 
 
@@ -1280,7 +1208,9 @@ def analyze_sol(*args, **kwargs):
 
 __all__ = [
     "STRATEGY_VERSION",
+    "ALLOW_SHORT",
     "MIN_SCORE_READY",
+    "REQUIRE_BOS_FOR_READY",
     "FIXED_RR",
     "SL_BUFFER_PCT",
     "get_1h_direction",
