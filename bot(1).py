@@ -50,18 +50,16 @@ MIN_RR = 2.0
 
 SCAN_CACHE_TTL = 5.0
 
-RUN_BACKTEST_ON_START = False
+RUN_BACKTEST_ON_START = True
 BACKTEST_SYMBOL = "SOLUSDT"
 BACKTEST_MULTI = True
 BACKTEST_MAX_HOURS = 24
 
-# Trailing (идентично бэктесту)
 BREAKEVEN_TRIGGER_PCT = 2.0
 TRAILING_TRIGGER_PCT = 4.0
 TRAILING_DISTANCE_PCT = 2.0
 
 
-# Убрали XRP и ARB (плохая статистика в бэктесте)
 COINS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
     "BNB": "BNBUSDT", "DOGE": "DOGEUSDT",
@@ -944,13 +942,6 @@ def close_trade(trade, exit_price, result_type):
 # ============================================================
 
 def apply_trailing(trade, current_price):
-    """
-    Trailing в live:
-    - move >= BREAKEVEN_TRIGGER_PCT (2%) -> SL в безубыток
-    - move >= TRAILING_TRIGGER_PCT (4%) -> SL за best_price на 2%
-
-    Никогда не двигаем SL против сделки.
-    """
     try:
         entry = float(trade["entry"])
         current_sl = float(trade["sl"])
@@ -991,10 +982,6 @@ def apply_trailing(trade, current_price):
 
     trade["best_price"] = round(best, 8)
 
-
-# ============================================================
-# PRICE CROSSING
-# ============================================================
 
 def level_between(prev, curr, level):
     try:
@@ -1163,11 +1150,9 @@ async def monitor_active_trades(app, results):
             trade.get("last_check_ms", trade.get("opened_at_ms", now_ms())))
         current_check_ms = now_ms()
 
-        # 1. Сначала проверяем TP/SL по ТЕКУЩЕМУ sl
         check = check_trade_price(trade, previous_price, current_price)
 
         if check is None:
-            # 2. Trailing (только если не закрываемся)
             apply_trailing(trade, current_price)
 
             trade["last_price"] = current_price
@@ -1180,7 +1165,6 @@ async def monitor_active_trades(app, results):
                 trade, result.get("candles_1m", []),
                 previous_check_ms, current_check_ms)
             if resolved == "NO_DATA":
-                # Trailing всё равно применяем
                 apply_trailing(trade, current_price)
                 trade["last_price"] = current_price
                 trade["last_check_ms"] = current_check_ms
