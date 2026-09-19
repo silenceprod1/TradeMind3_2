@@ -45,23 +45,21 @@ TOKEN = os.getenv("BOT_TOKEN")
 CHECK_INTERVAL = 15
 SCAN_WORKERS = 12
 
-MIN_SCORE_READY = 80
+MIN_SCORE_READY = 88
 MIN_RR = 2.0
 
 SCAN_CACHE_TTL = 5.0
 
-RUN_BACKTEST_ON_START = False
+RUN_BACKTEST_ON_START = True
 BACKTEST_SYMBOL = "SOLUSDT"
 BACKTEST_MULTI = True
 BACKTEST_MAX_HOURS = 24
 
-# Trailing отключён (в бэктесте ухудшал результат)
 TRAILING_ENABLED = False
 BREAKEVEN_TRIGGER_PCT = 1.0
 TRAILING_TRIGGER_PCT = 4.0
 TRAILING_DISTANCE_PCT = 2.0
 
-# Запрет открытия конфликтующих сделок на одну монету
 BLOCK_CONFLICTING_TRADES = True
 
 
@@ -442,20 +440,22 @@ def dashboard_message(results, chat_id=None):
         )
 
     trailing_label = "ON" if TRAILING_ENABLED else "OFF"
+    short_label = "ON" if ALLOW_SHORT else "OFF"
 
     lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 7.0</b>",
+        "🧭 <b>СТРАТЕГИЯ 7.2</b>",
         "",
         "Entry = ILM trigger (retest)",
         "SL = structural 15M swing",
         "TP = RR 1:2 (fixed)",
         "",
-        "⚡ Trend ≥ 0.45",
-        "🎯 BOS на 15M",
+        "⚡ Trend ≥ 0.55",
+        "🎯 BOS обязателен",
         f"🎯 Trailing: <b>{trailing_label}</b>",
+        f"📈 SHORT: <b>{short_label}</b>",
         "",
         "🔔 Автоуведомление: только READY.",
     ])
@@ -906,7 +906,7 @@ def activate_trade(setup, chat_id):
             "best_price": current,
             "last_check_ms": now_ms(),
             "trailing_active": False,
-            "entry_source": "TradeMind 7.0 ILM trigger",
+            "entry_source": "TradeMind 7.2 ILM trigger",
         }
         active.append(trade)
         save_active_trades(active)
@@ -1814,6 +1814,7 @@ async def status_cmd(update, context):
     journal = load_journal()
 
     trailing_label = "ON" if TRAILING_ENABLED else "OFF"
+    short_label = "ON" if ALLOW_SHORT else "OFF"
 
     await update.message.reply_text(
         (f"⚙️ <b>TRADEMIND STATUS</b>\n\n"
@@ -1824,16 +1825,17 @@ async def status_cmd(update, context):
          f"Active: <b>{active_count}</b>\n"
          f"Journal: <b>{len(journal)}</b>\n\n"
          "━━━━━━━━━━━━━━━━━━━━\n\n"
-         "🎯 <b>МОДЕЛЬ 7.0</b>\n"
+         "🎯 <b>МОДЕЛЬ 7.2</b>\n"
          "Entry = ILM trigger\n"
          "SL = structural 15M\n"
          "TP = RR 1:2 (fixed)\n\n"
          "📅 D1 context\n"
          "💧 1H Major + 15M + ROUND + FRESH\n"
          "💠 FVG\n"
-         "🎯 BOS на 15M\n"
+         "⚡ Trend ≥ 0.55\n"
+         "🎯 BOS обязателен\n"
          f"🎯 Trailing: <b>{trailing_label}</b>\n"
-         f"🚫 Конфликт-фильтр: <b>{'ON' if BLOCK_CONFLICTING_TRADES else 'OFF'}</b>\n\n"
+         f"📈 SHORT: <b>{short_label}</b>\n\n"
          "🕐 Работаем 24/7"),
         parse_mode="HTML",
         reply_markup=dashboard_keyboard())
@@ -1855,8 +1857,6 @@ async def monitor(app):
 
             state_changed = False
 
-            # Кэш открытых сделок (по chat_id + coin)
-            # чтобы не читать файл на каждой монете
             open_trades = [
                 t for t in load_active_trades()
                 if t.get("status") == "OPEN"
@@ -1884,7 +1884,6 @@ async def monitor(app):
                 if rr < MIN_RR:
                     continue
 
-                # ---- КОНФЛИКТ-ФИЛЬТР ----
                 if BLOCK_CONFLICTING_TRADES:
                     conflicting = [
                         t for t in open_trades
@@ -1903,8 +1902,6 @@ async def monitor(app):
                                 flush=True,
                             )
                             continue
-                        # Если направление то же — тоже пропускаем
-                        # (чтобы не было 2 LONG на одну монету)
                         print(
                             f"[SKIP-DUP] {coin} "
                             f"уже есть OPEN {new_dir} — "
@@ -1912,7 +1909,6 @@ async def monitor(app):
                             flush=True,
                         )
                         continue
-                # ---- /КОНФЛИКТ-ФИЛЬТР ----
 
                 setup = save_ready_setup(coin, result)
                 if setup is None:
@@ -2152,6 +2148,7 @@ async def callbacks(update, context):
         journal = load_journal()
 
         trailing_label = "ON" if TRAILING_ENABLED else "OFF"
+        short_label = "ON" if ALLOW_SHORT else "OFF"
 
         await edit_query(
             query,
@@ -2163,16 +2160,17 @@ async def callbacks(update, context):
              f"Active: <b>{active_count}</b>\n"
              f"Journal: <b>{len(journal)}</b>\n\n"
              "━━━━━━━━━━━━━━━━━━━━\n\n"
-             "🎯 <b>МОДЕЛЬ 7.0</b>\n"
+             "🎯 <b>МОДЕЛЬ 7.2</b>\n"
              "Entry = ILM trigger\n"
              "SL = structural 15M\n"
              "TP = RR 1:2 (fixed)\n\n"
              "📅 D1 context\n"
              "💧 1H Major + 15M + ROUND + FRESH\n"
              "💠 FVG\n"
-             "🎯 BOS на 15M\n"
+             "⚡ Trend ≥ 0.55\n"
+             "🎯 BOS обязателен\n"
              f"🎯 Trailing: <b>{trailing_label}</b>\n"
-             f"🚫 Конфликт-фильтр: <b>{'ON' if BLOCK_CONFLICTING_TRADES else 'OFF'}</b>\n\n"
+             f"📈 SHORT: <b>{short_label}</b>\n\n"
              "🕐 Работаем 24/7"),
             dashboard_keyboard())
         return
@@ -2192,7 +2190,7 @@ async def post_init(application):
             import backtest
 
             if BACKTEST_MULTI:
-                print(">>> BACKTEST 40d — БЕЗ TRAILING <<<", flush=True)
+                print(">>> BACKTEST 40d <<<", flush=True)
                 backtest.run_multi_backtest_with_hours(
                     BACKTEST_MAX_HOURS, use_trailing=False)
             else:
