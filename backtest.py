@@ -1,10 +1,8 @@
 """
-Диагностический бэктест v9.2.
+Диагностический бэктест v9.3.
 
-Изменения v9.2 vs v9.1:
-- Поддержка cooldown после SL (CLI флаг --cooldown N)
-- Символ пропускается если был SL в последние N часов
-- Формат вывода сохранён
+Изменения vs v9.2:
+- symbols: 8 -> 20 монет (больше выборка)
 """
 
 import argparse
@@ -274,7 +272,6 @@ def run_backtest(symbol, max_hours,
         if has_active_position(trades, ts_now):
             continue
 
-        # === v9.2 COOLDOWN ===
         if cooldown_hours > 0:
             last_sl_ts = None
             for tr in reversed(trades):
@@ -424,7 +421,7 @@ def print_report(symbol, trades, diag, use_breakeven=False,
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v9.2 - {symbol} [{label}]")
+    print(f"ОТЧЁТ БЭКТЕСТА v9.3 - {symbol} [{label}]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -545,6 +542,9 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
         "ADAUSDT", "AVAXUSDT", "LINKUSDT",
         "APTUSDT",
+        "XRPUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT",
+        "TRXUSDT", "SUIUSDT", "OPUSDT", "ARBUSDT",
+        "INJUSDT", "TIAUSDT", "SEIUSDT", "ATOMUSDT",
     ]
 
     labels = []
@@ -560,7 +560,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v9.2 - {label} - "
+    print(f"### MULTI BACKTEST v9.3 - {label} - "
           f"{len(symbols)} монет x 40 дней")
     print("#" * 70)
 
@@ -646,7 +646,7 @@ def main():
     parser.add_argument("--trailing", action="store_true",
                         help="trailing по R")
     parser.add_argument("--cooldown", type=int, default=0,
-                        help="cooldown после SL в часах (0 = выключено)")
+                        help="cooldown после SL в часах")
     args = parser.parse_args()
 
     if args.multi:
