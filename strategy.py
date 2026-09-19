@@ -1,19 +1,16 @@
 """
-TradeMind 6.12
+TradeMind 6.13
 
-Изменения vs 6.11:
-- MIN_5M_RECOVERY_RATIO: 0.25 -> 0.20
-- MIN_5M_ILM_SWEEP_DISTANCE_PCT: 1.5 -> 3.0
-- resolve_target теперь принимает sl и перебирает major-уровни,
-  чтобы найти TP с RR >= MIN_RR. Если ближайший не даёт RR 2.0,
-  берётся следующий по расстоянию.
+Изменения vs 6.12:
+- D1 gate: если D1 trend NEUTRAL — READY не даётся.
+  Это отсекает слабые сигналы (по бэктесту на 40 днях).
 """
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "6.12"
+STRATEGY_VERSION = "6.13"
 
 
 MIN_SCORE_READY = 80
@@ -687,12 +684,6 @@ def detect_local_swing_target(candles_5m, candles_15m, direction, entry):
 
 def resolve_target(major_levels, direction, entry, sl, sweep_level,
                    candles_5m, candles_15m, d1_context=None):
-    """
-    Ищем TP с RR >= MIN_RR.
-    Приоритет: D1 Point B -> major liquidity -> local swing.
-    Перебираем major-уровни по возрастанию расстояния от entry
-    и берём первый, который даёт RR >= MIN_RR.
-    """
     entry_f = _f(entry)
     sl_f = _f(sl)
     if entry_f is None or sl_f is None:
@@ -704,7 +695,6 @@ def resolve_target(major_levels, direction, entry, sl, sweep_level,
 
     min_reward = risk * MIN_RR
 
-    # 1. D1 Point B — приоритет
     if d1_context:
         pb = _f(d1_context.get("point_b"))
         if pb is not None:
@@ -717,7 +707,6 @@ def resolve_target(major_levels, direction, entry, sl, sweep_level,
                 if reward >= min_reward:
                     return pb, "d1", f"TP = D1 Point B ({pb:.4f})."
 
-    # 2. Major liquidity — все подходящие
     major_candidates = []
     for level in major_levels or []:
         if _is_swept_level(level):
@@ -736,20 +725,17 @@ def resolve_target(major_levels, direction, entry, sl, sweep_level,
 
     major_candidates.sort(key=lambda x: abs(x - entry_f))
 
-    # Первый, дающий RR >= MIN_RR
     for candidate in major_candidates:
         reward = abs(candidate - entry_f)
         if reward >= min_reward:
             return (candidate, "major",
                     "TP = свежая Major Liquidity (RR >= 2).")
 
-    # Если ни один не даёт RR >= 2 — берём самый дальний
     if major_candidates:
         farthest = major_candidates[-1]
         return (farthest, "major",
                 "TP = самый дальний Major (RR < 2).")
 
-    # 3. Local swing fallback
     fb = detect_local_swing_target(candles_5m, candles_15m, direction, entry_f)
     if fb is not None:
         return fb["price"], "local", f"TP = ближайший {fb['source']}."
@@ -999,7 +985,6 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
         result["reason"] = "Не удалось построить корректный SL."
         return result
 
-    # resolve_target теперь принимает sl
     tp, tp_source, tp_reason = resolve_target(
         major_levels=major_levels,
         direction=direction,
@@ -1077,7 +1062,20 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     recovery = (ilm or {}).get("recovery_ratio", 0)
     v_ok = recovery >= MIN_V_RECOVERY_FOR_READY
 
-    ready_ok = score >= MIN_SCORE_READY and trend_ok and v_ok
+    # D1 gate: если D1 NEUTRAL — не даём READY
+    d1_ok = True
+    d1_trend_val = "NEUTRAL"
+    if d1_context:
+        d1_trend_val = d1_context.get("trend", "NEUTRAL")
+        if d1_trend_val == "NEUTRAL":
+            d1_ok = False
+
+    ready_ok = (
+        score >= MIN_SCORE_READY
+        and trend_ok
+        and v_ok
+        and d1_ok
+    )
 
     if ready_ok:
         result["stage"] = "READY"
@@ -1103,6 +1101,8 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
             blocks.append(f"trend {trend_activity:.2f}")
         if not v_ok:
             blocks.append(f"recovery {recovery:.2f}")
+        if not d1_ok:
+            blocks.append(f"d1_{d1_trend_val.lower()}")
         result["reason"] = ("Сетап есть, READY заблокирован: "
                             + ", ".join(blocks))
 
