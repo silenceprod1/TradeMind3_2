@@ -56,7 +56,7 @@ BACKTEST_SYMBOL = "SOLUSDT"
 BACKTEST_MULTI = True
 BACKTEST_MAX_HOURS = 24
 
-# === v7.4 Position Management (R-based) ===
+# === v7.6 Position Management (R-based) ===
 TRAILING_ENABLED = True
 BREAKEVEN_TRIGGER_R = 1.0
 PARTIAL_TP_ENABLED = True
@@ -72,6 +72,11 @@ TRAILING_DISTANCE_PCT = 2.0
 
 BLOCK_CONFLICTING_TRADES = True
 
+# === v7.6 Cooldown after SL ===
+COOLDOWN_AFTER_SL_ENABLED = True
+COOLDOWN_AFTER_SL_HOURS = 6
+COOLDOWN_AFTER_TP_HOURS = 0        # 0 = выключено
+
 
 COINS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
@@ -79,7 +84,7 @@ COINS = {
     "ADA": "ADAUSDT", "AVAX": "AVAXUSDT", "LINK": "LINKUSDT",
     "HYPE": "HYPEUSDT", "SUI": "SUIUSDT", "TRX": "TRXUSDT",
     "DOT": "DOTUSDT", "LTC": "LTCUSDT", "BCH": "BCHUSDT",
-    "NEAR": "NEARUSDT", "APT": "APTUSDT",
+    "APT": "APTUSDT",
     "OP": "OPUSDT",
 }
 
@@ -339,6 +344,62 @@ def fvgs_text(fvgs, current_price, limit=4):
     return "\n".join(lines) if lines else "— нет незакрытых зон"
 
 
+# ============================================================
+# COOLDOWN
+# ============================================================
+
+def _recent_result_ms(coin, result_type):
+    """Возвращает timestamp (ms) последнего закрытия по монете с указанным result."""
+    journal = load_journal()
+    latest = None
+    for trade in reversed(journal):
+        if trade.get("coin") != coin:
+            continue
+        if trade.get("result") != result_type:
+            continue
+        closed_ms = trade.get("closed_at_ms")
+        if closed_ms is None:
+            continue
+        if latest is None or closed_ms > latest:
+            latest = closed_ms
+    return latest
+
+
+def coin_in_cooldown(coin):
+    """
+    Проверяет: не в cooldown ли монета после недавнего SL/TP.
+    Возвращает (bool, reason_str) — (True, "SL 4.2h ago") или (False, None).
+    """
+    if not COOLDOWN_AFTER_SL_ENABLED:
+        return False, None
+
+    current_ms = now_ms()
+
+    # SL cooldown
+    if COOLDOWN_AFTER_SL_HOURS > 0:
+        last_sl_ms = _recent_result_ms(coin, "SL")
+        if last_sl_ms is not None:
+            elapsed_h = (current_ms - last_sl_ms) / 3600000
+            if elapsed_h < COOLDOWN_AFTER_SL_HOURS:
+                remaining = COOLDOWN_AFTER_SL_HOURS - elapsed_h
+                return True, f"SL {elapsed_h:.1f}h ago (осталось {remaining:.1f}h)"
+
+    # TP cooldown (опционально)
+    if COOLDOWN_AFTER_TP_HOURS > 0:
+        last_tp_ms = _recent_result_ms(coin, "TP")
+        if last_tp_ms is not None:
+            elapsed_h = (current_ms - last_tp_ms) / 3600000
+            if elapsed_h < COOLDOWN_AFTER_TP_HOURS:
+                remaining = COOLDOWN_AFTER_TP_HOURS - elapsed_h
+                return True, f"TP {elapsed_h:.1f}h ago (осталось {remaining:.1f}h)"
+
+    return False, None
+
+
+# ============================================================
+# ANALYSIS
+# ============================================================
+
 def build_analysis(symbol):
     market = get_market_data(symbol)
     price = market["price"]
@@ -411,6 +472,10 @@ def scan_all():
     return final
 
 
+# ============================================================
+# MESSAGES
+# ============================================================
+
 def dashboard_message(results, chat_id=None):
     ready = swept = confirmed = waiting = 0
     active = len(user_active_trades(chat_id)) if chat_id is not None else 0
@@ -426,6 +491,9 @@ def dashboard_message(results, chat_id=None):
         else:
             waiting += 1
 
+    cooldown_label = "ON" if COOLDOWN_AFTER_SL_ENABLED else "OFF"
+    cd_hours = COOLDOWN_AFTER_SL_HOURS
+
     lines = [
         "🧠 <b>TRADEMIND CONTROL CENTER</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
@@ -438,6 +506,8 @@ def dashboard_message(results, chat_id=None):
         f"⏳ WAIT: <b>{waiting}</b>",
         f"📌 ACTIVE: <b>{active}</b>",
         "",
+        f"❄️ Cooldown: <b>{cooldown_label} {cd_hours}h</b>",
+        "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
         f"💠 Мониторинг: <b>{len(COINS)} монет</b>",
@@ -449,6 +519,10 @@ def dashboard_message(results, chat_id=None):
         if result.get("error"):
             lines.append(f"⚫ <b>{coin}</b> — ERROR")
             continue
+
+        in_cd, cd_reason = coin_in_cooldown(coin)
+        cd_tag = " ❄️" if in_cd else ""
+
         price = format_price(result.get("price"))
         direction = result.get("direction", "NEUTRAL")
         stage = result.get("stage", "WAIT")
@@ -457,7 +531,7 @@ def dashboard_message(results, chat_id=None):
         lines.append(
             f"{stage_icon(stage)} <b>{coin}</b> {price} "
             f"{direction_icon(direction)} {direction} "
-            f"<code>{score}/100</code>{fvg_tag}"
+            f"<code>{score}/100</code>{fvg_tag}{cd_tag}"
         )
 
     trailing_label = "ON" if TRAILING_ENABLED else "OFF"
@@ -467,7 +541,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 7.4</b>",
+        "🧭 <b>СТРАТЕГИЯ 7.6</b>",
         "",
         "Entry = ILM trigger (retest)",
         "SL = structural + ATR floor",
@@ -477,6 +551,7 @@ def dashboard_message(results, chat_id=None):
         "🎯 BOS обязателен",
         f"🎯 Trailing: <b>{trailing_label}</b>",
         f"📈 SHORT: <b>{short_label}</b>",
+        f"❄️ Cooldown after SL: <b>{cd_hours}h</b>",
         "",
         "🔔 Автоуведомление: только READY.",
     ])
@@ -506,7 +581,9 @@ def ready_filter_message(results):
                 and result.get("score", 0) >= MIN_SCORE_READY
                 and result.get("rr") is not None
                 and float(result.get("rr")) >= MIN_RR):
-            ready.append((int(result.get("score", 0)), coin, result))
+            in_cd, cd_reason = coin_in_cooldown(coin)
+            ready.append((int(result.get("score", 0)), coin, result,
+                          in_cd, cd_reason))
 
     if not ready:
         return ("🟢 <b>READY СЕТАПОВ НЕТ</b>\n\n"
@@ -514,9 +591,10 @@ def ready_filter_message(results):
 
     ready.sort(key=lambda x: x[0], reverse=True)
     lines = ["🟢 <b>READY SETUPS</b>", ""]
-    for score, coin, result in ready:
+    for score, coin, result, in_cd, cd_reason in ready:
+        cd_tag = f" ❄️ ({cd_reason})" if in_cd else ""
         lines.extend([
-            f"💠 <b>{coin}</b>",
+            f"💠 <b>{coin}</b>{cd_tag}",
             f"📐 {direction_icon(result.get('direction'))} "
             f"{result.get('direction')}",
             f"⭐ Score: <b>{score}/100</b>",
@@ -719,6 +797,8 @@ def coin_message(coin, result):
     score = result.get("score", 0)
     bos = result.get("bos", False)
 
+    in_cd, cd_reason = coin_in_cooldown(coin)
+
     long_r = result.get("long") or {}
     short_r = result.get("short") or {}
 
@@ -737,6 +817,10 @@ def coin_message(coin, result):
                             f"{other_stage}</b>")
 
     lines = [f"💠 <b>{escape(coin)}</b>", "━━━━━━━━━━━━━━━━━━━━"]
+
+    if in_cd:
+        lines.extend(["", f"❄️ <b>COOLDOWN:</b> {cd_reason}"])
+
     if warning_line:
         lines.extend(["", warning_line])
 
@@ -790,9 +874,18 @@ def coin_message(coin, result):
             f"🎯 TP: <b>{format_price(result.get('tp'))}</b>"
             f"{tp_source_label(result.get('tp_source'))}",
             f"📊 RR: <b>{format_rr(result.get('rr'))}</b>",
-            "",
-            "🟢 <b>СТАВЬ ЛИМИТКУ НА ENTRY</b>",
         ])
+        if in_cd:
+            lines.extend([
+                "",
+                f"❄️ <b>ВХОД ЗАБЛОКИРОВАН COOLDOWN</b>",
+                f"<i>{cd_reason}</i>",
+            ])
+        else:
+            lines.extend([
+                "",
+                "🟢 <b>СТАВЬ ЛИМИТКУ НА ENTRY</b>",
+            ])
 
     secondary = secondary_scenario_text(result)
     if secondary:
@@ -817,9 +910,11 @@ def coin_message(coin, result):
 def coin_keyboard(coin, result, setup=None):
     rows = [[InlineKeyboardButton("📈 График",
                                   callback_data=f"chart_{coin}")]]
-    if result and result.get("stage") == "READY" and setup:
-        rows.append([InlineKeyboardButton(
-            "🟢 Я ЗАШЁЛ", callback_data=f"enter_{setup['id']}")])
+    if (result and result.get("stage") == "READY" and setup):
+        in_cd, _ = coin_in_cooldown(coin)
+        if not in_cd:
+            rows.append([InlineKeyboardButton(
+                "🟢 Я ЗАШЁЛ", callback_data=f"enter_{setup['id']}")])
     rows.extend([
         [InlineKeyboardButton("🔄 Обновить", callback_data=f"coin_{coin}")],
         [InlineKeyboardButton("⬅️ Dashboard", callback_data="dashboard")],
@@ -931,7 +1026,7 @@ def activate_trade(setup, chat_id):
             "trailing_active": False,
             "partial_tp_done": False,
             "partial_tp_price": None,
-            "entry_source": "TradeMind 7.4 ILM trigger",
+            "entry_source": "TradeMind 7.6 ILM trigger",
         }
         active.append(trade)
         save_active_trades(active)
@@ -953,6 +1048,7 @@ def close_trade(trade, exit_price, result_type):
         target["result"] = result_type
         target["exit_price"] = float(exit_price)
         target["closed_at"] = now_iso()
+        target["closed_at_ms"] = now_ms()
         target["pnl_percent"] = calculate_pnl_percent(
             target.get("entry"), exit_price, target.get("direction"))
 
@@ -967,7 +1063,7 @@ def close_trade(trade, exit_price, result_type):
 
 
 def apply_trailing(trade, current_price):
-    """v7.4: BE на +1R → partial TP 50% на +1R → trailing на +1.5R."""
+    """v7.6: BE на +1R → partial TP 50% на +1R → trailing на +1.5R."""
     try:
         entry = float(trade["entry"])
         current_sl = float(trade["sl"])
@@ -1131,6 +1227,11 @@ def trade_close_message(trade):
     if trade.get("trailing_active"):
         extra += "\n🎯 Trailing: <b>ON</b>"
 
+    cd_notice = ""
+    if rt == "SL" and COOLDOWN_AFTER_SL_ENABLED and COOLDOWN_AFTER_SL_HOURS > 0:
+        cd_notice = (f"\n\n❄️ <b>{trade.get('coin')} в cooldown "
+                     f"на {COOLDOWN_AFTER_SL_HOURS}h</b>")
+
     return (
         f"{icon} <b>TRADEMIND — {title}</b>\n\n"
         f"💠 <b>{escape(str(trade.get('coin')))}</b>\n"
@@ -1143,6 +1244,7 @@ def trade_close_message(trade):
         f"📊 RR: <b>{format_rr(trade.get('rr'))}</b>\n"
         f"📈 PnL: <b>{pnl_text}</b>"
         f"{extra}"
+        f"{cd_notice}"
     )
 
 
@@ -1806,6 +1908,9 @@ async def search_cmd(update, context):
                 and result.get("score", 0) >= MIN_SCORE_READY
                 and result.get("rr") is not None
                 and float(result.get("rr")) >= MIN_RR):
+            in_cd, _ = coin_in_cooldown(coin)
+            if in_cd:
+                continue
             setup = save_ready_setup(coin, result)
             if setup:
                 ready_items.append((result.get("score", 0),
@@ -1880,6 +1985,8 @@ async def status_cmd(update, context):
     trailing_label = "ON" if TRAILING_ENABLED else "OFF"
     partial_label = "ON" if PARTIAL_TP_ENABLED else "OFF"
     short_label = "ON" if ALLOW_SHORT else "OFF"
+    cd_label = (f"{COOLDOWN_AFTER_SL_HOURS}h"
+                if COOLDOWN_AFTER_SL_ENABLED else "OFF")
 
     await update.message.reply_text(
         (f"⚙️ <b>TRADEMIND STATUS</b>\n\n"
@@ -1890,7 +1997,7 @@ async def status_cmd(update, context):
          f"Active: <b>{active_count}</b>\n"
          f"Journal: <b>{len(journal)}</b>\n\n"
          "━━━━━━━━━━━━━━━━━━━━\n\n"
-         "🎯 <b>МОДЕЛЬ 7.4</b>\n"
+         "🎯 <b>МОДЕЛЬ 7.6</b>\n"
          "Entry = ILM trigger\n"
          "SL = structural + ATR floor\n"
          "TP = RR 1:2 (fixed)\n\n"
@@ -1901,6 +2008,7 @@ async def status_cmd(update, context):
          "🎯 BOS обязателен\n"
          f"🎯 Trailing: <b>{trailing_label}</b>\n"
          f"💰 Partial TP: <b>{partial_label}</b>\n"
+         f"❄️ Cooldown after SL: <b>{cd_label}</b>\n"
          f"📈 SHORT: <b>{short_label}</b>\n\n"
          "🕐 Работаем 24/7"),
         parse_mode="HTML",
@@ -1958,6 +2066,15 @@ async def monitor(app):
                 except Exception:
                     continue
                 if rr < MIN_RR:
+                    continue
+
+                # === v7.6 Cooldown check ===
+                in_cd, cd_reason = coin_in_cooldown(coin)
+                if in_cd:
+                    print(
+                        f"[SKIP-COOLDOWN] {coin} — {cd_reason}",
+                        flush=True,
+                    )
                     continue
 
                 if BLOCK_CONFLICTING_TRADES:
@@ -2077,6 +2194,9 @@ async def callbacks(update, context):
                     and result.get("score", 0) >= MIN_SCORE_READY
                     and result.get("rr") is not None
                     and float(result.get("rr")) >= MIN_RR):
+                in_cd, _ = coin_in_cooldown(coin)
+                if in_cd:
+                    continue
                 setup = save_ready_setup(coin, result)
                 if setup:
                     ready.append((result.get("score", 0),
@@ -2097,8 +2217,10 @@ async def callbacks(update, context):
             return
         result = await asyncio.to_thread(build_analysis, COINS[coin])
         setup = None
+        in_cd, _ = coin_in_cooldown(coin)
         if (result.get("stage") == "READY"
-                and result.get("score", 0) >= MIN_SCORE_READY):
+                and result.get("score", 0) >= MIN_SCORE_READY
+                and not in_cd):
             setup = save_ready_setup(coin, result)
         text = coin_message(coin, result)
         if not await edit_query(query, text,
@@ -2115,6 +2237,19 @@ async def callbacks(update, context):
             await edit_query(query, "⚠️ <b>СИГНАЛ НЕ НАЙДЕН</b>",
                              dashboard_keyboard())
             return
+
+        coin = setup.get("coin")
+        in_cd, cd_reason = coin_in_cooldown(coin)
+        if in_cd:
+            await edit_query(
+                query,
+                (f"❄️ <b>COOLDOWN</b>\n\n"
+                 f"💠 <b>{coin}</b>\n"
+                 f"<i>{cd_reason}</i>\n\n"
+                 f"Вход заблокирован после недавнего SL."),
+                dashboard_keyboard())
+            return
+
         trade, created = activate_trade(setup, chat_id)
         if not created:
             await edit_query(
@@ -2232,6 +2367,8 @@ async def callbacks(update, context):
         trailing_label = "ON" if TRAILING_ENABLED else "OFF"
         partial_label = "ON" if PARTIAL_TP_ENABLED else "OFF"
         short_label = "ON" if ALLOW_SHORT else "OFF"
+        cd_label = (f"{COOLDOWN_AFTER_SL_HOURS}h"
+                    if COOLDOWN_AFTER_SL_ENABLED else "OFF")
 
         await edit_query(
             query,
@@ -2243,7 +2380,7 @@ async def callbacks(update, context):
              f"Active: <b>{active_count}</b>\n"
              f"Journal: <b>{len(journal)}</b>\n\n"
              "━━━━━━━━━━━━━━━━━━━━\n\n"
-             "🎯 <b>МОДЕЛЬ 7.4</b>\n"
+             "🎯 <b>МОДЕЛЬ 7.6</b>\n"
              "Entry = ILM trigger\n"
              "SL = structural + ATR floor\n"
              "TP = RR 1:2 (fixed)\n\n"
@@ -2254,6 +2391,7 @@ async def callbacks(update, context):
              "🎯 BOS обязателен\n"
              f"🎯 Trailing: <b>{trailing_label}</b>\n"
              f"💰 Partial TP: <b>{partial_label}</b>\n"
+             f"❄️ Cooldown: <b>{cd_label}</b>\n"
              f"📈 SHORT: <b>{short_label}</b>\n\n"
              "🕐 Работаем 24/7"),
             dashboard_keyboard())
@@ -2357,6 +2495,7 @@ def main():
 
     print(f"TradeMind {STRATEGY_VERSION} started (24/7)", flush=True)
     print(f"Monitoring {len(COINS)} coins", flush=True)
+    print(f"Cooldown after SL: {COOLDOWN_AFTER_SL_HOURS}h", flush=True)
 
     application.run_polling()
 
