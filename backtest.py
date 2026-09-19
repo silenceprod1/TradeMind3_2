@@ -1,7 +1,7 @@
 """
-Диагностический бэктест v8.
-- Загружает D1 свечи
-- Передаёт d1_context в analyze (чтобы работал D1 gate)
+Диагностический бэктест v9.
+- BREAKEVEN_TRIGGER_PCT: 2.0 -> 1.0
+- D1 context передаётся в analyze
 - Trailing stop
 """
 
@@ -30,7 +30,7 @@ BT_LOOKBACK_1M = 200
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
-BREAKEVEN_TRIGGER_PCT = 2.0
+BREAKEVEN_TRIGGER_PCT = 1.0
 TRAILING_TRIGGER_PCT = 4.0
 TRAILING_DISTANCE_PCT = 2.0
 
@@ -253,7 +253,6 @@ def run_backtest(symbol, max_hours, use_trailing=False):
             if direction != "NEUTRAL":
                 sweep = detect_sweep(c1h, price, direction, levels)
 
-            # D1 context — критично для D1 gate
             d1_context = None
             if len(cd1) >= 20:
                 try:
@@ -263,9 +262,7 @@ def run_backtest(symbol, max_hours, use_trailing=False):
 
             result = analyze(
                 c1h, c15, c5, price, levels, sweep,
-                candles_1m=c1,
-                d1_context=d1_context,
-                fvgs=[],
+                candles_1m=c1, d1_context=d1_context, fvgs=[],
             )
 
         except Exception as exc:
@@ -337,7 +334,7 @@ def print_report(symbol, trades, diag, use_trailing=False):
     label = "С TRAILING" if use_trailing else "БЕЗ TRAILING"
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v8 — {symbol} ({label})")
+    print(f"ОТЧЁТ БЭКТЕСТА v9 — {symbol} ({label})")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -456,7 +453,7 @@ def run_multi_backtest_with_hours(max_hours, use_trailing=False):
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v8 — {label} — {len(symbols)} монет × 40 дней")
+    print(f"### MULTI BACKTEST v9 — {label} — {len(symbols)} монет × 40 дней")
     print("#" * 70)
 
     all_summary = []
