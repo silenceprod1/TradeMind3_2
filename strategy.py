@@ -1,18 +1,15 @@
 """
-TradeMind 8.2 — strategy.py
+TradeMind 8.3 — strategy.py
 
-Изменения vs 8.1:
-- ОТКАТ confirmation_15m к v7.6 (local highs, не структурный BOS)
-- ОТКАТ detect_5m_ilm к v7.6 (без tc > sweep_level)
-- MIN_SWEEP_DEPTH_PCT: 0.40 -> 0.25 (компромисс)
-- ATR scaling SL сохранён
-- Всё остальное как v7.6 (baseline: WR 22.5%, PnL +17.41%)
+Изменения vs 8.2:
+- MIN_SWEEP_DEPTH_PCT: 0.25 -> 0.15 (возврат к v7.6)
+- Всё остальное — как v8.2 (ATR scaling SL сохранён)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "8.2"
+STRATEGY_VERSION = "8.3"
 
 ALLOW_SHORT = True
 
@@ -23,7 +20,7 @@ STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
 
-MIN_SWEEP_DEPTH_PCT = 0.25
+MIN_SWEEP_DEPTH_PCT = 0.15
 MAX_SWEEP_AGE_1H = 24
 
 USE_ATR_SCALING = True
@@ -455,7 +452,6 @@ def _is_local_low_15m(c, i):
 
 
 def confirmation_15m(candles_15m, sweep, direction):
-    """v8.2: откат к v7.6 — local highs, не структурный BOS."""
     if not sweep or direction not in {"LONG", "SHORT"} or not candles_15m:
         return False, None, None, False
 
@@ -543,7 +539,6 @@ def _is_local_low(c, i):
 
 
 def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
-    """v8.2: откат — убрана проверка tc > sweep_level."""
     m = candles[i]
     if not _is_local_low(candles, i):
         return None
@@ -617,7 +612,6 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
 
 
 def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
-    """v8.2: откат — убрана проверка tc < sweep_level."""
     m = candles[i]
     if not _is_local_high(candles, i):
         return None
