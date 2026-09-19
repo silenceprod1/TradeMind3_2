@@ -56,7 +56,7 @@ BACKTEST_SYMBOL = "SOLUSDT"
 BACKTEST_MULTI = True
 BACKTEST_MAX_HOURS = 24
 
-# === v7.6 Position Management (R-based) ===
+# === v8.3 Position Management (R-based) ===
 TRAILING_ENABLED = True
 BREAKEVEN_TRIGGER_R = 1.0
 PARTIAL_TP_ENABLED = True
@@ -65,27 +65,26 @@ PARTIAL_TP_PERCENT = 50
 TRAILING_TRIGGER_R = 1.5
 TRAILING_DISTANCE_R = 1.0
 
-# Legacy (не используется)
 BREAKEVEN_TRIGGER_PCT = 1.0
 TRAILING_TRIGGER_PCT = 4.0
 TRAILING_DISTANCE_PCT = 2.0
 
 BLOCK_CONFLICTING_TRADES = True
 
-# === v7.6 Cooldown after SL ===
+# === Cooldown after SL ===
 COOLDOWN_AFTER_SL_ENABLED = True
 COOLDOWN_AFTER_SL_HOURS = 6
-COOLDOWN_AFTER_TP_HOURS = 0        # 0 = выключено
+COOLDOWN_AFTER_TP_HOURS = 0
 
 
 COINS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
-    "BNB": "BNBUSDT",
-    "ADA": "ADAUSDT", "AVAX": "AVAXUSDT", "LINK": "LINKUSDT",
-    "HYPE": "HYPEUSDT", "SUI": "SUIUSDT", "TRX": "TRXUSDT",
-    "DOT": "DOTUSDT", "LTC": "LTCUSDT", "BCH": "BCHUSDT",
-    "APT": "APTUSDT",
-    "OP": "OPUSDT",
+    "BNB": "BNBUSDT", "XRP": "XRPUSDT", "ADA": "ADAUSDT",
+    "AVAX": "AVAXUSDT", "LINK": "LINKUSDT", "DOT": "DOTUSDT",
+    "LTC": "LTCUSDT", "BCH": "BCHUSDT", "TRX": "TRXUSDT",
+    "APT": "APTUSDT", "SUI": "SUIUSDT", "HYPE": "HYPEUSDT",
+    "OP": "OPUSDT", "ARB": "ARBUSDT", "INJ": "INJUSDT",
+    "TIA": "TIAUSDT", "SEI": "SEIUSDT", "ATOM": "ATOMUSDT",
 }
 
 
@@ -349,7 +348,6 @@ def fvgs_text(fvgs, current_price, limit=4):
 # ============================================================
 
 def _recent_result_ms(coin, result_type):
-    """Возвращает timestamp (ms) последнего закрытия по монете с указанным result."""
     journal = load_journal()
     latest = None
     for trade in reversed(journal):
@@ -366,16 +364,11 @@ def _recent_result_ms(coin, result_type):
 
 
 def coin_in_cooldown(coin):
-    """
-    Проверяет: не в cooldown ли монета после недавнего SL/TP.
-    Возвращает (bool, reason_str) — (True, "SL 4.2h ago") или (False, None).
-    """
     if not COOLDOWN_AFTER_SL_ENABLED:
         return False, None
 
     current_ms = now_ms()
 
-    # SL cooldown
     if COOLDOWN_AFTER_SL_HOURS > 0:
         last_sl_ms = _recent_result_ms(coin, "SL")
         if last_sl_ms is not None:
@@ -384,7 +377,6 @@ def coin_in_cooldown(coin):
                 remaining = COOLDOWN_AFTER_SL_HOURS - elapsed_h
                 return True, f"SL {elapsed_h:.1f}h ago (осталось {remaining:.1f}h)"
 
-    # TP cooldown (опционально)
     if COOLDOWN_AFTER_TP_HOURS > 0:
         last_tp_ms = _recent_result_ms(coin, "TP")
         if last_tp_ms is not None:
@@ -541,10 +533,10 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 7.6</b>",
+        "🧭 <b>СТРАТЕГИЯ 8.3</b>",
         "",
         "Entry = ILM trigger (retest)",
-        "SL = structural + ATR floor",
+        "SL = ATR scaling + structural",
         "TP = RR 1:2 (fixed)",
         "",
         "⚡ Trend ≥ 0.40",
@@ -1026,7 +1018,7 @@ def activate_trade(setup, chat_id):
             "trailing_active": False,
             "partial_tp_done": False,
             "partial_tp_price": None,
-            "entry_source": "TradeMind 7.6 ILM trigger",
+            "entry_source": "TradeMind 8.3 ILM trigger",
         }
         active.append(trade)
         save_active_trades(active)
@@ -1063,7 +1055,6 @@ def close_trade(trade, exit_price, result_type):
 
 
 def apply_trailing(trade, current_price):
-    """v7.6: BE на +1R → partial TP 50% на +1R → trailing на +1.5R."""
     try:
         entry = float(trade["entry"])
         current_sl = float(trade["sl"])
@@ -1997,9 +1988,9 @@ async def status_cmd(update, context):
          f"Active: <b>{active_count}</b>\n"
          f"Journal: <b>{len(journal)}</b>\n\n"
          "━━━━━━━━━━━━━━━━━━━━\n\n"
-         "🎯 <b>МОДЕЛЬ 7.6</b>\n"
+         "🎯 <b>МОДЕЛЬ 8.3</b>\n"
          "Entry = ILM trigger\n"
-         "SL = structural + ATR floor\n"
+         "SL = ATR scaling + structural\n"
          "TP = RR 1:2 (fixed)\n\n"
          "📅 D1 context\n"
          "💧 1H Major + 15M + ROUND + FRESH\n"
@@ -2068,7 +2059,6 @@ async def monitor(app):
                 if rr < MIN_RR:
                     continue
 
-                # === v7.6 Cooldown check ===
                 in_cd, cd_reason = coin_in_cooldown(coin)
                 if in_cd:
                     print(
@@ -2380,9 +2370,9 @@ async def callbacks(update, context):
              f"Active: <b>{active_count}</b>\n"
              f"Journal: <b>{len(journal)}</b>\n\n"
              "━━━━━━━━━━━━━━━━━━━━\n\n"
-             "🎯 <b>МОДЕЛЬ 7.6</b>\n"
+             "🎯 <b>МОДЕЛЬ 8.3</b>\n"
              "Entry = ILM trigger\n"
-             "SL = structural + ATR floor\n"
+             "SL = ATR scaling + structural\n"
              "TP = RR 1:2 (fixed)\n\n"
              "📅 D1 context\n"
              "💧 1H Major + 15M + ROUND + FRESH\n"
@@ -2412,7 +2402,7 @@ async def post_init(application):
             import backtest
 
             if BACKTEST_MULTI:
-                print(">>> BACKTEST 40d (v9.1 full) <<<", flush=True)
+                print(">>> BACKTEST 40d (v9.3 full) <<<", flush=True)
                 backtest.run_multi_backtest_with_hours(
                     BACKTEST_MAX_HOURS,
                     use_breakeven=True,
