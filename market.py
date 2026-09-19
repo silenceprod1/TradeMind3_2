@@ -1,11 +1,11 @@
 # ============================================================
-# TradeMind 7.7
+# TradeMind 7.8
 # market.py
 #
-# Изменения:
-# - LOOKBACK увеличены (500 / 500 / 500 / 200)
-# - Добавлена get_klines_history() с пагинацией
-# - Убраны XRP и ARB из COINS (плохая статистика в бэктесте)
+# Изменения vs 7.7:
+# - MARKET_VERSION: 7.7 -> 7.8
+# - Добавлены _volume_strength и _impulse_strength
+# - calculate_strength учитывает объём и импульс свечи-свинга
 # ============================================================
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
-MARKET_VERSION = "7.7"
+MARKET_VERSION = "7.8"
 
 BASE_URL = "https://api.binance.com/api/v3"
 REQUEST_TIMEOUT = 10
@@ -117,7 +117,7 @@ def _get_session():
     if session is None:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "TradeMind/7.7",
+            "User-Agent": "TradeMind/7.8",
             "Accept": "application/json",
         })
         adapter = requests.adapters.HTTPAdapter(
@@ -280,6 +280,13 @@ def candle_range(c): return max(candle_high(c) - candle_low(c), 1e-12)
 def body_ratio(c): return candle_body(c) / candle_range(c)
 def is_bullish(c): return candle_close(c) > candle_open(c)
 def is_bearish(c): return candle_close(c) < candle_open(c)
+
+
+def candle_volume(c):
+    try:
+        return float(c.get("volume", 0))
+    except Exception:
+        return 0.0
 
 
 def distance_pct(a, b):
@@ -506,6 +513,10 @@ def cluster_levels(levels):
     return result
 
 
+# ============================================================
+# FRESHNESS
+# ============================================================
+
 def freshness_score(level, candles, max_age):
     last_index = int(level.get("last_index", 0))
     age = len(candles) - 1 - last_index
@@ -549,14 +560,96 @@ def level_has_been_swept(level_price, level_type, candles, lookback):
     return False
 
 
+# ============================================================
+# VOLUME / IMPULSE STRENGTH
+# ============================================================
+
+def _volume_strength(candles, index, lookback=20):
+    """
+    0..1 — насколько объём свечи выше среднего за lookback.
+    """
+    if index < 0 or index >= len(candles):
+        return 0.0
+
+    current = candle_volume(candles[index])
+    if current <= 0:
+        return 0.0
+
+    start = max(0, index - lookback)
+    volumes = [
+        candle_volume(candles[i])
+        for i in range(start, index)
+    ]
+    volumes = [v for v in volumes if v > 0]
+
+    if not volumes:
+        return 0.0
+
+    avg = sum(volumes) / len(volumes)
+    if avg <= 0:
+        return 0.0
+
+    ratio = current / avg
+
+    if ratio >= 2.0: return 1.0
+    if ratio >= 1.5: return 0.75
+    if ratio >= 1.2: return 0.50
+    if ratio >= 1.0: return 0.25
+    return 0.0
+
+
+def _impulse_strength(candles, index):
+    """
+    0..1 — насколько свеча шире соседних.
+    """
+    if index < 0 or index >= len(candles):
+        return 0.0
+
+    start = max(0, index - 3)
+    end = min(len(candles), index + 4)
+
+    ranges = [
+        candle_range(candles[i])
+        for i in range(start, end)
+    ]
+    ranges = [r for r in ranges if r > 0]
+
+    if not ranges:
+        return 0.0
+
+    center_range = candle_range(candles[index])
+    if center_range <= 0:
+        return 0.0
+
+    avg = sum(ranges) / len(ranges)
+    if avg <= 0:
+        return 0.0
+
+    ratio = center_range / avg
+
+    if ratio >= 2.0: return 1.0
+    if ratio >= 1.5: return 0.75
+    if ratio >= 1.2: return 0.50
+    if ratio >= 1.0: return 0.25
+    return 0.0
+
+
 def calculate_strength(level, candles, candles_15m, max_age, base=40.0):
     score = base
+
     touches = int(level.get("touches", 1))
     if touches >= 2: score += 10
     if touches >= 3: score += 8
     if touches >= 4: score += 6
 
     score += freshness_score(level, candles, max_age)
+
+    last_idx = int(level.get("last_index", 0))
+    if 0 <= last_idx < len(candles):
+        vol = _volume_strength(candles, last_idx)
+        imp = _impulse_strength(candles, last_idx)
+        score += vol * 10.0
+        score += imp * 10.0
 
     local_touches = count_local_touches(level["price"], candles_15m)
     if local_touches >= 2: score += 5
