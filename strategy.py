@@ -1,21 +1,21 @@
 """
-TradeMind 7.2
+TradeMind 7.3
 
-Изменения vs 7.1:
-- ALLOW_SHORT = True (SHORT вернули)
-- MIN_SCORE_READY: 80 -> 88
-- REQUIRE_BOS_FOR_READY = True (BOS обязателен для READY)
-- MIN_TREND_ACTIVITY_READY: 0.45 -> 0.55
+Изменения vs 7.2:
+- MIN_TREND_ACTIVITY_READY: 0.55 -> 0.40 (было отрезало лучшие сетапы)
+- MIN_SCORE_READY: 88 -> 85
+- BOS обязателен (как в 7.2)
+- SHORT включён
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "7.2"
+STRATEGY_VERSION = "7.3"
 
 ALLOW_SHORT = True
 
-MIN_SCORE_READY = 88
+MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
 SL_BUFFER_PCT = 0.15
 STRUCTURAL_SL_LOOKBACK_15M = 30
@@ -32,7 +32,7 @@ MAX_ILM_AGE_CANDLES_5M = 36
 MIN_5M_RECOVERY_RATIO = 0.20
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 3.0
 
-MIN_TREND_ACTIVITY_READY = 0.55
+MIN_TREND_ACTIVITY_READY = 0.40
 COUNTER_TREND_MIN_SCORE = 92
 
 FVG_TOLERANCE_PCT = 0.10
