@@ -1,20 +1,17 @@
 """
-TradeMind 7.4 — strategy.py
+TradeMind 7.5 — strategy.py
 
-Изменения vs 7.3:
-- ATR-based минимальная дистанция SL
-- Sweep extreme как anchor для SL
-- 1H свинги учитываются для структурного SL
-- Volatility filter (ATR spike)
-- Жёстче триггер 5M (MIN_BODY_RATIO_TRIGGER_5M = 0.50)
-- Debug-поля: sl_distance_pct, atr_15m, sl_source
-- v7.4.1: MAX_SL_DISTANCE_PCT 3.0->2.0, MIN_SL_ATR_MULT 1.2->1.0
+Изменения vs 7.4:
+- Откат SL-дистанции: MIN_SL_ATR_MULT 1.0->1.2, MAX_SL_DISTANCE_PCT 2.0->3.0
+- Volume Confirmation: sweep-свеча должна быть на объёме выше среднего
+  (VOLUME_CONFIRMATION_MULT = 1.2)
+- Отсеивает "тонкие" sweep без реального давления
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "7.4"
+STRATEGY_VERSION = "7.5"
 
 ALLOW_SHORT = True
 
@@ -25,15 +22,20 @@ STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
 
-# === v7.4 SL OPTIMIZATION ===
+# === v7.5 SL OPTIMIZATION (откат к 7.4) ===
 SL_USE_1H_SWINGS = True
 SL_USE_SWEEP_EXTREME = True
 MIN_SL_DISTANCE_PCT = 0.35
-MIN_SL_ATR_MULT = 1.0
-MAX_SL_DISTANCE_PCT = 2.0
+MIN_SL_ATR_MULT = 1.2
+MAX_SL_DISTANCE_PCT = 3.0
 MIN_BODY_RATIO_TRIGGER_5M = 0.50
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = True
+
+# === v7.5 VOLUME CONFIRMATION ===
+VOLUME_CONFIRMATION_ENABLED = True
+VOLUME_CONFIRMATION_MULT = 1.2
+VOLUME_CONFIRMATION_LOOKBACK = 20
 
 MIN_SWEEP_DEPTH_PCT = 0.15
 MAX_SWEEP_AGE_1H = 24
@@ -67,7 +69,8 @@ def _v(candle, key, default=None):
     value = candle.get(key)
     if value is None:
         aliases = {"open": "o", "high": "h", "low": "l",
-                   "close": "c", "open_time": "time"}
+                   "close": "c", "open_time": "time",
+                   "volume": "v"}
         alias = aliases.get(key)
         if alias:
             value = candle.get(alias)
@@ -82,6 +85,7 @@ def _h(c): return _v(c, "high")
 def _l(c): return _v(c, "low")
 def _c(c): return _v(c, "close")
 def _t(c): return _v(c, "open_time")
+def _vol(c): return _v(c, "volume") or 0.0
 
 
 def _body(c):
@@ -142,6 +146,35 @@ def _avg_atr(candles, fast=14, slow=50):
     fast_val = calculate_atr(candles, fast)
     slow_val = calculate_atr(candles, slow)
     return fast_val, slow_val
+
+
+def _has_volume_confirmation(candles_1h, candle_index,
+                             lookback=VOLUME_CONFIRMATION_LOOKBACK,
+                             mult=VOLUME_CONFIRMATION_MULT):
+    """
+    Проверяет что объём sweep-свечи выше среднего за lookback.
+    Если истории мало — не блокируем.
+    """
+    if not candles_1h or candle_index < 0 or candle_index >= len(candles_1h):
+        return True
+    if candle_index < lookback:
+        return True
+
+    start = candle_index - lookback
+    vols = [_vol(candles_1h[i]) for i in range(start, candle_index)]
+    vols = [v for v in vols if v > 0]
+    if not vols:
+        return True
+
+    avg = sum(vols) / len(vols)
+    if avg <= 0:
+        return True
+
+    current = _vol(candles_1h[candle_index])
+    if current <= 0:
+        return True
+
+    return current >= avg * mult
 
 
 def measure_trend_activity(candles_1h, direction):
@@ -339,8 +372,17 @@ def find_sweep(candles_1h, major_levels, direction):
 
     recent = candles_1h[-MAX_SWEEP_AGE_1H:]
     candidates = []
+    total_candles = len(candles_1h)
 
     for idx, candle in enumerate(reversed(recent)):
+        # Оригинальный индекс в candles_1h
+        candle_idx_1h = total_candles - 1 - idx
+
+        # v7.5 Volume Confirmation
+        if VOLUME_CONFIRMATION_ENABLED:
+            if not _has_volume_confirmation(candles_1h, candle_idx_1h):
+                continue
+
         for level in levels:
             if _is_swept_level(level):
                 continue
@@ -1281,6 +1323,8 @@ __all__ = [
     "REQUIRE_BOS_FOR_READY",
     "FIXED_RR",
     "SL_BUFFER_PCT",
+    "VOLUME_CONFIRMATION_ENABLED",
+    "VOLUME_CONFIRMATION_MULT",
     "calculate_atr",
     "get_1h_direction",
     "get_higher_timeframe_direction",
