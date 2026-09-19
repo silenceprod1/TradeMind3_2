@@ -50,11 +50,13 @@ MIN_RR = 2.0
 
 SCAN_CACHE_TTL = 5.0
 
-RUN_BACKTEST_ON_START = True
+RUN_BACKTEST_ON_START = False
 BACKTEST_SYMBOL = "SOLUSDT"
 BACKTEST_MULTI = True
 BACKTEST_MAX_HOURS = 24
 
+# Trailing отключён (в бэктесте ухудшал результат)
+TRAILING_ENABLED = False
 BREAKEVEN_TRIGGER_PCT = 1.0
 TRAILING_TRIGGER_PCT = 4.0
 TRAILING_DISTANCE_PCT = 2.0
@@ -62,7 +64,7 @@ TRAILING_DISTANCE_PCT = 2.0
 
 COINS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
-    "BNB": "BNBUSDT", "DOGE": "DOGEUSDT",
+    "BNB": "BNBUSDT",
     "ADA": "ADAUSDT", "AVAX": "AVAXUSDT", "LINK": "LINKUSDT",
     "HYPE": "HYPEUSDT", "SUI": "SUIUSDT", "TRX": "TRXUSDT",
     "DOT": "DOTUSDT", "LTC": "LTCUSDT", "BCH": "BCHUSDT",
@@ -436,6 +438,8 @@ def dashboard_message(results, chat_id=None):
             f"<code>{score}/100</code>{fvg_tag}"
         )
 
+    trailing_label = "ON" if TRAILING_ENABLED else "OFF"
+
     lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -444,11 +448,11 @@ def dashboard_message(results, chat_id=None):
         "",
         "Entry = ILM trigger (retest)",
         "SL = structural 15M swing",
-        "TP = RR 1:2 (фиксировано)",
+        "TP = RR 1:2 (fixed)",
         "",
         "⚡ Trend ≥ 0.45",
         "🎯 BOS на 15M",
-        "🎯 Trailing +1% / +4%",
+        f"🎯 Trailing: <b>{trailing_label}</b>",
         "",
         "🔔 Автоуведомление: только READY.",
     ])
@@ -711,7 +715,7 @@ def coin_message(coin, result):
     if warning_line:
         lines.extend(["", warning_line])
 
-    bos_tag = " ✅" if bos else ""
+    bos_tag = " ✅" if bos else " —"
 
     lines.extend([
         "",
@@ -719,7 +723,7 @@ def coin_message(coin, result):
         f"📐 1H: <b>{direction_icon(direction)} {direction}</b>",
         f"📅 D1: <b>{direction_icon(d1_trend)} {d1_trend}</b>",
         f"⚡ Trend activity: <b>{trend_activity:.2f}</b>",
-        f"🎯 BOS: <b>{bos_tag if bos else '—'}</b>",
+        f"🎯 BOS: <b>{bos_tag}</b>",
         f"⭐ Score: <b>{score}/100</b>"
         + (f" <i>(+{fvg_bonus} FVG)</i>" if fvg_bonus else ""),
         "",
@@ -762,7 +766,6 @@ def coin_message(coin, result):
             f"📊 RR: <b>{format_rr(result.get('rr'))}</b>",
             "",
             "🟢 <b>СТАВЬ ЛИМИТКУ НА ENTRY</b>",
-            "🎯 Trailing: +1% → БУ, +4% → тянуть",
         ])
 
     secondary = secondary_scenario_text(result)
@@ -1073,10 +1076,6 @@ def trade_close_message(trade):
     pnl = trade.get("pnl_percent")
     pnl_text = f"{float(pnl):+.2f}%" if pnl is not None else "N/A"
 
-    trailing_tag = ""
-    if trade.get("trailing_active"):
-        trailing_tag = "\n🎯 Trailing был активен"
-
     return (
         f"{icon} <b>TRADEMIND — {title}</b>\n\n"
         f"💠 <b>{escape(str(trade.get('coin')))}</b>\n"
@@ -1087,7 +1086,7 @@ def trade_close_message(trade):
         f"TP: <b>{format_price(trade.get('tp'))}</b>"
         f"{tp_source_label(trade.get('tp_source'))}\n\n"
         f"📊 RR: <b>{format_rr(trade.get('rr'))}</b>\n"
-        f"📈 PnL: <b>{pnl_text}</b>{trailing_tag}"
+        f"📈 PnL: <b>{pnl_text}</b>"
     )
 
 
@@ -1147,7 +1146,8 @@ async def monitor_active_trades(app, results):
         check = check_trade_price(trade, previous_price, current_price)
 
         if check is None:
-            apply_trailing(trade, current_price)
+            if TRAILING_ENABLED:
+                apply_trailing(trade, current_price)
 
             trade["last_price"] = current_price
             trade["last_check_ms"] = current_check_ms
@@ -1159,7 +1159,8 @@ async def monitor_active_trades(app, results):
                 trade, result.get("candles_1m", []),
                 previous_check_ms, current_check_ms)
             if resolved == "NO_DATA":
-                apply_trailing(trade, current_price)
+                if TRAILING_ENABLED:
+                    apply_trailing(trade, current_price)
                 trade["last_price"] = current_price
                 trade["last_check_ms"] = current_check_ms
                 continue
@@ -1221,10 +1222,8 @@ def active_message(chat_id):
         pnl = calculate_pnl_percent(entry, curr, d)
         pnl_text = f"{pnl:+.2f}%" if pnl is not None else "N/A"
 
-        trailing_icon = " 🎯" if trade.get("trailing_active") else ""
-
         lines.extend([
-            f"💠 <b>{escape(str(coin))}</b>{trailing_icon}",
+            f"💠 <b>{escape(str(coin))}</b>",
             f"📐 {direction_icon(d)} <b>{d}</b>", "",
             f"💰 Entry: <b>{format_price(entry)}</b>",
             f"📍 Price: <b>{format_price(curr)}</b>",
@@ -1268,8 +1267,6 @@ def journal_message(chat_id):
                   if x.get("pnl_percent") is not None]
     total_pnl = sum(pnl_values)
 
-    trailing_count = sum(1 for x in journal if x.get("trailing_active"))
-
     lines = [
         "📒 <b>TRADEMIND JOURNAL</b>", "",
         "━━━━━━━━━━━━━━━━━━━━", "",
@@ -1277,7 +1274,6 @@ def journal_message(chat_id):
         f"✅ TP: <b>{tp}</b>",
         f"❌ SL: <b>{sl}</b>",
         f"⚪ Ambiguous: <b>{ambiguous}</b>",
-        f"🎯 С trailing: <b>{trailing_count}</b>",
         f"🎯 Win rate: <b>{win_rate:.1f}%</b>",
         f"📈 Sum PnL: <b>{total_pnl:+.2f}%</b>",
         "", "━━━━━━━━━━━━━━━━━━━━", "",
@@ -1289,10 +1285,9 @@ def journal_message(chat_id):
         icon = {"TP": "✅", "SL": "❌", "AMBIGUOUS": "⚪"}.get(rt, "❔")
         pnl = trade.get("pnl_percent")
         pnl_text = f"{float(pnl):+.2f}%" if pnl is not None else "N/A"
-        t_icon = " 🎯" if trade.get("trailing_active") else ""
         lines.append(
             f"{icon} <b>{escape(str(trade.get('coin')))}</b> "
-            f"{trade.get('direction')} • {rt} • {pnl_text}{t_icon}")
+            f"{trade.get('direction')} • {rt} • {pnl_text}")
     return "\n".join(lines)
 
 
@@ -1307,7 +1302,7 @@ def journal_keyboard():
 def ready_message(coin, result, setup):
     fvg_bonus = setup.get("fvg_bonus", 0)
     fvg_tag = f"\n⚡ FVG bonus: <b>+{fvg_bonus}</b>" if fvg_bonus else ""
-    bos_tag = " ✅" if result.get("bos") else ""
+    bos_tag = " ✅" if result.get("bos") else " —"
 
     return (
         "🚨 <b>TRADEMIND — READY</b>\n\n"
@@ -1316,7 +1311,7 @@ def ready_message(coin, result, setup):
         f"<b>{result.get('direction')}</b>\n"
         f"⭐ Score: <b>{result.get('score', 0)}/100</b>{fvg_tag}\n"
         f"📅 D1: <b>{result.get('d1_trend', 'NEUTRAL')}</b>\n"
-        f"🎯 BOS: <b>{bos_tag if bos_tag else '—'}</b>\n\n"
+        f"🎯 BOS: <b>{bos_tag}</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "💰 <b>ТОЧКА ВХОДА (лимит)</b>\n\n"
         f"Entry: <b>{format_price(setup.get('entry'))}</b>\n"
@@ -1326,7 +1321,6 @@ def ready_message(coin, result, setup):
         f"RR: <b>{format_rr(setup.get('rr'))}</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🟢 <b>СТАВЬ ЛИМИТКУ НА ENTRY</b>\n\n"
-        "🎯 Trailing: +1% → безубыток, +4% → тянуть\n\n"
         "Если зашёл — нажми «🟢 Я ЗАШЁЛ»."
     )
 
@@ -1816,6 +1810,8 @@ async def status_cmd(update, context):
     active_count = len([x for x in active if x.get("status") == "OPEN"])
     journal = load_journal()
 
+    trailing_label = "ON" if TRAILING_ENABLED else "OFF"
+
     await update.message.reply_text(
         (f"⚙️ <b>TRADEMIND STATUS</b>\n\n"
          f"Version: <b>{escape(str(STRATEGY_VERSION))}</b>\n"
@@ -1833,8 +1829,7 @@ async def status_cmd(update, context):
          "💧 1H Major + 15M + ROUND + FRESH\n"
          "💠 FVG\n"
          "🎯 BOS на 15M\n"
-         "📊 RR всегда 1:2\n"
-         "🎯 Trailing +1% / +4%\n\n"
+         f"🎯 Trailing: <b>{trailing_label}</b>\n\n"
          "🕐 Работаем 24/7"),
         parse_mode="HTML",
         reply_markup=dashboard_keyboard())
@@ -2026,7 +2021,7 @@ async def callbacks(update, context):
              f"TP: <b>{format_price(trade.get('tp'))}</b>\n"
              f"RR: <b>{format_rr(trade.get('rr'))}</b>\n\n"
              "📌 Snapshot сохранён.\n"
-             "🎯 Trailing активируется при +1%"),
+             "🎯 Следим до TP или SL"),
             active_keyboard(chat_id))
         return
 
@@ -2114,6 +2109,9 @@ async def callbacks(update, context):
         active = load_active_trades()
         active_count = len([x for x in active if x.get("status") == "OPEN"])
         journal = load_journal()
+
+        trailing_label = "ON" if TRAILING_ENABLED else "OFF"
+
         await edit_query(
             query,
             (f"⚙️ <b>TRADEMIND STATUS</b>\n\n"
@@ -2132,8 +2130,7 @@ async def callbacks(update, context):
              "💧 1H Major + 15M + ROUND + FRESH\n"
              "💠 FVG\n"
              "🎯 BOS на 15M\n"
-             "📊 RR всегда 1:2\n"
-             "🎯 Trailing +1% / +4%\n\n"
+             f"🎯 Trailing: <b>{trailing_label}</b>\n\n"
              "🕐 Работаем 24/7"),
             dashboard_keyboard())
         return
