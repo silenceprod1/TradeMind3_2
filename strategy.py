@@ -8,6 +8,7 @@ TradeMind 7.4 — strategy.py
 - Volatility filter (ATR spike)
 - Жёстче триггер 5M (MIN_BODY_RATIO_TRIGGER_5M = 0.50)
 - Debug-поля: sl_distance_pct, atr_15m, sl_source
+- v7.4.1: MAX_SL_DISTANCE_PCT 3.0->2.0, MIN_SL_ATR_MULT 1.2->1.0
 """
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,8 +29,8 @@ FIXED_RR = 2.0
 SL_USE_1H_SWINGS = True
 SL_USE_SWEEP_EXTREME = True
 MIN_SL_DISTANCE_PCT = 0.35
-MIN_SL_ATR_MULT = 1.2
-MAX_SL_DISTANCE_PCT = 3.0
+MIN_SL_ATR_MULT = 1.0
+MAX_SL_DISTANCE_PCT = 2.0
 MIN_BODY_RATIO_TRIGGER_5M = 0.50
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = True
@@ -118,10 +119,6 @@ def _distance_pct(a, b):
         return None
     return abs(a - b) / abs(b) * 100
 
-
-# ============================================================
-# ATR / VOLATILITY
-# ============================================================
 
 def calculate_atr(candles, period=14):
     if not candles or len(candles) < period + 1:
@@ -693,10 +690,6 @@ def calculate_entry(ilm, current_price, direction):
     return trigger
 
 
-# ============================================================
-# STRUCTURAL SL v7.4
-# ============================================================
-
 def find_structural_stop_level(candles_15m, direction, entry,
                                 ilm_extreme, sweep_extreme=None,
                                 candles_1h=None):
@@ -914,7 +907,6 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
         "fvg_bonus": 0,
         "fvg_sweep": False,
         "fvg_entry": False,
-        # v7.4 debug
         "sl_distance_pct": None,
         "atr_15m": None,
         "sl_source": None,
@@ -1000,7 +992,6 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
 
     ilm_extreme = _f(ilm.get("extreme"))
 
-    # === v7.4 volatility filter ===
     if ENABLE_VOLATILITY_FILTER:
         atr_fast, atr_slow = _avg_atr(candles_15m, fast=14, slow=50)
         if (atr_fast is not None and atr_slow is not None
@@ -1054,7 +1045,6 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
         "tp_reason": f"Fixed RR 1:{FIXED_RR}",
     })
 
-    # v7.4 debug
     try:
         result["sl_distance_pct"] = round(abs(entry - sl) / entry * 100, 3)
         result["atr_15m"] = round(atr_15m, 6) if atr_15m else None
