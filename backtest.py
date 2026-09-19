@@ -34,7 +34,6 @@ BT_LOOKBACK_1M = 200
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
-# === v9.1: R-based position management (синхрон с bot.py) ===
 BREAKEVEN_TRIGGER_R = 1.0
 PARTIAL_TP_ENABLED = True
 PARTIAL_TP_TRIGGER_R = 1.0
@@ -133,7 +132,6 @@ def classify_reason(result, market_info):
 def simulate_trade(trade, candles_5m, start_ts, max_hours,
                    use_breakeven=False, use_partial_tp=False,
                    use_trailing=False):
-    """R-based симуляция. Возвращает result, exit, ts, held, pnl, partial_hit."""
     direction = trade["direction"]
     entry = float(trade["entry"])
     sl_initial = float(trade["sl"])
@@ -170,21 +168,25 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours,
             hit_tp = low <= tp
             hit_sl = high >= current_sl
 
-        # Консервативно: если оба — считаем SL
         if hit_sl and hit_tp:
             final_pnl = blended_pnl(entry, current_sl, direction,
-                                    partial_done, partial_exit, PARTIAL_TP_PERCENT)
-            return ("SL", current_sl, c["open_time"], held, final_pnl, partial_done)
+                                    partial_done, partial_exit,
+                                    PARTIAL_TP_PERCENT)
+            return ("SL", current_sl, c["open_time"], held,
+                    final_pnl, partial_done)
         if hit_sl:
             final_pnl = blended_pnl(entry, current_sl, direction,
-                                    partial_done, partial_exit, PARTIAL_TP_PERCENT)
-            return ("SL", current_sl, c["open_time"], held, final_pnl, partial_done)
+                                    partial_done, partial_exit,
+                                    PARTIAL_TP_PERCENT)
+            return ("SL", current_sl, c["open_time"], held,
+                    final_pnl, partial_done)
         if hit_tp:
             final_pnl = blended_pnl(entry, tp, direction,
-                                    partial_done, partial_exit, PARTIAL_TP_PERCENT)
-            return ("TP", tp, c["open_time"], held, final_pnl, partial_done)
+                                    partial_done, partial_exit,
+                                    PARTIAL_TP_PERCENT)
+            return ("TP", tp, c["open_time"], held,
+                    final_pnl, partial_done)
 
-        # Обновление состояния
         if direction == "LONG":
             if high > best_price:
                 best_price = high
@@ -222,7 +224,8 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours,
     if last_seen is not None:
         exit_price = last_seen["close"]
         final_pnl = blended_pnl(entry, exit_price, direction,
-                                partial_done, partial_exit, PARTIAL_TP_PERCENT)
+                                partial_done, partial_exit,
+                                PARTIAL_TP_PERCENT)
         return ("TIMEOUT", exit_price, last_seen["open_time"], held,
                 final_pnl, partial_done)
 
@@ -374,7 +377,7 @@ def run_backtest(symbol, max_hours,
         log(f"[{i:4}] {trade['direction']:5} "
             f"entry={entry:.4f} sl={sl:.4f} tp={tp:.4f} "
             f"rr={trade['rr']:.2f} score={score} "
-            f"{partial_tag} → {res_type:7} pnl={trade['pnl']:+.2f}%")
+            f"{partial_tag} -> {res_type:7} pnl={trade['pnl']:+.2f}%")
 
     near_misses.sort(key=lambda x: x["score"], reverse=True)
     diag = {
@@ -398,7 +401,7 @@ def print_report(symbol, trades, diag, use_breakeven=False,
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v9.1 — {symbol} [{label}]")
+    print(f"ОТЧЁТ БЭКТЕСТА v9.1 - {symbol} [{label}]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -477,14 +480,11 @@ def print_report(symbol, trades, diag, use_breakeven=False,
     win_rate = tp / resolved * 100 if resolved else 0
 
     total_pnl = sum(t["pnl"] for t in trades)
-    avg_pnl = total_pilingnl / len(trades)
-    wins= =args [t["pnl"] for t.t inra trades if t["pnl"] > iling0]
-    losses = [t[")
-
-
-pnl"] for t in trades if t["ifpnl"] < 0]
-    __ avg_win = sum(wins)name / len(wins) if wins else 0__
-    avg_loss = sum(loss ==es) / len(losses) if losses else 0
+    avg_pnl = total_pnl / len(trades)
+    wins = [t["pnl"] for t in trades if t["pnl"] > 0]
+    losses = [t["pnl"] for t in trades if t["pnl"] < 0]
+    avg_win = sum(wins) / len(wins) if wins else 0
+    avg_loss = sum(losses) / len(losses) if losses else 0
 
     equity = 0
     peak = 0
@@ -530,8 +530,8 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v9.1 — {label} — "
-          f"{len(symbols)} монет × 40 дней")
+    print(f"### MULTI BACKTEST v9.1 - {label} - "
+          f"{len(symbols)} монет x 40 дней")
     print("#" * 70)
 
     all_summary = []
@@ -564,20 +564,26 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("=" * 70)
-    print(f"СВОДКА — {label} (max_hours={max_hours}, 40 дней)")
+    print(f"СВОДКА - {label} (max_hours={max_hours}, 40 дней)")
     print("=" * 70)
     print(f"{'Символ':<10}{'Сделок':<8}{'TP':<5}{'SL':<5}"
           f"{'TO':<5}{'WinRate':<10}{'PnL':<10}")
     print("-" * 70)
 
-    total_trades = 0; total_tp = 0; total_sl = 0
-    total_to = 0; total_pnl = 0.0
+    total_trades = 0
+    total_tp = 0
+    total_sl = 0
+    total_to = 0
+    total_pnl = 0.0
 
     for sym, cnt, tp, sl, timeout, wr, pnl in all_summary:
         print(f"{sym:<10}{cnt:<8}{tp:<5}{sl:<5}"
               f"{timeout:<5}{wr:<10.1f}{pnl:+.2f}%")
-        total_trades += cnt; total_tp += tp; total_sl += sl
-        total_to += timeout; total_pnl += pnl
+        total_trades += cnt
+        total_tp += tp
+        total_sl += sl
+        total_to += timeout
+        total_pnl += pnl
 
     print("-" * 70)
     resolved = total_tp + total_sl
@@ -604,7 +610,7 @@ def main():
     parser.add_argument("--be", action="store_true",
                         help="включить breakeven по R")
     parser.add_argument("--partial", action="store_true",
-                        help="включить partial TP 50%% на +1R")
+                        help="включить partial TP 50 процентов на +1R")
     parser.add_argument("--trailing", action="store_true",
                         help="включить trailing по R")
     args = parser.parse_args()
@@ -626,5 +632,8 @@ def main():
         print_report(args.symbol, trades, diag,
                      use_breakeven=args.be,
                      use_partial_tp=args.partial,
-                     use_tra "__main__":
+                     use_trailing=args.trailing)
+
+
+if __name__ == "__main__":
     main()
