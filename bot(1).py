@@ -61,6 +61,9 @@ BREAKEVEN_TRIGGER_PCT = 1.0
 TRAILING_TRIGGER_PCT = 4.0
 TRAILING_DISTANCE_PCT = 2.0
 
+# Запрет открытия конфликтующих сделок на одну монету
+BLOCK_CONFLICTING_TRADES = True
+
 
 COINS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
@@ -1829,7 +1832,8 @@ async def status_cmd(update, context):
          "💧 1H Major + 15M + ROUND + FRESH\n"
          "💠 FVG\n"
          "🎯 BOS на 15M\n"
-         f"🎯 Trailing: <b>{trailing_label}</b>\n\n"
+         f"🎯 Trailing: <b>{trailing_label}</b>\n"
+         f"🚫 Конфликт-фильтр: <b>{'ON' if BLOCK_CONFLICTING_TRADES else 'OFF'}</b>\n\n"
          "🕐 Работаем 24/7"),
         parse_mode="HTML",
         reply_markup=dashboard_keyboard())
@@ -1850,6 +1854,13 @@ async def monitor(app):
             await monitor_active_trades(app, results)
 
             state_changed = False
+
+            # Кэш открытых сделок (по chat_id + coin)
+            # чтобы не читать файл на каждой монете
+            open_trades = [
+                t for t in load_active_trades()
+                if t.get("status") == "OPEN"
+            ]
 
             for coin, result in results.items():
                 if result.get("error"):
@@ -1872,6 +1883,36 @@ async def monitor(app):
                     continue
                 if rr < MIN_RR:
                     continue
+
+                # ---- КОНФЛИКТ-ФИЛЬТР ----
+                if BLOCK_CONFLICTING_TRADES:
+                    conflicting = [
+                        t for t in open_trades
+                        if t.get("coin") == coin
+                    ]
+
+                    if conflicting:
+                        sides = {t.get("direction") for t in conflicting}
+                        new_dir = result.get("direction")
+
+                        if new_dir not in sides:
+                            print(
+                                f"[SKIP-CONFLICT] {coin} "
+                                f"уже есть OPEN {sides} — "
+                                f"пропускаем {new_dir}",
+                                flush=True,
+                            )
+                            continue
+                        # Если направление то же — тоже пропускаем
+                        # (чтобы не было 2 LONG на одну монету)
+                        print(
+                            f"[SKIP-DUP] {coin} "
+                            f"уже есть OPEN {new_dir} — "
+                            f"пропускаем дубликат",
+                            flush=True,
+                        )
+                        continue
+                # ---- /КОНФЛИКТ-ФИЛЬТР ----
 
                 setup = save_ready_setup(coin, result)
                 if setup is None:
@@ -2130,7 +2171,8 @@ async def callbacks(update, context):
              "💧 1H Major + 15M + ROUND + FRESH\n"
              "💠 FVG\n"
              "🎯 BOS на 15M\n"
-             f"🎯 Trailing: <b>{trailing_label}</b>\n\n"
+             f"🎯 Trailing: <b>{trailing_label}</b>\n"
+             f"🚫 Конфликт-фильтр: <b>{'ON' if BLOCK_CONFLICTING_TRADES else 'OFF'}</b>\n\n"
              "🕐 Работаем 24/7"),
             dashboard_keyboard())
         return
@@ -2153,11 +2195,6 @@ async def post_init(application):
                 print(">>> BACKTEST 40d — БЕЗ TRAILING <<<", flush=True)
                 backtest.run_multi_backtest_with_hours(
                     BACKTEST_MAX_HOURS, use_trailing=False)
-
-                print(flush=True)
-                print(">>> BACKTEST 40d — С TRAILING <<<", flush=True)
-                backtest.run_multi_backtest_with_hours(
-                    BACKTEST_MAX_HOURS, use_trailing=True)
             else:
                 trades, diag = backtest.run_backtest(
                     BACKTEST_SYMBOL, BACKTEST_MAX_HOURS)
