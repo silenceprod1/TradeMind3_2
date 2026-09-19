@@ -1,7 +1,8 @@
 """
-Диагностический бэктест v7.
-- 40 дней истории (пагинация)
-- Trailing stop: breakeven @ +2%, trailing @ +4% (2% от max)
+Диагностический бэктест v8.
+- Загружает D1 свечи
+- Передаёт d1_context в analyze (чтобы работал D1 gate)
+- Trailing stop
 """
 
 import argparse
@@ -15,10 +16,12 @@ from market import (
     _normalize_symbol,
     find_major_liquidity,
     detect_sweep,
+    _analyze_d1_context,
 )
 from strategy import analyze, get_1h_direction
 
 
+BT_LOOKBACK_D1 = 90
 BT_LOOKBACK_1H = 1000
 BT_LOOKBACK_15M = 4000
 BT_LOOKBACK_5M = 12000
@@ -99,6 +102,8 @@ def classify_reason(result, market_info):
         return "v_recovery_blocked"
     if "score" in reason and "блок" in reason:
         return "score_too_low"
+    if "d1" in reason and ("neutral" in reason or "d1_" in reason):
+        return "d1_blocked"
 
     if "blocked" in reason or "заблок" in reason:
         return "other_blocked"
@@ -179,6 +184,7 @@ def run_backtest(symbol, max_hours, use_trailing=False):
     symbol = _normalize_symbol(symbol)
     log(f"Символ: {symbol} (trailing={use_trailing})")
 
+    candles_d1 = get_klines_history("1d", BT_LOOKBACK_D1, symbol)
     candles_1h = get_klines_history("1h", BT_LOOKBACK_1H, symbol)
     candles_15m = get_klines_history("15m", BT_LOOKBACK_15M, symbol)
     candles_5m = get_klines_history("5m", BT_LOOKBACK_5M, symbol)
@@ -188,8 +194,8 @@ def run_backtest(symbol, max_hours, use_trailing=False):
         log("Нет данных 1H")
         return [], {}
 
-    log(f"Данных: 1H={len(candles_1h)} 15M={len(candles_15m)} "
-        f"5M={len(candles_5m)} 1M={len(candles_1m)}")
+    log(f"Данных: D1={len(candles_d1)} 1H={len(candles_1h)} "
+        f"15M={len(candles_15m)} 5M={len(candles_5m)} 1M={len(candles_1m)}")
 
     if len(candles_1h) <= WARMUP_1H:
         return [], {}
@@ -215,6 +221,7 @@ def run_backtest(symbol, max_hours, use_trailing=False):
         c15 = candles_until(candles_15m, ts_now)
         c5 = candles_until(candles_5m, ts_now)
         c1 = candles_until(candles_1m, ts_now)
+        cd1 = candles_until(candles_d1, ts_now)
 
         if len(c15) < 60 or len(c5) < 60:
             exception_counter["not_enough_candles"] += 1
@@ -246,9 +253,19 @@ def run_backtest(symbol, max_hours, use_trailing=False):
             if direction != "NEUTRAL":
                 sweep = detect_sweep(c1h, price, direction, levels)
 
+            # D1 context — критично для D1 gate
+            d1_context = None
+            if len(cd1) >= 20:
+                try:
+                    d1_context = _analyze_d1_context(cd1, price)
+                except Exception:
+                    d1_context = None
+
             result = analyze(
                 c1h, c15, c5, price, levels, sweep,
-                candles_1m=c1, d1_context=None, fvgs=[],
+                candles_1m=c1,
+                d1_context=d1_context,
+                fvgs=[],
             )
 
         except Exception as exc:
@@ -279,7 +296,9 @@ def run_backtest(symbol, max_hours, use_trailing=False):
         if stage != "READY":
             continue
 
-        entry = result.get("entry"); sl = result.get("sl"); tp = result.get("tp")
+        entry = result.get("entry")
+        sl = result.get("sl")
+        tp = result.get("tp")
         if entry is None or sl is None or tp is None:
             continue
 
@@ -318,7 +337,7 @@ def print_report(symbol, trades, diag, use_trailing=False):
     label = "С TRAILING" if use_trailing else "БЕЗ TRAILING"
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v7 — {symbol} ({label})")
+    print(f"ОТЧЁТ БЭКТЕСТА v8 — {symbol} ({label})")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -402,12 +421,16 @@ def print_report(symbol, trades, diag, use_trailing=False):
     avg_win = sum(wins) / len(wins) if wins else 0
     avg_loss = sum(losses) / len(losses) if losses else 0
 
-    equity = 0; peak = 0; max_dd = 0
+    equity = 0
+    peak = 0
+    max_dd = 0
     for t in trades:
         equity += t["pnl"]
-        if equity > peak: peak = equity
+        if equity > peak:
+            peak = equity
         dd = peak - equity
-        if dd > max_dd: max_dd = dd
+        if dd > max_dd:
+            max_dd = dd
 
     print(f"Всего сделок: {len(trades)}")
     print(f"  TP:      {tp}")
@@ -424,16 +447,16 @@ def print_report(symbol, trades, diag, use_trailing=False):
 def run_multi_backtest_with_hours(max_hours, use_trailing=False):
     symbols = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT",
-        "BNBUSDT", "XRPUSDT", "DOGEUSDT",
+        "BNBUSDT", "DOGEUSDT",
         "ADAUSDT", "AVAXUSDT", "LINKUSDT",
-        "ARBUSDT",
+        "NEARUSDT", "APTUSDT",
     ]
 
     label = "С TRAILING" if use_trailing else "БЕЗ TRAILING"
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST — {label} — {len(symbols)} монет × 40 дней")
+    print(f"### MULTI BACKTEST v8 — {label} — {len(symbols)} монет × 40 дней")
     print("#" * 70)
 
     all_summary = []
