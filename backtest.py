@@ -1,12 +1,5 @@
 """
 Диагностический бэктест v9.1.
-
-Изменения v9.1 vs v9:
-- BE по R (не по %): срабатывает на +1R
-- Partial TP 50% на +1R
-- Trailing по R: включается на +1.5R, дистанция 1R
-- CLI флаги --be / --partial / --trailing для A/B теста
-- PnL считается с учётом partial exit
 """
 
 import argparse
@@ -373,7 +366,7 @@ def run_backtest(symbol, max_hours,
 
         trades.append(trade)
 
-        partial_tag = "💰" if partial_hit else "  "
+        partial_tag = "P" if partial_hit else " "
         log(f"[{i:4}] {trade['direction']:5} "
             f"entry={entry:.4f} sl={sl:.4f} tp={tp:.4f} "
             f"rr={trade['rr']:.2f} score={score} "
@@ -515,8 +508,9 @@ def print_report(symbol, trades, diag, use_breakeven=False,
 def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
                                   use_partial_tp=False, use_trailing=False):
     symbols = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT",
-        "ADAUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT", "APTUSDT",
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
+        "ADAUSDT", "AVAXUSDT", "LINKUSDT",
+        "APTUSDT",
     ]
 
     labels = []
@@ -608,11 +602,11 @@ def main():
     parser.add_argument("--max-hours", type=int, default=DEFAULT_MAX_HOURS)
     parser.add_argument("--multi", action="store_true")
     parser.add_argument("--be", action="store_true",
-                        help="включить breakeven по R")
+                        help="breakeven по R")
     parser.add_argument("--partial", action="store_true",
-                        help="включить partial TP 50 процентов на +1R")
+                        help="partial TP 50 на +1R")
     parser.add_argument("--trailing", action="store_true",
-                        help="включить trailing по R")
+                        help="trailing по R")
     args = parser.parse_args()
 
     if args.multi:
