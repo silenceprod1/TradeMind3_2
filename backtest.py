@@ -1,8 +1,12 @@
 """
-Диагностический бэктест v9.
-- BREAKEVEN_TRIGGER_PCT: 2.0 -> 1.0
-- D1 context передаётся в analyze
-- Trailing stop
+Диагностический бэктест v9.1.
+
+Изменения v9.1 vs v9:
+- BE по R (не по %): срабатывает на +1R
+- Partial TP 50% на +1R
+- Trailing по R: включается на +1.5R, дистанция 1R
+- CLI флаги --be / --partial / --trailing для A/B теста
+- PnL считается с учётом partial exit
 """
 
 import argparse
@@ -30,9 +34,13 @@ BT_LOOKBACK_1M = 200
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
-BREAKEVEN_TRIGGER_PCT = 1.0
-TRAILING_TRIGGER_PCT = 4.0
-TRAILING_DISTANCE_PCT = 2.0
+# === v9.1: R-based position management (синхрон с bot.py) ===
+BREAKEVEN_TRIGGER_R = 1.0
+PARTIAL_TP_ENABLED = True
+PARTIAL_TP_TRIGGER_R = 1.0
+PARTIAL_TP_PERCENT = 50
+TRAILING_TRIGGER_R = 1.5
+TRAILING_DISTANCE_R = 1.0
 
 
 def log(msg):
@@ -61,6 +69,16 @@ def pnl_pct(entry, exit_price, direction):
     if direction == "LONG":
         return (exit_price - entry) / entry * 100
     return (entry - exit_price) / entry * 100
+
+
+def blended_pnl(entry, final_exit, direction,
+                partial_done, partial_exit, partial_pct):
+    if not partial_done or partial_exit is None:
+        return pnl_pct(entry, final_exit, direction)
+    w = partial_pct / 100.0
+    p1 = pnl_pct(entry, partial_exit, direction)
+    p2 = pnl_pct(entry, final_exit, direction)
+    return p1 * w + p2 * (1 - w)
 
 
 def classify_reason(result, market_info):
@@ -104,21 +122,31 @@ def classify_reason(result, market_info):
         return "score_too_low"
     if "d1" in reason and ("neutral" in reason or "d1_" in reason):
         return "d1_blocked"
-
+    if "volatility spike" in reason:
+        return "volatility_spike"
     if "blocked" in reason or "заблок" in reason:
         return "other_blocked"
 
     return f"stage_{stage.lower()}"
 
 
-def simulate_trade(trade, candles_5m, start_ts, max_hours, use_trailing=False):
+def simulate_trade(trade, candles_5m, start_ts, max_hours,
+                   use_breakeven=False, use_partial_tp=False,
+                   use_trailing=False):
+    """R-based симуляция. Возвращает result, exit, ts, held, pnl, partial_hit."""
     direction = trade["direction"]
-    original_sl = trade["sl"]
-    tp = trade["tp"]
-    entry = trade["entry"]
+    entry = float(trade["entry"])
+    sl_initial = float(trade["sl"])
+    tp = float(trade["tp"])
 
-    current_sl = original_sl
+    risk = abs(entry - sl_initial)
+    if risk <= 0:
+        return ("ERROR", entry, start_ts, 0, 0.0, False)
+
+    current_sl = sl_initial
     best_price = entry
+    partial_done = False
+    partial_exit = None
 
     deadline = start_ts + max_hours * 3600 * 1000
     last_seen = None
@@ -132,7 +160,6 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours, use_trailing=False):
 
         held += 1
         last_seen = c
-
         high = c["high"]
         low = c["low"]
 
@@ -143,46 +170,71 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours, use_trailing=False):
             hit_tp = low <= tp
             hit_sl = high >= current_sl
 
-        if hit_tp and hit_sl:
-            return ("SL", current_sl, c["open_time"], held)
-        if hit_tp:
-            return ("TP", tp, c["open_time"], held)
+        # Консервативно: если оба — считаем SL
+        if hit_sl and hit_tp:
+            final_pnl = blended_pnl(entry, current_sl, direction,
+                                    partial_done, partial_exit, PARTIAL_TP_PERCENT)
+            return ("SL", current_sl, c["open_time"], held, final_pnl, partial_done)
         if hit_sl:
-            return ("SL", current_sl, c["open_time"], held)
+            final_pnl = blended_pnl(entry, current_sl, direction,
+                                    partial_done, partial_exit, PARTIAL_TP_PERCENT)
+            return ("SL", current_sl, c["open_time"], held, final_pnl, partial_done)
+        if hit_tp:
+            final_pnl = blended_pnl(entry, tp, direction,
+                                    partial_done, partial_exit, PARTIAL_TP_PERCENT)
+            return ("TP", tp, c["open_time"], held, final_pnl, partial_done)
 
-        if use_trailing:
+        # Обновление состояния
+        if direction == "LONG":
+            if high > best_price:
+                best_price = high
+            move_r = (best_price - entry) / risk
+        else:
+            if low < best_price:
+                best_price = low
+            move_r = (entry - best_price) / risk
+
+        if (use_partial_tp and PARTIAL_TP_ENABLED
+                and not partial_done
+                and move_r >= PARTIAL_TP_TRIGGER_R):
             if direction == "LONG":
-                if high > best_price:
-                    best_price = high
-                move_pct = (best_price - entry) / entry * 100
-                if move_pct >= TRAILING_TRIGGER_PCT:
-                    new_sl = best_price * (1 - TRAILING_DISTANCE_PCT / 100)
-                    if new_sl > current_sl:
-                        current_sl = new_sl
-                elif move_pct >= BREAKEVEN_TRIGGER_PCT:
-                    if entry > current_sl:
-                        current_sl = entry
+                partial_exit = entry + risk * PARTIAL_TP_TRIGGER_R
             else:
-                if low < best_price:
-                    best_price = low
-                move_pct = (entry - best_price) / entry * 100
-                if move_pct >= TRAILING_TRIGGER_PCT:
-                    new_sl = best_price * (1 + TRAILING_DISTANCE_PCT / 100)
-                    if new_sl < current_sl:
-                        current_sl = new_sl
-                elif move_pct >= BREAKEVEN_TRIGGER_PCT:
-                    if entry < current_sl:
-                        current_sl = entry
+                partial_exit = entry - risk * PARTIAL_TP_TRIGGER_R
+            partial_done = True
+
+        if use_breakeven and move_r >= BREAKEVEN_TRIGGER_R:
+            if direction == "LONG" and entry > current_sl:
+                current_sl = entry
+            elif direction == "SHORT" and entry < current_sl:
+                current_sl = entry
+
+        if use_trailing and move_r >= TRAILING_TRIGGER_R:
+            if direction == "LONG":
+                new_sl = best_price - risk * TRAILING_DISTANCE_R
+                if new_sl > current_sl:
+                    current_sl = new_sl
+            else:
+                new_sl = best_price + risk * TRAILING_DISTANCE_R
+                if new_sl < current_sl:
+                    current_sl = new_sl
 
     if last_seen is not None:
-        return ("TIMEOUT", last_seen["close"], last_seen["open_time"], held)
+        exit_price = last_seen["close"]
+        final_pnl = blended_pnl(entry, exit_price, direction,
+                                partial_done, partial_exit, PARTIAL_TP_PERCENT)
+        return ("TIMEOUT", exit_price, last_seen["open_time"], held,
+                final_pnl, partial_done)
 
-    return ("TIMEOUT", entry, start_ts, 0)
+    return ("TIMEOUT", entry, start_ts, 0, 0.0, False)
 
 
-def run_backtest(symbol, max_hours, use_trailing=False):
+def run_backtest(symbol, max_hours,
+                 use_breakeven=False, use_partial_tp=False,
+                 use_trailing=False):
     symbol = _normalize_symbol(symbol)
-    log(f"Символ: {symbol} (trailing={use_trailing})")
+    log(f"Символ: {symbol} "
+        f"(BE={use_breakeven} partial={use_partial_tp} trail={use_trailing})")
 
     candles_d1 = get_klines_history("1d", BT_LOOKBACK_D1, symbol)
     candles_1h = get_klines_history("1h", BT_LOOKBACK_1H, symbol)
@@ -211,7 +263,6 @@ def run_backtest(symbol, max_hours, use_trailing=False):
     log(f"Шагов: {total}")
 
     for i in range(WARMUP_1H, len(candles_1h)):
-
         ts_now = candles_1h[i]["open_time"]
 
         if has_active_position(trades, ts_now):
@@ -260,11 +311,8 @@ def run_backtest(symbol, max_hours, use_trailing=False):
                 except Exception:
                     d1_context = None
 
-            result = analyze(
-                c1h, c15, c5, price, levels, sweep,
-                candles_1m=c1, d1_context=d1_context, fvgs=[],
-            )
-
+            result = analyze(c1h, c15, c5, price, levels, sweep,
+                             candles_1m=c1, d1_context=d1_context, fvgs=[])
         except Exception as exc:
             exception_counter[f"analyze:{type(exc).__name__}"] += 1
             if exception_counter[f"analyze:{type(exc).__name__}"] == 1:
@@ -305,21 +353,28 @@ def run_backtest(symbol, max_hours, use_trailing=False):
             "rr": result.get("rr"), "score": score, "open_ts": ts_now,
         }
 
-        res_type, exit_price, exit_ts, held = simulate_trade(
-            trade, candles_5m, ts_now, max_hours, use_trailing=use_trailing)
+        (res_type, exit_price, exit_ts, held, trade_pnl,
+         partial_hit) = simulate_trade(
+            trade, candles_5m, ts_now, max_hours,
+            use_breakeven=use_breakeven,
+            use_partial_tp=use_partial_tp,
+            use_trailing=use_trailing,
+        )
 
         trade["result"] = res_type
         trade["exit_price"] = exit_price
         trade["exit_ts"] = exit_ts
         trade["held_5m"] = held
-        trade["pnl"] = pnl_pct(entry, exit_price, trade["direction"])
+        trade["pnl"] = trade_pnl
+        trade["partial_hit"] = partial_hit
 
         trades.append(trade)
 
+        partial_tag = "💰" if partial_hit else "  "
         log(f"[{i:4}] {trade['direction']:5} "
             f"entry={entry:.4f} sl={sl:.4f} tp={tp:.4f} "
             f"rr={trade['rr']:.2f} score={score} "
-            f"→ {res_type:7} pnl={trade['pnl']:+.2f}%")
+            f"{partial_tag} → {res_type:7} pnl={trade['pnl']:+.2f}%")
 
     near_misses.sort(key=lambda x: x["score"], reverse=True)
     diag = {
@@ -330,11 +385,20 @@ def run_backtest(symbol, max_hours, use_trailing=False):
     return trades, diag
 
 
-def print_report(symbol, trades, diag, use_trailing=False):
-    label = "С TRAILING" if use_trailing else "БЕЗ TRAILING"
+def print_report(symbol, trades, diag, use_breakeven=False,
+                 use_partial_tp=False, use_trailing=False):
+    labels = []
+    if use_breakeven:
+        labels.append("BE")
+    if use_partial_tp:
+        labels.append("PARTIAL")
+    if use_trailing:
+        labels.append("TRAIL")
+    label = "+".join(labels) if labels else "BASIC"
+
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v9 — {symbol} ({label})")
+    print(f"ОТЧЁТ БЭКТЕСТА v9.1 — {symbol} [{label}]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -407,16 +471,20 @@ def print_report(symbol, trades, diag, use_trailing=False):
     tp = sum(1 for t in trades if t["result"] == "TP")
     sl = sum(1 for t in trades if t["result"] == "SL")
     timeout = sum(1 for t in trades if t["result"] == "TIMEOUT")
+    partial_hits = sum(1 for t in trades if t.get("partial_hit"))
 
     resolved = tp + sl
     win_rate = tp / resolved * 100 if resolved else 0
 
     total_pnl = sum(t["pnl"] for t in trades)
-    avg_pnl = total_pnl / len(trades)
-    wins = [t["pnl"] for t in trades if t["pnl"] > 0]
-    losses = [t["pnl"] for t in trades if t["pnl"] < 0]
-    avg_win = sum(wins) / len(wins) if wins else 0
-    avg_loss = sum(losses) / len(losses) if losses else 0
+    avg_pnl = total_pilingnl / len(trades)
+    wins= =args [t["pnl"] for t.t inra trades if t["pnl"] > iling0]
+    losses = [t[")
+
+
+pnl"] for t in trades if t["ifpnl"] < 0]
+    __ avg_win = sum(wins)name / len(wins) if wins else 0__
+    avg_loss = sum(loss ==es) / len(losses) if losses else 0
 
     equity = 0
     peak = 0
@@ -433,6 +501,9 @@ def print_report(symbol, trades, diag, use_trailing=False):
     print(f"  TP:      {tp}")
     print(f"  SL:      {sl}")
     print(f"  Timeout: {timeout}")
+    if use_partial_tp:
+        print(f"  Partial hits: {partial_hits} "
+              f"({partial_hits/len(trades)*100:.1f}%)")
     print(f"Win rate: {win_rate:.1f}%")
     print(f"Total PnL: {total_pnl:+.2f}%")
     print(f"Avg PnL:   {avg_pnl:+.2f}%")
@@ -441,26 +512,41 @@ def print_report(symbol, trades, diag, use_trailing=False):
     print(f"Max DD:    -{max_dd:.2f}%")
 
 
-def run_multi_backtest_with_hours(max_hours, use_trailing=False):
+def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
+                                  use_partial_tp=False, use_trailing=False):
     symbols = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT",
-        "BNBUSDT", "DOGEUSDT",
-        "ADAUSDT", "AVAXUSDT", "LINKUSDT",
-        "NEARUSDT", "APTUSDT",
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT",
+        "ADAUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT", "APTUSDT",
     ]
 
-    label = "С TRAILING" if use_trailing else "БЕЗ TRAILING"
+    labels = []
+    if use_breakeven:
+        labels.append("BE")
+    if use_partial_tp:
+        labels.append("PARTIAL")
+    if use_trailing:
+        labels.append("TRAIL")
+    label = "+".join(labels) if labels else "BASIC"
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v9 — {label} — {len(symbols)} монет × 40 дней")
+    print(f"### MULTI BACKTEST v9.1 — {label} — "
+          f"{len(symbols)} монет × 40 дней")
     print("#" * 70)
 
     all_summary = []
     for sym in symbols:
         try:
-            trades, diag = run_backtest(sym, max_hours, use_trailing=use_trailing)
-            print_report(sym, trades, diag, use_trailing=use_trailing)
+            trades, diag = run_backtest(
+                sym, max_hours,
+                use_breakeven=use_breakeven,
+                use_partial_tp=use_partial_tp,
+                use_trailing=use_trailing,
+            )
+            print_report(sym, trades, diag,
+                         use_breakeven=use_breakeven,
+                         use_partial_tp=use_partial_tp,
+                         use_trailing=use_trailing)
 
             if trades:
                 tp = sum(1 for t in trades if t["result"] == "TP")
@@ -484,7 +570,8 @@ def run_multi_backtest_with_hours(max_hours, use_trailing=False):
           f"{'TO':<5}{'WinRate':<10}{'PnL':<10}")
     print("-" * 70)
 
-    total_trades = 0; total_tp = 0; total_sl = 0; total_to = 0; total_pnl = 0.0
+    total_trades = 0; total_tp = 0; total_sl = 0
+    total_to = 0; total_pnl = 0.0
 
     for sym, cnt, tp, sl, timeout, wr, pnl in all_summary:
         print(f"{sym:<10}{cnt:<8}{tp:<5}{sl:<5}"
@@ -506,7 +593,7 @@ def run_multi_backtest_with_hours(max_hours, use_trailing=False):
 
 
 def run_multi_backtest():
-    run_multi_backtest_with_hours(DEFAULT_MAX_HOURS, use_trailing=False)
+    run_multi_backtest_with_hours(DEFAULT_MAX_HOURS)
 
 
 def main():
@@ -514,16 +601,30 @@ def main():
     parser.add_argument("--symbol", default="SOLUSDT")
     parser.add_argument("--max-hours", type=int, default=DEFAULT_MAX_HOURS)
     parser.add_argument("--multi", action="store_true")
-    parser.add_argument("--trailing", action="store_true")
+    parser.add_argument("--be", action="store_true",
+                        help="включить breakeven по R")
+    parser.add_argument("--partial", action="store_true",
+                        help="включить partial TP 50%% на +1R")
+    parser.add_argument("--trailing", action="store_true",
+                        help="включить trailing по R")
     args = parser.parse_args()
 
     if args.multi:
-        run_multi_backtest_with_hours(args.max_hours, use_trailing=args.trailing)
+        run_multi_backtest_with_hours(
+            args.max_hours,
+            use_breakeven=args.be,
+            use_partial_tp=args.partial,
+            use_trailing=args.trailing,
+        )
     else:
-        trades, diag = run_backtest(args.symbol, args.max_hours,
-                                     use_trailing=args.trailing)
-        print_report(args.symbol, trades, diag, use_trailing=args.trailing)
-
-
-if __name__ == "__main__":
+        trades, diag = run_backtest(
+            args.symbol, args.max_hours,
+            use_breakeven=args.be,
+            use_partial_tp=args.partial,
+            use_trailing=args.trailing,
+        )
+        print_report(args.symbol, trades, diag,
+                     use_breakeven=args.be,
+                     use_partial_tp=args.partial,
+                     use_tra "__main__":
     main()
