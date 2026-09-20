@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.19 FINAL.
+TradeMind bot v9.19.1 FINAL.
 7 пар: BTC, XRP, LINK, BCH, APT, SUI, INJ.
-Per-symbol MIN_SCORE.
+Fix: asyncio.create_task для монитора (без PTBUserWarning).
 """
 
 import asyncio
@@ -46,7 +46,7 @@ from strategy import (
 )
 
 
-# --- CONFIG v9.19 ---
+# --- CONFIG v9.19.1 ---
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -85,7 +85,6 @@ COOLDOWN_AFTER_TP_HOURS = 0
 NOTIFICATION_DEDUP_HOURS = 3
 NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
 
-# v9.19: только 7 пар
 COINS = {
     "BTC": "BTCUSDT",
     "XRP": "XRPUSDT",
@@ -96,7 +95,6 @@ COINS = {
     "INJ": "INJUSDT",
 }
 
-# v9.19: per-symbol MIN_SCORE
 MIN_SCORE_MAP = {
     "default": 90,
     "INJUSDT": 88,
@@ -335,14 +333,6 @@ def tp_src_label(source):
         "fixed_rr": " (RR 1:2)",
     }
     return m.get(source, "")
-
-
-def _scenario_rank(s):
-    m = {
-        "READY": 4, "15M_CONFIRMED": 3,
-        "SWEPT": 2, "WAIT": 1,
-    }
-    return m.get(s, 0)
 
 
 def strong_levels(levels):
@@ -1264,7 +1254,6 @@ async def monitor_active_trades(app, results):
                                       now_ms())))
         cms = now_ms()
 
-        # check SL/TP
         try:
             sl = float(trade["sl"])
             tp = float(trade["tp"])
@@ -2448,14 +2437,39 @@ async def callbacks(update, context):
         return
 
     if data == "status":
-        await status_cmd(
-            type("U", (), {"message": query.message,
-                            "effective_chat": query.message})
-            if False else update, context)
+        active = load_active_trades()
+        n_active = 0
+        for x in active:
+            if x.get("status") == "OPEN":
+                n_active += 1
+        journal = load_journal()
+        tr = "ON" if TRAILING_ENABLED else "OFF"
+        pt = "ON" if PARTIAL_TP_ENABLED else "OFF"
+        sh = "ON" if ALLOW_SHORT else "OFF"
+        if COOLDOWN_AFTER_SL_ENABLED:
+            cd = f"{COOLDOWN_AFTER_SL_HOURS}h"
+        else:
+            cd = "OFF"
+        text = (
+            f"⚙️ <b>STATUS</b>\n\n"
+            f"v{escape(str(STRATEGY_VERSION))}\n"
+            f"Coins: <b>{len(COINS)}</b>\n"
+            f"Active: <b>{n_active}</b>\n"
+            f"Journal: <b>{len(journal)}</b>\n\n"
+            f"P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>\n"
+            f"P2: <b>{PARTIAL_TP_2_TRIGGER_R}R</b>\n"
+            f"BE: <b>{BREAKEVEN_TRIGGER_R}R</b>\n"
+            f"Trail: <b>{tr}</b>\n"
+            f"Partial: <b>{pt}</b>\n"
+            f"Cooldown: <b>{cd}</b>\n"
+            f"SHORT: <b>{sh}</b>"
+        )
+        await edit_query(query, text,
+                         dashboard_keyboard())
         return
 
 
-# --- POST INIT ---
+# --- POST INIT (FIXED) ---
 
 async def post_init(application):
     if RUN_BACKTEST_ON_START:
@@ -2467,8 +2481,6 @@ async def post_init(application):
             if BACKTEST_MULTI:
                 backtest.run_multi(
                     BACKTEST_MAX_HOURS)
-            else:
-                pass
             print("=" * 70, flush=True)
             print("BACKTEST done", flush=True)
             print("=" * 70, flush=True)
@@ -2490,7 +2502,17 @@ async def post_init(application):
     ]
     await application.bot.set_my_commands(
         [BotCommand(c, d) for c, d in cmds])
-    application.create_task(_safe_monitor(application))
+
+    async def _starter():
+        await asyncio.sleep(1)
+        try:
+            await _safe_monitor(application)
+        except Exception as e:
+            import traceback
+            print("MONITOR DIE:", e, flush=True)
+            traceback.print_exc()
+
+    asyncio.create_task(_starter())
 
 
 # --- MAIN ---
