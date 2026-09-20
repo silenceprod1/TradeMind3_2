@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.19.1 FINAL.
-7 пар: BTC, XRP, LINK, BCH, APT, SUI, INJ.
-Fix: asyncio.create_task для монитора (без PTBUserWarning).
+TradeMind bot v9.19.2 FINAL.
+Fix: CHECK_INTERVAL=60, убран спам в логах, asyncio.create_task.
 """
 
 import asyncio
@@ -46,11 +45,11 @@ from strategy import (
 )
 
 
-# --- CONFIG v9.19.1 ---
+# --- CONFIG v9.19.2 ---
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-CHECK_INTERVAL = 15
+CHECK_INTERVAL = 60
 SCAN_WORKERS = 12
 MIN_RR = 2.0
 SCAN_CACHE_TTL = 5.0
@@ -2090,9 +2089,6 @@ async def monitor(app):
 
                 in_cd, cd_reason = coin_in_cooldown(coin)
                 if in_cd:
-                    print(
-                        f"[SKIP-CD] {coin}",
-                        flush=True)
                     continue
 
                 if BLOCK_CONFLICTING_TRADES:
@@ -2106,13 +2102,7 @@ async def monitor(app):
                             sides.add(t.get("direction"))
                         new_d = result.get("direction")
                         if new_d not in sides:
-                            print(
-                                f"[SKIP-CONF] {coin}",
-                                flush=True)
                             continue
-                        print(
-                            f"[SKIP-DUP] {coin}",
-                            flush=True)
                         continue
 
                 setup = save_ready_setup(coin, result)
@@ -2124,9 +2114,6 @@ async def monitor(app):
                     setup["direction"],
                     setup["entry"]
                 ):
-                    print(
-                        f"[SKIP-DUP-NOTIF] {coin}",
-                        flush=True)
                     continue
 
                 _notif_mark(
