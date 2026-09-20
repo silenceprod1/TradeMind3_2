@@ -80,12 +80,10 @@ NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
 
 COINS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
-    "BNB": "BNBUSDT", "XRP": "XRPUSDT", "ADA": "ADAUSDT",
-    "LINK": "LINKUSDT", "DOT": "DOTUSDT",
-    "LTC": "LTCUSDT", "BCH": "BCHUSDT",
-    "APT": "APTUSDT", "SUI": "SUIUSDT", "HYPE": "HYPEUSDT",
+    "XRP": "XRPUSDT", "LINK": "LINKUSDT", "DOT": "DOTUSDT",
+    "BCH": "BCHUSDT", "APT": "APTUSDT",
+    "SUI": "SUIUSDT", "HYPE": "HYPEUSDT",
     "INJ": "INJUSDT",
-    "TIA": "TIAUSDT",
 }
 
 
@@ -200,7 +198,7 @@ def save_notification_state(data):
 
 
 # ============================================================
-# BASE FORMATTERS (были пропущены!)
+# BASE FORMATTERS
 # ============================================================
 
 def format_price(price):
@@ -450,6 +448,7 @@ def build_analysis(symbol):
         candles_1m=market["candles_1m"],
         d1_context=market.get("d1_context"),
         fvgs=market.get("fvgs"),
+        symbol=symbol,
     )
 
     result.update({
@@ -568,14 +567,15 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 8.3</b>",
+        "🧭 <b>СТРАТЕГИЯ 8.5.2</b>",
         "",
         "Entry = ILM trigger (retest)",
-        "SL = ATR scaling + structural",
+        "SL = structural + ATR floor",
         "TP = RR 1:2 (fixed)",
         "",
         "⚡ Trend ≥ 0.40",
         "🎯 BOS обязателен",
+        "🕐 Session filter: 02-07 UTC",
         f"🎯 Trailing: <b>{trailing_label}</b>",
         f"📈 SHORT: <b>{short_label}</b>",
         f"❄️ Cooldown after SL: <b>{cd_hours}h</b>",
@@ -1053,7 +1053,7 @@ def activate_trade(setup, chat_id):
             "trailing_active": False,
             "partial_tp_done": False,
             "partial_tp_price": None,
-            "entry_source": "TradeMind 8.3 ILM trigger",
+            "entry_source": "TradeMind 8.5.2 ILM trigger",
         }
         active.append(trade)
         save_active_trades(active)
@@ -2022,15 +2022,16 @@ async def status_cmd(update, context):
          f"Active: <b>{active_count}</b>\n"
          f"Journal: <b>{len(journal)}</b>\n\n"
          "━━━━━━━━━━━━━━━━━━━━\n\n"
-         "🎯 <b>МОДЕЛЬ 8.3</b>\n"
+         "🎯 <b>МОДЕЛЬ 8.5.2</b>\n"
          "Entry = ILM trigger\n"
-         "SL = ATR scaling + structural\n"
+         "SL = structural + ATR floor\n"
          "TP = RR 1:2 (fixed)\n\n"
          "📅 D1 context\n"
          "💧 1H Major + 15M + ROUND + FRESH\n"
          "💠 FVG\n"
          "⚡ Trend ≥ 0.40\n"
          "🎯 BOS обязателен\n"
+         "🕐 Session filter: 02-07 UTC\n"
          f"🎯 Trailing: <b>{trailing_label}</b>\n"
          f"💰 Partial TP: <b>{partial_label}</b>\n"
          f"❄️ Cooldown after SL: <b>{cd_label}</b>\n"
@@ -2415,15 +2416,16 @@ async def callbacks(update, context):
              f"Active: <b>{active_count}</b>\n"
              f"Journal: <b>{len(journal)}</b>\n\n"
              "━━━━━━━━━━━━━━━━━━━━\n\n"
-             "🎯 <b>МОДЕЛЬ 8.3</b>\n"
+             "🎯 <b>МОДЕЛЬ 8.5.2</b>\n"
              "Entry = ILM trigger\n"
-             "SL = ATR scaling + structural\n"
+             "SL = structural + ATR floor\n"
              "TP = RR 1:2 (fixed)\n\n"
              "📅 D1 context\n"
              "💧 1H Major + 15M + ROUND + FRESH\n"
              "💠 FVG\n"
              "⚡ Trend ≥ 0.40\n"
              "🎯 BOS обязателен\n"
+             "🕐 Session filter: 02-07 UTC\n"
              f"🎯 Trailing: <b>{trailing_label}</b>\n"
              f"💰 Partial TP: <b>{partial_label}</b>\n"
              f"❄️ Cooldown: <b>{cd_label}</b>\n"
@@ -2447,7 +2449,7 @@ async def post_init(application):
             import backtest
 
             if BACKTEST_MULTI:
-                print(">>> BACKTEST 40d (v9.4 full) <<<", flush=True)
+                print(">>> BACKTEST 40d (v9.8) <<<", flush=True)
                 backtest.run_multi_backtest_with_hours(
                     BACKTEST_MAX_HOURS,
                     use_breakeven=True,
