@@ -1,19 +1,25 @@
 """
-TradeMind 8.4 — strategy.py
+TradeMind 8.5 — strategy.py
 
-Изменения vs 8.3:
-- ФИКС LOOKAHEAD BIAS в _ilm_long_candidate / _ilm_short_candidate
-  recovery_ratio теперь считается только по закрытию триггерной свечи,
-  а не по max/min из i+1..i+3 (это было подглядывание в будущее).
-- STRATEGY_VERSION: 8.3 -> 8.4
+Фиксы vs 8.4:
+- confirmation_15m: не выходим на первой свече, ищем BOS по всему массиву
+- find_sweep: ловим пинбары + sweep invalidation
+- ILM age: вход только на 1-2 свечах после триггера (MAX_ILM_AGE_FOR_ENTRY=2)
+- SL: стоит за sweep extreme, не уходит глубже
+- ATR floor: смягчён с 1.2 до 0.8
+- Counter-trend: +5 баллов вместо 0 (иначе порог 92 недостижим)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "8.4"
+STRATEGY_VERSION = "8.5"
 
 ALLOW_SHORT = True
+
+# v8.5 fixes
+MAX_ILM_AGE_FOR_ENTRY = 2
+ATR_SL_MULT_SOFT = 0.8
 
 MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
@@ -323,6 +329,9 @@ def _sweep_candidate_score(candle, level, depth):
 
 
 def find_sweep(candles_1h, major_levels, direction):
+    """
+    v8.5: пинбары валидны + sweep invalidation (закрытие за extreme сбрасывает).
+    """
     if direction not in {"LONG", "SHORT"}:
         return None
     if not candles_1h or len(candles_1h) < 3:
@@ -357,7 +366,26 @@ def find_sweep(candles_1h, major_levels, direction):
                     continue
                 depth = (price - low) / price * 100
                 if (low < price and depth >= MIN_SWEEP_DEPTH_PCT
-                        and close > price and _bull(candle)):
+                        and close > price):
+                    # v8.5: пинбар валиден
+                    open_p = _o(candle) or close
+                    body = abs(close - open_p)
+                    lower_wick = min(open_p, close) - low
+                    is_rejection = lower_wick > body or _bull(candle)
+                    if not is_rejection:
+                        continue
+
+                    # v8.5: sweep invalidation
+                    is_invalidated = False
+                    for k in range(candle_idx_1h + 1, total_candles):
+                        c_after = candles_1h[k]
+                        c_after_close = _c(c_after)
+                        if c_after_close is not None and c_after_close < low:
+                            is_invalidated = True
+                            break
+                    if is_invalidated:
+                        continue
+
                     candidates.append({
                         "swept": True, "direction": "LONG", "level": price,
                         "extreme": low, "open_time": _t(candle), "price": low,
@@ -375,7 +403,26 @@ def find_sweep(candles_1h, major_levels, direction):
                     continue
                 depth = (high - price) / price * 100
                 if (high > price and depth >= MIN_SWEEP_DEPTH_PCT
-                        and close < price and _bear(candle)):
+                        and close < price):
+                    # v8.5: пинбар валиден
+                    open_p = _o(candle) or close
+                    body = abs(close - open_p)
+                    upper_wick = high - max(open_p, close)
+                    is_rejection = upper_wick > body or _bear(candle)
+                    if not is_rejection:
+                        continue
+
+                    # v8.5: sweep invalidation
+                    is_invalidated = False
+                    for k in range(candle_idx_1h + 1, total_candles):
+                        c_after = candles_1h[k]
+                        c_after_close = _c(c_after)
+                        if c_after_close is not None and c_after_close > high:
+                            is_invalidated = True
+                            break
+                    if is_invalidated:
+                        continue
+
                     candidates.append({
                         "swept": True, "direction": "SHORT", "level": price,
                         "extreme": high, "open_time": _t(candle), "price": high,
@@ -454,6 +501,11 @@ def _is_local_low_15m(c, i):
 
 
 def confirmation_15m(candles_15m, sweep, direction):
+    """
+    v8.5: не выходим на первой свече.
+    Ищем BOS по всему массиву кандидатов.
+    Fallback: engulfing предыдущей свечи (без BOS).
+    """
     if not sweep or direction not in {"LONG", "SHORT"} or not candles_15m:
         return False, None, None, False
 
@@ -469,6 +521,8 @@ def confirmation_15m(candles_15m, sweep, direction):
     if len(candidates) < 3:
         return False, None, None, False
 
+    fallback = None
+
     for i in range(1, len(candidates)):
         candle = candidates[i]
 
@@ -478,6 +532,11 @@ def confirmation_15m(candles_15m, sweep, direction):
         close = _c(candle)
         if close is None:
             continue
+
+        prev = candidates[i - 1]
+        prev_high = _h(prev)
+        prev_low = _l(prev)
+        prev_body = _body(prev)
 
         if direction == "LONG":
             if not _bull(candle):
@@ -495,7 +554,17 @@ def confirmation_15m(candles_15m, sweep, direction):
 
             reference = max(local_highs[-3:])
             bos = close > reference
-            return (True, "15M bullish engulfing", _t(candle), bos)
+
+            if bos:
+                return (True, "15M BOS", _t(candle), True)
+
+            is_engulfing = (
+                prev_high is not None
+                and close > prev_high
+                and _body(candle) > prev_body
+            )
+            if is_engulfing and fallback is None:
+                fallback = (True, "15M engulfing (no BOS)", _t(candle), False)
 
         else:
             if not _bear(candle):
@@ -513,7 +582,20 @@ def confirmation_15m(candles_15m, sweep, direction):
 
             reference = min(local_lows[-3:])
             bos = close < reference
-            return (True, "15M bearish engulfing", _t(candle), bos)
+
+            if bos:
+                return (True, "15M BOS", _t(candle), True)
+
+            is_engulfing = (
+                prev_low is not None
+                and close < prev_low
+                and _body(candle) > prev_body
+            )
+            if is_engulfing and fallback is None:
+                fallback = (True, "15M engulfing (no BOS)", _t(candle), False)
+
+    if fallback is not None:
+        return fallback
 
     return False, None, None, False
 
@@ -539,10 +621,6 @@ def _is_local_low(c, i):
         return False
     return cur <= l and cur < r
 
-
-# ============================================================
-# v8.4 FIX: _ilm_long_candidate без lookahead
-# ============================================================
 
 def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
     m = candles[i]
@@ -573,7 +651,6 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
     if m_pct < MIN_SWEEP_DEPTH_PCT:
         return None
 
-    # v8.4: сначала находим триггер — потом считаем recovery
     trigger_idx = None
     for j in range(i + 1, min(len(candles), i + 4)):
         trig = candles[j]
@@ -591,7 +668,6 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
     if tc is None:
         return None
 
-    # v8.4: recovery только по закрытию триггерной свечи — без lookahead
     recovery = (tc - ml) / m_range
     if recovery < MIN_5M_RECOVERY_RATIO:
         return None
@@ -617,10 +693,6 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
         "_score": recovery * 30 + _body_ratio(trig) * 20 + m_pct * 5,
     }
 
-
-# ============================================================
-# v8.4 FIX: _ilm_short_candidate без lookahead
-# ============================================================
 
 def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
     m = candles[i]
@@ -651,7 +723,6 @@ def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
     if m_pct < MIN_SWEEP_DEPTH_PCT:
         return None
 
-    # v8.4: сначала триггер
     trigger_idx = None
     for j in range(i + 1, min(len(candles), i + 4)):
         trig = candles[j]
@@ -669,7 +740,6 @@ def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
     if tc is None:
         return None
 
-    # v8.4: recovery только по триггеру
     recovery = (mh - tc) / m_range
     if recovery < MIN_5M_RECOVERY_RATIO:
         return None
@@ -742,6 +812,9 @@ def calculate_entry(ilm, current_price, direction):
 def find_structural_stop_level(candles_15m, direction, entry,
                                 ilm_extreme, sweep_extreme=None,
                                 candles_1h=None):
+    """
+    v8.5: SL за sweep extreme. Не уходим глубже (граница инвалидации).
+    """
     entry_f = _f(entry)
     if entry_f is None:
         return ilm_extreme
@@ -775,25 +848,19 @@ def find_structural_stop_level(candles_15m, direction, entry,
         return ilm_extreme
 
     if direction == "LONG":
+        if se is not None and se < entry_f:
+            return se
         below = [c for c in candidates if c < entry_f]
         if not below:
             return ilm_extreme
-        if se is not None and se < entry_f:
-            deeper = [c for c in below if c <= se]
-            if deeper:
-                return max(deeper)
-            return se
         return max(below)
 
     if direction == "SHORT":
+        if se is not None and se > entry_f:
+            return se
         above = [c for c in candidates if c > entry_f]
         if not above:
             return ilm_extreme
-        if se is not None and se > entry_f:
-            deeper = [c for c in above if c >= se]
-            if deeper:
-                return min(deeper)
-            return se
         return min(above)
 
     return ilm_extreme
@@ -806,7 +873,7 @@ def calculate_stop(entry, structural_level, direction, atr=None):
         return None
 
     if USE_ATR_SCALING and atr is not None and atr > 0:
-        min_dist = atr * ATR_SL_MULT
+        min_dist = atr * ATR_SL_MULT_SOFT
         max_dist = atr * ATR_SL_MAX_MULT
     else:
         min_dist = entry * MIN_SL_DISTANCE_PCT / 100
@@ -876,9 +943,12 @@ def _score(direction, context_direction, sweep, confirmation_strength,
            bos, ilm, rr, major_strength, fvg_bonus):
     score = 0
 
+    # v8.5: контртренд получает 5 вместо 0 (порог 92 был недостижим)
     if direction == context_direction:
         score += 15
     elif context_direction == "NEUTRAL":
+        score += 8
+    else:
         score += 5
 
     if sweep:
@@ -1015,6 +1085,15 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
         result["reason"] = f"ILM устарел ({ilm_age} свечей 5M)."
         return result
 
+    # v8.5: вход только на свежих триггерах
+    if ilm_age > MAX_ILM_AGE_FOR_ENTRY:
+        result["score"] = 68
+        result["reason"] = (
+            f"ILM триггер слишком старый для входа "
+            f"({ilm_age} > {MAX_ILM_AGE_FOR_ENTRY})."
+        )
+        return result
+
     entry = calculate_entry(ilm, price, direction)
     if entry is None:
         result["score"] = 68
@@ -1088,7 +1167,7 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     try:
         result["sl_distance_pct"] = round(abs(entry - sl) / entry * 100, 3)
         result["atr_15m"] = round(atr_15m, 6) if atr_15m else None
-        if atr_15m and abs(entry - sl) < atr_15m * ATR_SL_MULT * 1.001:
+        if atr_15m and abs(entry - sl) < atr_15m * ATR_SL_MULT_SOFT * 1.001:
             result["sl_source"] = "atr_floor"
         else:
             result["sl_source"] = "structural"
@@ -1323,6 +1402,8 @@ __all__ = [
     "SL_BUFFER_PCT",
     "MIN_SWEEP_DEPTH_PCT",
     "USE_ATR_SCALING",
+    "MAX_ILM_AGE_FOR_ENTRY",
+    "ATR_SL_MULT_SOFT",
     "calculate_atr",
     "get_1h_direction",
     "get_higher_timeframe_direction",
