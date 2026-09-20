@@ -1,18 +1,28 @@
 """
-TradeMind 8.6.1 — strategy.py
+TradeMind 9.10 — strategy.py
 
-Откат retest offset до 0.0 (instant entry как в v8.5.1).
-NO_FILL-логика в backtest.py остаётся — но при offset=0 почти не срабатывает.
+Интегрированные улучшения v9.10:
+- ILM trigger window 3 → 5 свечей (главный bottleneck no_5m_ilm)
+- MIN_SWEEP_DEPTH_PCT 0.15 → 0.12
+- MIN_BODY_RATIO_TRIGGER_5M 0.50 → 0.40
+- MIN_5M_RECOVERY_RATIO 0.20 → 0.15
+- MIN_5M_ILM_SWEEP_DISTANCE_PCT 3.0 → 5.0
+- MAX_ILM_AGE_CANDLES_5M 36 → 48
+- MAX_ILM_AGE_FOR_ENTRY 4 → 6
+- ENTRY_TOLERANCE_PCT 0.5 → 1.0
+- MIN_TREND_ACTIVITY_READY 0.40 → 0.35
+- COUNTER_TREND_MIN_SCORE 92 → 88
+- READY promote для топ-сетапов (score≥88–95 + trend override)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "8.6.1"
+STRATEGY_VERSION = "9.10"
 
 ALLOW_SHORT = True
 
-MAX_ILM_AGE_FOR_ENTRY = 4
+MAX_ILM_AGE_FOR_ENTRY = 6              # было 4
 ATR_SL_MULT_SOFT = 0.8
 
 ENABLE_SESSION_FILTER = False
@@ -26,10 +36,10 @@ MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
 SL_BUFFER_PCT = 0.20
 STRUCTURAL_SL_LOOKBACK_15M = 50
-ENTRY_TOLERANCE_PCT = 0.5
+ENTRY_TOLERANCE_PCT = 1.0              # было 0.5
 FIXED_RR = 2.0
 
-MIN_SWEEP_DEPTH_PCT = 0.15
+MIN_SWEEP_DEPTH_PCT = 0.12             # было 0.15
 MAX_SWEEP_AGE_1H = 24
 
 USE_ATR_SCALING = True
@@ -45,7 +55,7 @@ ENABLE_D1_BLOCK = False
 SL_USE_1H_SWINGS = True
 SL_USE_SWEEP_EXTREME = True
 MIN_SL_ATR_MULT = 1.2
-MIN_BODY_RATIO_TRIGGER_5M = 0.50
+MIN_BODY_RATIO_TRIGGER_5M = 0.40       # было 0.50
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = True
 
@@ -56,18 +66,29 @@ VOLUME_CONFIRMATION_LOOKBACK = 20
 MIN_BODY_RATIO = 0.35
 MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
-MAX_ILM_AGE_CANDLES_5M = 36
+MAX_ILM_AGE_CANDLES_5M = 48            # было 36
 
-MIN_5M_RECOVERY_RATIO = 0.20
-MIN_5M_ILM_SWEEP_DISTANCE_PCT = 3.0
+MIN_5M_RECOVERY_RATIO = 0.15           # было 0.20
+MIN_5M_ILM_SWEEP_DISTANCE_PCT = 5.0    # было 3.0
 
-MIN_TREND_ACTIVITY_READY = 0.40
-COUNTER_TREND_MIN_SCORE = 92
+MIN_TREND_ACTIVITY_READY = 0.35        # было 0.40
+COUNTER_TREND_MIN_SCORE = 88           # было 92
 
 FVG_TOLERANCE_PCT = 0.10
 FVG_SWEEP_BONUS = 10
 FVG_ENTRY_BONUS = 5
 FVG_MAX_BONUS = 15
+
+# ─── v9.10: READY promote для топ-сетапов ───
+# (score_min, trend_min, bos_required)
+READY_PROMOTE_TIERS = (
+    (95, 0.20, False),   # top-tier — bos не обязателен
+    (90, 0.25, True),    # strong — bos обязателен
+    (88, 0.30, True),    # good — bos обязателен
+)
+
+# ─── v9.10: ILM trigger window (было 3) ───
+ILM_TRIGGER_WINDOW = 5
 
 
 def _f(x):
@@ -622,6 +643,7 @@ def _is_local_low(c, i):
 
 
 def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
+    """v9.10: trigger window 5 свечей (было 3)."""
     m = candles[i]
     if not _is_local_low(candles, i):
         return None
@@ -651,7 +673,7 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
         return None
 
     trigger_idx = None
-    for j in range(i + 1, min(len(candles), i + 4)):
+    for j in range(i + 1, min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)):
         trig = candles[j]
         tc = _c(trig)
         if (_bull(trig) and _body_ratio(trig) >= MIN_BODY_RATIO_TRIGGER_5M
@@ -694,6 +716,7 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
 
 
 def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
+    """v9.10: trigger window 5 свечей (было 3)."""
     m = candles[i]
     if not _is_local_high(candles, i):
         return None
@@ -723,7 +746,7 @@ def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
         return None
 
     trigger_idx = None
-    for j in range(i + 1, min(len(candles), i + 4)):
+    for j in range(i + 1, min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)):
         trig = candles[j]
         tc = _c(trig)
         if (_bear(trig) and _body_ratio(trig) >= MIN_BODY_RATIO_TRIGGER_5M
@@ -800,10 +823,6 @@ def detect_5m_ilm(candles_5m, sweep, direction, confirmation_time=None):
 
 
 def calculate_entry(ilm, current_price, direction):
-    """
-    v8.6.1: RETEST_OFFSET_PCT = 0.0
-    Возвращает trigger_price (instant entry).
-    """
     if not ilm:
         return None
     trigger = _f(ilm.get("trigger_price"))
@@ -996,6 +1015,40 @@ def _score(direction, context_direction, sweep, confirmation_strength,
     score += fvg_bonus
 
     return int(min(100, max(0, round(score))))
+
+
+def _apply_ready_promote(result):
+    """
+    v9.10: если analyze заблокировал READY из-за score/trend/bos,
+    но сетап топ-уровня — повышаем до READY по tiers.
+    """
+    if result.get("stage") != "15M_CONFIRMED":
+        return result
+    reason = result.get("reason", "")
+    if "READY заблокирован" not in reason:
+        return result
+    if any(result.get(k) is None for k in ("entry", "sl", "tp", "rr")):
+        return result
+
+    score = int(result.get("score", 0))
+    trend = float(result.get("trend_activity", 0.0))
+    bos = bool(result.get("bos", False))
+
+    for score_min, trend_min, need_bos in READY_PROMOTE_TIERS:
+        if score < score_min:
+            continue
+        if trend < trend_min:
+            continue
+        if need_bos and not bos:
+            continue
+        result["stage"] = "READY"
+        result["reason"] = (
+            f"v9.10 promote: score={score} trend={trend:.2f} "
+            f"bos={bos}"
+        )
+        result["_v910_promoted"] = True
+        return result
+    return result
 
 
 def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
@@ -1222,17 +1275,20 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
             f"Sweep → 15M → 5M ILM → Entry=ILM trigger. "
             f"Trend {trend_activity:.2f}. RR 1:{FIXED_RR}. BOS."
         )
-    else:
-        result["stage"] = "15M_CONFIRMED"
-        blocks = []
-        if score < MIN_SCORE_READY:
-            blocks.append(f"score {score}")
-        if not trend_ok:
-            blocks.append(f"trend {trend_activity:.2f}")
-        if not bos_ok:
-            blocks.append("no_bos")
-        result["reason"] = ("READY заблокирован: " + ", ".join(blocks))
+        return result
 
+    result["stage"] = "15M_CONFIRMED"
+    blocks = []
+    if score < MIN_SCORE_READY:
+        blocks.append(f"score {score}")
+    if not trend_ok:
+        blocks.append(f"trend {trend_activity:.2f}")
+    if not bos_ok:
+        blocks.append("no_bos")
+    result["reason"] = ("READY заблокирован: " + ", ".join(blocks))
+
+    # ─── v9.10: пробуем promote до READY для топ-сетапов ───
+    result = _apply_ready_promote(result)
     return result
 
 
