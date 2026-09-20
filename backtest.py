@@ -1,22 +1,17 @@
 """
-TradeMind backtest v9.10 — BE+PARTIAL×2+TRAIL+COOLDOWN v2.
+TradeMind backtest v9.10 FINAL — BE+PARTIAL×2+TRAIL+COOLDOWN v3.
 
-Изменения vs v9.9:
-- BANNED_SYMBOLS: SOL/SUI/BTC отключены (WR<15% или PnL<-2% на 90d)
-- Per-symbol cooldown после СЕРИИ SL (2→3h, 3+→6h)
-- Динамический partial по score и символу (strong/default/weak)
-- Два partial уровня (например 0.7R + 1.3R)
-- BE на 0.5R (было 1.0R)
-- Trailing: триггер 1.3R / дистанция 0.8R
-- NO_FILL окно 12×5M = 1 час
+Изменения vs предыдущей v9.10:
+- simulate_trade_v910 различает SL vs BE (безубыток / трейл в плюс)
+- CooldownMgr: BE сбрасывает серию, авто-reset через 24ч, MAX_CONSEC=5
+- В отчёте появилась строка BE
+- Multi-режим по умолчанию
 
 ЗАПУСК:
   python backtest.py                    → все 10 монет, BE+partial+trail ON
-  python backtest.py --no-be            → без BE
-  python backtest.py --no-partial       → без partial
-  python backtest.py --no-trailing      → без trailing
-  python backtest.py --single --symbol ETHUSDT  → только один символ
-  python backtest.py --max-hours 48     → окно удержания 48ч
+  python backtest.py --single --symbol ETHUSDT   → только один
+  python backtest.py --no-partial                → без partial
+  python backtest.py --symbols ETHUSDT,XRPUSDT   → только указанные
 """
 
 import argparse
@@ -48,10 +43,8 @@ BT_LOOKBACK_1M = 500
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
-# ─── Banned: не торгуем, но показываем в отчёте ───
 BANNED_SYMBOLS = {"SOLUSDT", "SUIUSDT", "BTCUSDT"}
 
-# ─── Полный список символов (banned тоже прогоняются для отчёта) ───
 ALL_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT",
     "XRPUSDT", "LINKUSDT", "DOTUSDT",
@@ -59,7 +52,6 @@ ALL_SYMBOLS = [
     "INJUSDT",
 ]
 
-# ─── Per-symbol cooldown (часов после N-го подряд SL) ───
 COOLDOWN_V910 = {
     "default": {2: 3, 3: 6},
     "APTUSDT": {2: 6, 3: 12},
@@ -67,15 +59,13 @@ COOLDOWN_V910 = {
     "BCHUSDT": {2: 4, 3: 8},
 }
 
-# ─── Trailing (R-множители) ───
 TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
 TRAILING_DISTANCE_R = 0.8
 
-# ─── Partial / BE — динамика по score и символу ───
 PARTIAL_ENABLED = True
 PARTIAL_CONFIGS = {
-    "strong": {          # score >= 95
+    "strong": {
         "partial_1_r": 0.8, "partial_2_r": 1.5,
         "be_at_r": 0.6,
         "partial_1_pct": 40, "partial_2_pct": 30,
@@ -85,7 +75,7 @@ PARTIAL_CONFIGS = {
         "be_at_r": 0.5,
         "partial_1_pct": 50, "partial_2_pct": 25,
     },
-    "weak": {            # пары с исторически слабым partial-hit rate
+    "weak": {
         "partial_1_r": 0.5, "partial_2_r": 1.1,
         "be_at_r": 0.4,
         "partial_1_pct": 50, "partial_2_pct": 25,
@@ -93,7 +83,7 @@ PARTIAL_CONFIGS = {
 }
 WEAK_SYMBOLS = {"SUIUSDT", "SOLUSDT", "APTUSDT", "BCHUSDT"}
 
-LIMIT_FILL_MAX_CANDLES = 12  # 1 час
+LIMIT_FILL_MAX_CANDLES = 12
 
 
 def get_partial_config(symbol, score):
@@ -139,10 +129,6 @@ def pnl_pct(entry, exit_price, direction):
 def blended_pnl_dual(entry, final_exit, direction,
                      p1_done, p1_exit, p1_pct,
                      p2_done, p2_exit, p2_pct):
-    """
-    PnL с учётом двух partial-тейков.
-    Остаток = 100% - p1_pct - p2_pct (если оба сработали).
-    """
     p1_w = (p1_pct / 100.0) if p1_done and p1_exit is not None else 0.0
     p2_w = (p2_pct / 100.0) if p2_done and p2_exit is not None else 0.0
     rem_w = max(0.0, 1.0 - p1_w - p2_w)
@@ -158,17 +144,20 @@ def blended_pnl_dual(entry, final_exit, direction,
 
 
 # ============================================================
-# COOLDOWN MANAGER (per-symbol, SL-серия)
+# COOLDOWN MANAGER v3
 # ============================================================
 
 class CooldownMgr:
     """
-    Считает SL-серию ПОДРЯД.
-      - TP   → серия сбрасывается
-      - SL   → серия +1, запоминаем время
-      - NO_FILL / TIMEOUT → нейтрально
-    Пауза = COOLDOWN_V910[symbol] после N-го подряд SL.
+    v3:
+      - TP / BE → серия сброшена
+      - SL      → серия +1 (cap на MAX_CONSEC=5)
+      - авто-reset если > 24ч без SL
+      - NO_FILL / TIMEOUT / PARTIAL → нейтрально
     """
+    RESET_AFTER_HOURS = 24
+    MAX_CONSEC = 5
+
     def __init__(self, symbol, verbose=True):
         self.symbol = symbol
         self.consec = 0
@@ -177,14 +166,26 @@ class CooldownMgr:
         self.cfg = COOLDOWN_V910.get(symbol, COOLDOWN_V910["default"])
 
     def on_result(self, result_type, ts_ms):
-        if result_type == "TP":
+        # авто-reset если давно не было SL
+        if (self.last_sl_ts is not None
+                and (ts_ms - self.last_sl_ts) / 3600000.0
+                > self.RESET_AFTER_HOURS
+                and self.consec > 0):
+            if self.verbose:
+                print(f"[CD] {self.symbol}: auto-reset "
+                      f"(> {self.RESET_AFTER_HOURS}h без SL, "
+                      f"было {self.consec})", flush=True)
+            self.consec = 0
+            self.last_sl_ts = None
+
+        if result_type in ("TP", "BE"):
             if self.consec > 0 and self.verbose:
-                print(f"[CD] {self.symbol}: TP → серия сброшена "
+                print(f"[CD] {self.symbol}: {result_type} → серия сброшена "
                       f"(было {self.consec} SL)", flush=True)
             self.consec = 0
             self.last_sl_ts = None
         elif result_type == "SL":
-            self.consec += 1
+            self.consec = min(self.consec + 1, self.MAX_CONSEC)
             self.last_sl_ts = ts_ms
             if self.verbose:
                 print(f"[CD] {self.symbol}: SL #{self.consec} "
@@ -262,19 +263,12 @@ def classify_reason(result, market_info):
 
 
 # ============================================================
-# SIMULATE TRADE v9.10 (dual partial + dynamic BE)
+# SIMULATE TRADE v9.10 FINAL (SL vs BE)
 # ============================================================
 
 def simulate_trade_v910(trade, candles_5m, start_ts, max_hours, cfg,
                         use_breakeven=False, use_partial_tp=False,
                         use_trailing=False):
-    """
-    Симуляция сделки с:
-      - NO_FILL (лимитка 12×5M = 1ч)
-      - двумя partial уровнями из cfg
-      - dynamic BE на cfg['be_at_r']
-      - trailing после TRAILING_TRIGGER_R
-    """
     direction = trade["direction"]
     entry = float(trade["entry"])
     sl_initial = float(trade["sl"])
@@ -343,13 +337,25 @@ def simulate_trade_v910(trade, candles_5m, start_ts, max_hours, cfg,
             hit_tp = low <= tp
             hit_sl = high >= current_sl
 
+        # ─── определяем тип выхода ───
+        def _exit_type():
+            # SL перемещён в BE-зону (в пределах 5% от entry)
+            if be_moved and abs(current_sl - entry) < risk * 0.05:
+                return "BE"
+            # trailing вышел в плюс
+            if direction == "LONG" and current_sl > entry:
+                return "BE"
+            if direction == "SHORT" and current_sl < entry:
+                return "BE"
+            return "SL"
+
         # SL/TP first (консервативно — SL при одновременном касании)
         if hit_sl and hit_tp:
             final = blended_pnl_dual(
                 entry, current_sl, direction,
                 p1_done, p1_exit, p1_pct,
                 p2_done, p2_exit, p2_pct)
-            return ("SL", current_sl, c["open_time"], held, final,
+            return (_exit_type(), current_sl, c["open_time"], held, final,
                     p1_done or p2_done)
 
         if hit_sl:
@@ -357,7 +363,7 @@ def simulate_trade_v910(trade, candles_5m, start_ts, max_hours, cfg,
                 entry, current_sl, direction,
                 p1_done, p1_exit, p1_pct,
                 p2_done, p2_exit, p2_pct)
-            return ("SL", current_sl, c["open_time"], held, final,
+            return (_exit_type(), current_sl, c["open_time"], held, final,
                     p1_done or p2_done)
 
         if hit_tp:
@@ -595,7 +601,6 @@ def run_backtest(symbol, max_hours,
             use_trailing=use_trailing,
         )
 
-        # ─── NO_FILL ───
         if res_type == "NO_FILL":
             no_fill_count += 1
             no_fill_by_coin[symbol] += 1
@@ -655,7 +660,7 @@ def print_report(symbol, trades, diag,
         labels.append("PARTIAL×2")
     if use_trailing:
         labels.append("TRAIL")
-    labels.append("CDv2")
+    labels.append("CDv3")
     label = "+".join(labels)
 
     print()
@@ -744,6 +749,7 @@ def print_report(symbol, trades, diag,
 
     tp = sum(1 for t in trades if t["result"] == "TP")
     sl = sum(1 for t in trades if t["result"] == "SL")
+    be = sum(1 for t in trades if t["result"] == "BE")
     timeout = sum(1 for t in trades if t["result"] == "TIMEOUT")
     partial_hits = sum(1 for t in trades if t.get("partial_hit"))
 
@@ -771,6 +777,7 @@ def print_report(symbol, trades, diag,
     print(f"Всего сделок (filled): {len(trades)}")
     print(f"  TP:      {tp}")
     print(f"  SL:      {sl}")
+    print(f"  BE:      {be}")
     print(f"  Timeout: {timeout}")
     if use_partial_tp:
         print(f"  Partial hits: {partial_hits} "
@@ -801,7 +808,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
         labels.append("PARTIAL×2")
     if use_trailing:
         labels.append("TRAIL")
-    labels.append("CDv2")
+    labels.append("CDv3")
     label = "+".join(labels)
 
     print()
@@ -831,57 +838,61 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
             banned = diag.get("banned", False)
 
             if banned:
-                all_summary.append((sym, 0, 0, 0, 0, 0, 0.0, 0, True))
+                all_summary.append((sym, 0, 0, 0, 0, 0, 0, 0.0, 0, True))
             elif trades:
                 tp = sum(1 for t in trades if t["result"] == "TP")
                 sl = sum(1 for t in trades if t["result"] == "SL")
+                be = sum(1 for t in trades if t["result"] == "BE")
                 timeout = sum(1 for t in trades
                               if t["result"] == "TIMEOUT")
                 resolved = tp + sl
                 wr = tp / resolved * 100 if resolved else 0
                 pnl = sum(t["pnl"] for t in trades)
-                all_summary.append((sym, len(trades), tp, sl, timeout, wr,
-                                    pnl, no_fill, False))
+                all_summary.append((sym, len(trades), tp, sl, be,
+                                    timeout, wr, pnl, no_fill, False))
             else:
-                all_summary.append((sym, 0, 0, 0, 0, 0, 0.0,
+                all_summary.append((sym, 0, 0, 0, 0, 0, 0, 0.0,
                                     no_fill, False))
         except Exception as exc:
             print(f"[BT] {sym} FAILED: {exc}", flush=True)
             traceback.print_exc()
-            all_summary.append((sym, 0, 0, 0, 0, 0, 0.0, 0, False))
+            all_summary.append((sym, 0, 0, 0, 0, 0, 0, 0.0, 0, False))
 
     print()
-    print("=" * 70)
+    print("=" * 78)
     print(f"СВОДКА - {label} (max_hours={max_hours}, 90 дней)")
-    print("=" * 70)
+    print("=" * 78)
     print(f"{'Символ':<10}{'Filled':<8}{'NoFill':<8}{'TP':<5}{'SL':<5}"
-          f"{'TO':<5}{'WR':<8}{'PnL':<10}{'Stat':<8}")
-    print("-" * 70)
+          f"{'BE':<5}{'TO':<5}{'WR':<7}{'PnL':<10}{'Stat':<8}")
+    print("-" * 78)
 
     total_trades = 0
     total_tp = 0
     total_sl = 0
+    total_be = 0
     total_to = 0
     total_pnl = 0.0
     total_no_fill = 0
 
-    for (sym, cnt, tp, sl, timeout, wr, pnl, no_fill, banned) in all_summary:
+    for (sym, cnt, tp, sl, be, timeout, wr, pnl,
+         no_fill, banned) in all_summary:
         stat = "BANNED" if banned else "OK"
         print(f"{sym:<10}{cnt:<8}{no_fill:<8}{tp:<5}{sl:<5}"
-              f"{timeout:<5}{wr:<8.1f}{pnl:+.2f}%  {stat}")
+              f"{be:<5}{timeout:<5}{wr:<7.1f}{pnl:+.2f}%  {stat}")
         total_trades += cnt
         total_tp += tp
         total_sl += sl
+        total_be += be
         total_to += timeout
         total_pnl += pnl
         total_no_fill += no_fill
 
-    print("-" * 70)
+    print("-" * 78)
     resolved = total_tp + total_sl
     total_wr = total_tp / resolved * 100 if resolved else 0
     print(f"{'ИТОГО':<10}{total_trades:<8}{total_no_fill:<8}"
-          f"{total_tp:<5}{total_sl:<5}{total_to:<5}"
-          f"{total_wr:<8.1f}{total_pnl:+.2f}%")
+          f"{total_tp:<5}{total_sl:<5}{total_be:<5}{total_to:<5}"
+          f"{total_wr:<7.1f}{total_pnl:+.2f}%")
     print()
     print(f"Всего filled сделок: {total_trades}")
     print(f"NO_FILL (лимитка не исполнилась): {total_no_fill}")
@@ -889,10 +900,11 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     if total_signals > 0:
         fill_rate = total_trades / total_signals * 100
         print(f"Fill rate: {fill_rate:.1f}%")
-    print(f"  TP: {total_tp}  SL: {total_sl}  Timeout: {total_to}")
+    print(f"  TP: {total_tp}  SL: {total_sl}  BE: {total_be}  "
+          f"Timeout: {total_to}")
     print(f"Win rate: {total_wr:.1f}% (от {resolved} закрытых)")
     print(f"Sum PnL: {total_pnl:+.2f}%")
-    print("=" * 70)
+    print("=" * 78)
 
 
 def run_multi_backtest():
@@ -932,7 +944,6 @@ def main():
     use_trailing = not args.no_trailing
 
     if args.single:
-        # одиночный символ
         trades, diag = run_backtest(
             args.symbol, args.max_hours,
             use_breakeven=use_be,
@@ -944,7 +955,6 @@ def main():
                      use_partial_tp=use_partial,
                      use_trailing=use_trailing)
     else:
-        # ─── MULTI по умолчанию ───
         symbols = None
         if args.symbols:
             symbols = [s.strip().upper() for s in args.symbols.split(",")
