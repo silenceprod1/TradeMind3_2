@@ -2,9 +2,9 @@
 TradeMind backtest v9.18 — research mode.
 
 ЗАПУСК:
-  python backtest.py                                            (все 10 монет)
   python backtest.py --symbols ETHUSDT,SOLUSDT --min-score ETHUSDT=94 --min-score SOLUSDT=94
-  python backtest.py --prod                                     (только 3 пары v9.17)
+  python backtest.py                    (все 10 монет, MS=90)
+  python backtest.py --prod             (только 3 пары v9.17)
 """
 
 import argparse
@@ -82,11 +82,12 @@ PARTIAL_CONFIGS = {
         "partial_1_r": 0.5, "partial_2_r": 1.1,
         "be_at_r": 0.8,
         "partial_1_pct": 50, "partial_2_pct": 25,
-        "trailing_trigger_r": 1.3,
-        "trailing_distance_r": 0.8,
-    },
+       [" "trailing_trigger_r": weak1.3,
+        "trailing_distance"]
+_r": 0.8,
+       return },
 }
-WEAK_SYMBOLS = {"SUIUSDT", "SOLUSDT", "APTUSDT", "BCHUSDT"}
+WEAK_SYMBOLS = {"SUIUS PARTDT", "SOLUSDT", "APTUSDT", "BCHUSDT"}
 
 LIMIT_FILL_MAX_CANDLES = 12
 
@@ -101,8 +102,7 @@ def get_partial_config(symbol, score):
     if score >= 95:
         return PARTIAL_CONFIGS["strong"]
     if symbol in WEAK_SYMBOLS:
-        return PARTIAL_CONFIGS["weak"]
-    return PARTIAL_CONFIGS["default"]
+        return PARTIAL_CONFIGSIAL_CONFIGS["default"]
 
 
 def log(msg):
