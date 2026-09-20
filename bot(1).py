@@ -56,7 +56,7 @@ BACKTEST_SYMBOL = "SOLUSDT"
 BACKTEST_MULTI = True
 BACKTEST_MAX_HOURS = 24
 
-# === v8.3.1 Position Management (R-based) ===
+# === v8.3.2 Position Management (R-based) ===
 TRAILING_ENABLED = True
 BREAKEVEN_TRIGGER_R = 1.0
 PARTIAL_TP_ENABLED = True
@@ -75,6 +75,10 @@ BLOCK_CONFLICTING_TRADES = True
 COOLDOWN_AFTER_SL_ENABLED = True
 COOLDOWN_AFTER_SL_HOURS = 6
 COOLDOWN_AFTER_TP_HOURS = 0
+
+# === v8.3.2 Notification dedup ===
+NOTIFICATION_DEDUP_HOURS = 3
+NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
 
 
 COINS = {
@@ -209,138 +213,59 @@ def save_notification_state(data):
         save_json(NOTIFICATION_STATE_FILE, data)
 
 
-def format_price(price):
-    if price is None:
-        return "N/A"
+# ============================================================
+# v8.3.2 NOTIFICATION DEDUP
+# ============================================================
+
+def _entry_bucket(entry, tolerance_pct=NOTIFICATION_ENTRY_TOLERANCE_PCT):
+    """Округляет entry до bucket (0.5% от цены)."""
     try:
-        price = float(price)
-    except Exception:
-        return "N/A"
-    if price >= 1000:
-        return f"${price:,.2f}"
-    if price >= 1:
-        return f"${price:,.4f}"
-    return f"${price:,.6f}"
-
-
-def format_rr(value):
-    if value is None:
-        return "N/A"
-    try:
-        return f"1:{float(value):.2f}"
-    except Exception:
-        return "N/A"
-
-
-def _risk_pct(setup):
-    try:
-        e = float(setup.get("entry"))
-        s = float(setup.get("sl"))
+        e = float(entry)
         if e <= 0:
-            return "N/A"
-        return f"{abs(e - s) / e * 100:.2f}%"
+            return 0
+        bucket_size = e * tolerance_pct / 100.0
+        if bucket_size <= 0:
+            return 0
+        return int(round(e / bucket_size))
     except Exception:
-        return "N/A"
+        return 0
 
 
-def calculate_pnl_percent(entry, exit_price, direction):
-    try:
-        entry = float(entry)
-        exit_price = float(exit_price)
-        if entry <= 0:
-            return None
-        if direction == "LONG":
-            return (exit_price - entry) / entry * 100
-        if direction == "SHORT":
-            return (entry - exit_price) / entry * 100
-    except Exception:
-        return None
-    return None
+def _notification_is_duplicate(notification_state, coin,
+                                direction, entry):
+    """
+    True если сигнал по этой монете + направлению + близкой цене
+    уже отправлялся в последние NOTIFICATION_DEDUP_HOURS часов.
+    """
+    prev = notification_state.get(coin)
+    if not isinstance(prev, dict):
+        # старый формат (строка) или пусто — не дубликат
+        return False
+
+    prev_dir = prev.get("direction")
+    prev_bucket = prev.get("entry_bucket")
+    prev_ts = prev.get("ts", 0)
+
+    if prev_dir != direction:
+        return False
+
+    now_ts = time.time()
+    elapsed_h = (now_ts - prev_ts) / 3600.0
+    if elapsed_h >= NOTIFICATION_DEDUP_HOURS:
+        return False
+
+    return prev_bucket == _entry_bucket(entry)
 
 
-def direction_icon(direction):
-    if direction == "LONG":
-        return "🟢"
-    if direction == "SHORT":
-        return "🔴"
-    return "⚪"
-
-
-STAGE_ICONS = {
-    "READY": "🟢", "SWEPT": "🟠",
-    "15M_CONFIRMED": "🟡", "WAIT": "⏳",
-}
-
-STAGE_TEXTS = {
-    "READY": "🟢 МОЖНО ВХОДИТЬ", "SWEPT": "🟠 SWEEP",
-    "15M_CONFIRMED": "🟡 15M CONFIRMED", "WAIT": "⏳ ОЖИДАНИЕ",
-}
-
-
-def stage_icon(stage): return STAGE_ICONS.get(stage, "⏳")
-def stage_text(stage): return STAGE_TEXTS.get(stage, "⏳ ОЖИДАНИЕ")
-
-
-def tp_source_label(source):
-    return {"d1": " (D1)", "major": " (major)",
-            "local": " (local)",
-            "fixed_rr": " (RR 1:2)"}.get(source, "")
-
-
-def _scenario_rank(stage):
-    return {"READY": 4, "15M_CONFIRMED": 3,
-            "SWEPT": 2, "WAIT": 1}.get(stage, 0)
-
-
-def strong_levels(levels):
-    if not levels:
-        return []
-    strong = [l for l in levels if float(l.get("strength", 0)) >= 65]
-    return strong[:8] if strong else levels[:6]
-
-
-def levels_text(levels, current_price):
-    levels = strong_levels(levels)
-    if not levels:
-        return "нет сильной major liquidity"
-    lines = []
-    for level in levels:
-        try:
-            lp = float(level["price"])
-            d = abs(lp - current_price) / current_price * 100
-        except Exception:
-            continue
-        lt = level.get("type", "LEVEL")
-        src = level.get("source", "")
-        icon = "🔴" if lt == "BSL" else "🟢"
-        tag = f" [{src}]" if src else ""
-        lines.append(
-            f"{icon} <b>{lt}</b> {format_price(lp)} "
-            f"• {d:.2f}% • S{float(level.get('strength', 0)):.0f}{tag}"
-        )
-    return "\n".join(lines) if lines else "нет сильной major liquidity"
-
-
-def fvgs_text(fvgs, current_price, limit=4):
-    if not fvgs:
-        return "— нет незакрытых зон"
-    lines = []
-    for fvg in fvgs[:limit]:
-        try:
-            top = float(fvg["top"])
-            bottom = float(fvg["bottom"])
-        except Exception:
-            continue
-        icon = "🟢" if fvg["type"] == "bullish" else "🔴"
-        tf = fvg.get("tf", "").upper()
-        middle = (top + bottom) / 2
-        d = abs(middle - current_price) / current_price * 100
-        lines.append(
-            f"{icon} <b>{tf}</b> "
-            f"{format_price(bottom)} – {format_price(top)} "
-            f"• {d:.2f}%"
-        )
-    return "\n".join(lines) if lines else "— нет незакрытых зон"
+def _notification_mark(notification_state, coin, direction,
+                        entry, setup_id):
+    notification_state[coin] = {
+        "direction": direction,
+        "entry_bucket": _entry_bucket(entry),
+        "setup_id": setup_id,
+        "entry": float(entry) if entry is not None else None,
+        "ts": time.time(),
+    }
 
 
 # ============================================================
@@ -2097,11 +2022,23 @@ async def monitor(app):
                 if setup is None:
                     continue
 
-                signal_key = setup["id"]
-                if notification_state.get(coin) == signal_key:
+                # === v8.3.2 DEDUP ===
+                if _notification_is_duplicate(
+                    notification_state, coin,
+                    setup["direction"], setup["entry"]
+                ):
+                    print(
+                        f"[SKIP-DUP-NOTIFY] {coin} "
+                        f"{setup['direction']} @{setup['entry']} — "
+                        f"уже отправляли <{NOTIFICATION_DEDUP_HOURS}h назад",
+                        flush=True,
+                    )
                     continue
 
-                notification_state[coin] = signal_key
+                _notification_mark(
+                    notification_state, coin,
+                    setup["direction"], setup["entry"], setup["id"],
+                )
                 state_changed = True
 
                 risk_info = result.get("sl_distance_pct")
@@ -2402,7 +2339,7 @@ async def post_init(application):
             import backtest
 
             if BACKTEST_MULTI:
-                print(">>> BACKTEST 40d (v9.3 full) <<<", flush=True)
+                print(">>> BACKTEST 40d (v9.4 full) <<<", flush=True)
                 backtest.run_multi_backtest_with_hours(
                     BACKTEST_MAX_HOURS,
                     use_breakeven=True,
@@ -2486,6 +2423,7 @@ def main():
     print(f"TradeMind {STRATEGY_VERSION} started (24/7)", flush=True)
     print(f"Monitoring {len(COINS)} coins", flush=True)
     print(f"Cooldown after SL: {COOLDOWN_AFTER_SL_HOURS}h", flush=True)
+    print(f"Notification dedup: {NOTIFICATION_DEDUP_HOURS}h", flush=True)
 
     application.run_polling()
 
