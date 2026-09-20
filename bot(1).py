@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.19.2 FINAL.
-Fix: CHECK_INTERVAL=60, убран спам в логах, asyncio.create_task.
+TradeMind bot v9.19.3.
+Fix: BE после P1 + Telegram-уведомления о P1/P2/BE.
 """
 
 import asyncio
@@ -45,7 +45,7 @@ from strategy import (
 )
 
 
-# --- CONFIG v9.19.2 ---
+# --- CONFIG ---
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -63,17 +63,14 @@ TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
 TRAILING_DISTANCE_R = 0.8
 
-BREAKEVEN_TRIGGER_R = 0.5
+# v9.19.3: BE срабатывает только после partial_1
+BREAKEVEN_TRIGGER_R = 0.7
 PARTIAL_TP_ENABLED = True
 PARTIAL_TP_TRIGGER_R = 0.7
 PARTIAL_TP_PERCENT = 50
 PARTIAL_TP_2_ENABLED = True
 PARTIAL_TP_2_TRIGGER_R = 1.3
 PARTIAL_TP_2_PERCENT = 25
-
-BREAKEVEN_TRIGGER_PCT = 1.0
-TRAILING_TRIGGER_PCT = 4.0
-TRAILING_DISTANCE_PCT = 2.0
 
 BLOCK_CONFLICTING_TRADES = True
 
@@ -103,7 +100,6 @@ MIN_SCORE_MAP = {
 
 MIN_SCORE_READY = 90
 
-
 SUBSCRIBERS_FILE = "subscribers.json"
 TRADE_JOURNAL_FILE = "trade_journal.json"
 ACTIVE_TRADES_FILE = "active_trades.json"
@@ -119,9 +115,9 @@ def get_min_score(sym):
     return MIN_SCORE_MAP["default"]
 
 
-def load_json(filename, default):
+def load_json(fn, default):
     try:
-        f = open(filename, "r", encoding="utf-8")
+        f = open(fn, "r", encoding="utf-8")
         data = json.load(f)
         f.close()
         return data
@@ -129,17 +125,17 @@ def load_json(filename, default):
         return default
 
 
-def save_json(filename, data):
-    tmp = filename + ".tmp"
+def save_json(fn, data):
+    tmp = fn + ".tmp"
     try:
         f = open(tmp, "w", encoding="utf-8")
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()
         os.fsync(f.fileno())
         f.close()
-        os.replace(tmp, filename)
+        os.replace(tmp, fn)
     except Exception as exc:
-        print("SAVE ERROR:", filename, exc)
+        print("SAVE ERROR:", fn, exc)
 
 
 def now_iso():
@@ -585,7 +581,7 @@ def dashboard_message(results, chat_id=None):
         cd_label = "OFF"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.19</b>",
+        "🧠 <b>TRADEMIND v9.19.3</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         "",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -634,7 +630,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.19</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.19.3</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -644,7 +640,7 @@ def dashboard_message(results, chat_id=None):
         f"/{PARTIAL_TP_PERCENT}%",
         f"💰 P2: {PARTIAL_TP_2_TRIGGER_R}R"
         f"/{PARTIAL_TP_2_PERCENT}%",
-        f"🛡 BE: {BREAKEVEN_TRIGGER_R}R",
+        f"🛡 BE: {BREAKEVEN_TRIGGER_R}R (после P1)",
         "",
         f"🎯 Trail: <b>{tr_label}</b>",
         f"📈 SHORT: <b>{sh_label}</b>",
@@ -778,7 +774,6 @@ def coin_message(coin, result):
     d = result.get("direction", "NEUTRAL")
     d1 = result.get("d1_trend", "NEUTRAL")
     trend = result.get("trend_activity", 0.0)
-    fvg_b = result.get("fvg_bonus", 0)
     score = result.get("score", 0)
     bos = result.get("bos", False)
 
@@ -1022,6 +1017,7 @@ def activate_trade(setup, chat_id):
             "partial_tp_price": None,
             "partial_tp_2_done": False,
             "partial_tp_2_price": None,
+            "be_moved": False,
         }
         active.append(trade)
         save_active_trades(active)
@@ -1060,6 +1056,12 @@ def close_trade(trade, exit_price, rtype):
 
 
 def apply_trailing(trade, cur_price):
+    """
+    Возвращает список событий: [("P1", price), ("P2", price), ("BE", price)]
+    v9.19.3: BE срабатывает ТОЛЬКО после P1.
+    """
+    events = []
+
     try:
         entry = float(trade["entry"])
         cur_sl = float(trade["sl"])
@@ -1067,66 +1069,90 @@ def apply_trailing(trade, cur_price):
         d = trade["direction"]
         best = float(trade.get("best_price", entry))
     except Exception:
-        return
+        return events
 
     risk = abs(entry - sl0)
     if risk <= 0:
-        return
+        return events
 
+    # --- LONG ---
     if d == "LONG":
         if cur_price > best:
             best = cur_price
         mr = (best - entry) / risk
 
+        # P1
         if (PARTIAL_TP_ENABLED
                 and not trade.get("partial_tp_done")
                 and mr >= PARTIAL_TP_TRIGGER_R):
             trade["partial_tp_done"] = True
-            trade["partial_tp_price"] = round(
-                cur_price, 8)
+            trade["partial_tp_price"] = round(cur_price, 8)
+            events.append(("P1", cur_price))
 
+        # P2
         if (PARTIAL_TP_2_ENABLED
                 and not trade.get("partial_tp_2_done")
+                and trade.get("partial_tp_done")
                 and mr >= PARTIAL_TP_2_TRIGGER_R):
             trade["partial_tp_2_done"] = True
-            trade["partial_tp_2_price"] = round(
-                cur_price, 8)
+            trade["partial_tp_2_price"] = round(cur_price, 8)
+            events.append(("P2", cur_price))
 
-        if mr >= BREAKEVEN_TRIGGER_R:
+        # BE — только после P1
+        be_ready = (not PARTIAL_TP_ENABLED) or trade.get(
+            "partial_tp_done")
+        if (be_ready
+                and not trade.get("be_moved")
+                and mr >= BREAKEVEN_TRIGGER_R):
             if entry > cur_sl:
                 trade["sl"] = round(entry, 8)
                 trade["trailing_active"] = True
+                trade["be_moved"] = True
+                events.append(("BE", entry))
 
+        # Trailing
         if mr >= TRAILING_TRIGGER_R:
             ns = best - risk * TRAILING_DISTANCE_R
             if ns > cur_sl:
                 trade["sl"] = round(ns, 8)
                 trade["trailing_active"] = True
 
+    # --- SHORT ---
     elif d == "SHORT":
         if cur_price < best:
             best = cur_price
         mr = (entry - best) / risk
 
+        # P1
         if (PARTIAL_TP_ENABLED
                 and not trade.get("partial_tp_done")
                 and mr >= PARTIAL_TP_TRIGGER_R):
             trade["partial_tp_done"] = True
-            trade["partial_tp_price"] = round(
-                cur_price, 8)
+            trade["partial_tp_price"] = round(cur_price, 8)
+            events.append(("P1", cur_price))
 
+        # P2
         if (PARTIAL_TP_2_ENABLED
                 and not trade.get("partial_tp_2_done")
+                and trade.get("partial_tp_done")
                 and mr >= PARTIAL_TP_2_TRIGGER_R):
             trade["partial_tp_2_done"] = True
-            trade["partial_tp_2_price"] = round(
-                cur_price, 8)
+            trade["partial_tp_2_price"] = round(cur_price, 8)
+            events.append(("P2", cur_price))
 
-        if mr >= BREAKEVEN_TRIGGER_R:
+        # BE — только после P1
+        be_ready = (not PARTIAL_TP_ENABLED) or trade.get(
+            "partial_tp_done")
+        if (be_ready
+                and not trade.get("be_moved")
+                and mr >= BREAKEVEN_TRIGGER_R):
             if entry < cur_sl:
                 trade["sl"] = round(entry, 8)
                 trade["trailing_active"] = True
+                trade["be_moved"] = True
+                events.append(("BE", entry))
 
+        # Trailing
         if mr >= TRAILING_TRIGGER_R:
             ns = best + risk * TRAILING_DISTANCE_R
             if ns < cur_sl:
@@ -1134,6 +1160,7 @@ def apply_trailing(trade, cur_price):
                 trade["trailing_active"] = True
 
     trade["best_price"] = round(best, 8)
+    return events
 
 
 def _partials_text(trade):
@@ -1147,6 +1174,53 @@ def _partials_text(trade):
             f"💰 P2: <b>{PARTIAL_TP_2_PERCENT}%</b> @ "
             f"{format_price(trade.get('partial_tp_2_price'))}")
     return lines
+
+
+def event_notify_message(trade, event_type, price):
+    coin = trade.get("coin")
+    d = trade.get("direction")
+    entry = trade.get("entry")
+    sl = trade.get("sl")
+    pnl = calc_pnl(entry, price, d)
+    pnl_text = f"{pnl:+.2f}%" if pnl is not None else "N/A"
+
+    if event_type == "P1":
+        return (
+            f"💰 <b>P1 — ЗАКРОЙ 50%</b>\n\n"
+            f"💠 <b>{escape(str(coin))}</b>\n"
+            f"📐 {dir_icon(d)} <b>{d}</b>\n\n"
+            f"Текущая цена: "
+            f"<b>{format_price(price)}</b>\n"
+            f"PnL: <b>{pnl_text}</b>\n\n"
+            f"✅ Закрой <b>{PARTIAL_TP_PERCENT}%</b> "
+            f"позиции рыночным ордером\n"
+            f"✅ Перенеси SL на "
+            f"<b>{format_price(entry)}</b>\n"
+            f"<i>(BE активен — защита от отката)</i>"
+        )
+    if event_type == "P2":
+        return (
+            f"💰 <b>P2 — ЗАКРОЙ ЕЩЁ 25%</b>\n\n"
+            f"💠 <b>{escape(str(coin))}</b>\n"
+            f"📐 {dir_icon(d)} <b>{d}</b>\n\n"
+            f"Текущая цена: "
+            f"<b>{format_price(price)}</b>\n"
+            f"PnL: <b>{pnl_text}</b>\n\n"
+            f"✅ Закрой <b>{PARTIAL_TP_2_PERCENT}%</b> "
+            f"позиции\n"
+            f"Остаток едет до TP"
+        )
+    if event_type == "BE":
+        return (
+            f"🛡 <b>BE — SL В БЕЗУБЫТОК</b>\n\n"
+            f"💠 <b>{escape(str(coin))}</b>\n"
+            f"📐 {dir_icon(d)} <b>{d}</b>\n\n"
+            f"SL перенесён на entry: "
+            f"<b>{format_price(sl)}</b>\n"
+            f"<i>Теперь при откате — 0% вместо −риск</i>\n\n"
+            f"📊 PnL сейчас: <b>{pnl_text}</b>"
+        )
+    return ""
 
 
 def trade_close_message(trade):
@@ -1228,7 +1302,9 @@ async def monitor_active_trades(app, results):
     snap = []
     for t in active:
         snap.append(dict(t))
+
     to_close = []
+    to_notify = []   # [(chat_id, event_type, price, trade_snapshot)]
 
     for trade in snap:
         if trade.get("status") != "OPEN":
@@ -1246,13 +1322,9 @@ async def monitor_active_trades(app, results):
         except Exception:
             continue
 
-        prev = float(trade.get("last_price",
-                               trade.get("entry")))
-        pms = int(trade.get("last_check_ms",
-                            trade.get("opened_at_ms",
-                                      now_ms())))
         cms = now_ms()
 
+        # Проверка SL/TP
         try:
             sl = float(trade["sl"])
             tp = float(trade["tp"])
@@ -1272,15 +1344,22 @@ async def monitor_active_trades(app, results):
             elif cur >= sl:
                 hit = ("SL", cur)
 
-        if hit is None:
-            if TRAILING_ENABLED:
-                apply_trailing(trade, cur)
-            trade["last_price"] = cur
-            trade["last_check_ms"] = cms
+        if hit is not None:
+            rtype, exp = hit
+            to_close.append((trade, rtype, exp))
             continue
 
-        rtype, exp = hit
-        to_close.append((trade, rtype, exp))
+        # Trailing + partials + BE
+        if TRAILING_ENABLED:
+            events = apply_trailing(trade, cur)
+            if events:
+                chat_id = trade.get("chat_id")
+                for ev_type, ev_price in events:
+                    to_notify.append(
+                        (chat_id, ev_type, ev_price, dict(trade)))
+
+        trade["last_price"] = cur
+        trade["last_check_ms"] = cms
 
     still_open = []
     for t in snap:
@@ -1288,6 +1367,24 @@ async def monitor_active_trades(app, results):
             still_open.append(t)
     save_active_trades(still_open)
 
+    # Отправляем уведомления о P1/P2/BE
+    for chat_id, ev_type, ev_price, tr_snap in to_notify:
+        if not chat_id:
+            continue
+        try:
+            msg = event_notify_message(tr_snap, ev_type, ev_price)
+            if msg:
+                await safe_send_message(
+                    app, chat_id, msg,
+                    parse_mode="HTML",
+                    reply_markup=active_keyboard(chat_id))
+                print(
+                    f"[{ev_type}] {tr_snap.get('coin')} "
+                    f"@ {ev_price}", flush=True)
+        except Exception as exc:
+            print("EVENT NOTIFY ERR:", exc)
+
+    # Закрываем TP/SL
     for trade, rtype, exp in to_close:
         closed = close_trade(trade, exp, rtype)
         if closed is None:
@@ -1348,8 +1445,12 @@ def active_message(chat_id):
         else:
             pnl_text = "N/A"
 
+        be_tag = ""
+        if t.get("be_moved"):
+            be_tag = " 🛡 BE"
+
         lines.extend([
-            f"💠 <b>{escape(str(coin))}</b>",
+            f"💠 <b>{escape(str(coin))}</b>{be_tag}",
             f"📐 {dir_icon(d)} <b>{d}</b>", "",
             f"💰 Entry: "
             f"<b>{format_price(entry)}</b>",
@@ -1486,7 +1587,7 @@ def ready_message(coin, result, setup):
         f"({PARTIAL_TP_PERCENT}%)",
         f"💰 P2: {PARTIAL_TP_2_TRIGGER_R}R "
         f"({PARTIAL_TP_2_PERCENT}%)",
-        f"🛡 BE: {BREAKEVEN_TRIGGER_R}R",
+        f"🛡 BE: {BREAKEVEN_TRIGGER_R}R (после P1)",
         "",
         "🟢 <b>СТАВЬ ЛИМИТКУ</b>",
     ]
@@ -2022,13 +2123,14 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.19</b>\n\n"
+        f"🎯 <b>MODEL 9.19.3</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
         f"<b>{PARTIAL_TP_2_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_2_PERCENT}%)\n"
-        f"🛡 BE: <b>{BREAKEVEN_TRIGGER_R}R</b>\n\n"
+        f"🛡 BE: <b>{BREAKEVEN_TRIGGER_R}R</b>"
+        f" (после P1)\n\n"
         f"🎯 Trailing: <b>{tr}</b>\n"
         f"💰 Partial: <b>{pt}</b>\n"
         f"❄️ Cooldown: <b>{cd}</b>\n"
@@ -2087,7 +2189,7 @@ async def monitor(app):
                 if rr < MIN_RR:
                     continue
 
-                in_cd, cd_reason = coin_in_cooldown(coin)
+                in_cd, _ = coin_in_cooldown(coin)
                 if in_cd:
                     continue
 
@@ -2314,7 +2416,8 @@ async def callbacks(update, context):
              f"<b>{format_price(trade.get('tp'))}</b>\n"
              f"RR: "
              f"<b>{format_rr(trade.get('rr'))}</b>\n\n"
-             f"📌 Snapshot сохранён"),
+             f"📌 Snapshot сохранён\n"
+             f"🔔 P1/P2/BE придут в Telegram"),
             active_keyboard(chat_id))
         return
 
@@ -2446,6 +2549,7 @@ async def callbacks(update, context):
             f"P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>\n"
             f"P2: <b>{PARTIAL_TP_2_TRIGGER_R}R</b>\n"
             f"BE: <b>{BREAKEVEN_TRIGGER_R}R</b>\n"
+            f"BE после P1\n"
             f"Trail: <b>{tr}</b>\n"
             f"Partial: <b>{pt}</b>\n"
             f"Cooldown: <b>{cd}</b>\n"
@@ -2456,7 +2560,7 @@ async def callbacks(update, context):
         return
 
 
-# --- POST INIT (FIXED) ---
+# --- POST INIT ---
 
 async def post_init(application):
     if RUN_BACKTEST_ON_START:
