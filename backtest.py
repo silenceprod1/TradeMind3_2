@@ -1,15 +1,13 @@
 """
-TradeMind backtest v9.18 — research mode.
+TradeMind backtest v9.18 — research mode (default ON).
 
-Новое:
-- Флаг --research: отключает BANNED и UNPROFITABLE (тестируем все 10 монет)
-- Флаг --min-score SYMBOL=N: точечный override MIN_SCORE
-  Пример: --min-score BTCUSDT=95 --min-score SOLUSDT=92
+RESEARCH_MODE = True по умолчанию: все баны отключены, тестируются 10 монет.
+Чтобы вернуть prod-режим — поставь RESEARCH_MODE = False.
 
 ЗАПУСК:
-  python backtest.py --research
-  python backtest.py --research --min-score BTCUSDT=95
-  python backtest.py                       (обычный режим v9.17)
+  python backtest.py                          (research, все 10 монет)
+  python backtest.py --min-score BTCUSDT=95   (override MIN_SCORE)
+  python backtest.py --single --symbol SOLUSDT
 """
 
 import argparse
@@ -41,7 +39,7 @@ BT_LOOKBACK_1M = 500
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
-# per-symbol MIN_SCORE (v9.17 baseline)
+# per-symbol MIN_SCORE
 MIN_SCORE_BY_SYMBOL = {
     "default": 90,
     "INJUSDT": 88,
@@ -100,8 +98,10 @@ WEAK_SYMBOLS = {"SUIUSDT", "SOLUSDT", "APTUSDT", "BCHUSDT"}
 
 LIMIT_FILL_MAX_CANDLES = 12
 
-# research flags (переопределяются в main)
-RESEARCH_MODE = False
+# ═══════════════════════════════════════════════════════════
+# RESEARCH MODE — TRUE по умолчанию
+# ═══════════════════════════════════════════════════════════
+RESEARCH_MODE = True
 
 
 def get_min_score(symbol):
@@ -1004,7 +1004,7 @@ def main():
     global RESEARCH_MODE
 
     parser = argparse.ArgumentParser(
-        description="TradeMind v9.18 backtest (40 дней, research mode)")
+        description="TradeMind v9.18 backtest (40 дней)")
     parser.add_argument("--symbol", default="INJUSDT")
     parser.add_argument("--max-hours", type=int,
                         default=DEFAULT_MAX_HOURS)
@@ -1017,12 +1017,18 @@ def main():
                         action="store_true",
                         help="включить ETH/DOT/XRP/LINK")
     parser.add_argument("--research", action="store_true",
-                        help="отключить все баны, тестировать все 10 монет")
+                        help="включить research (все 10 монет)")
+    parser.add_argument("--prod", action="store_true",
+                        help="принудительно PROD (только 3 пары)")
     parser.add_argument("--min-score", action="append", default=[],
-                        help="override MIN_SCORE для символа "
-                             "(пример: --min-score BTCUSDT=92)")
+                        help="override MIN_SCORE (пример: "
+                             "--min-score BTCUSDT=95)")
     args = parser.parse_args()
 
+    # по умолчанию RESEARCH_MODE = True из CONFIG
+    # --prod переключает в PROD
+    if args.prod:
+        RESEARCH_MODE = False
     if args.research:
         RESEARCH_MODE = True
 
