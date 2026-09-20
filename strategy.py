@@ -1,13 +1,14 @@
 """
-TradeMind 8.6 — strategy.py
+TradeMind 8.6.1 — strategy.py
 
-Retest Entry: вход на 0.5% откате от trigger-close.
+Откат retest offset до 0.0 (instant entry как в v8.5.1).
+NO_FILL-логика в backtest.py остаётся — но при offset=0 почти не срабатывает.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "8.6"
+STRATEGY_VERSION = "8.6.1"
 
 ALLOW_SHORT = True
 
@@ -19,13 +20,13 @@ SESSION_BLOCK_START_HOUR = 2
 SESSION_BLOCK_END_HOUR = 7
 SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 
-RETEST_OFFSET_PCT = 0.5
+RETEST_OFFSET_PCT = 0.0
 
 MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
 SL_BUFFER_PCT = 0.20
 STRUCTURAL_SL_LOOKBACK_15M = 50
-ENTRY_TOLERANCE_PCT = 0.7
+ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
 
 MIN_SWEEP_DEPTH_PCT = 0.15
@@ -798,17 +799,10 @@ def detect_5m_ilm(candles_5m, sweep, direction, confirmation_time=None):
     return True, best
 
 
-# ============================================================
-# v8.6 RETEST ENTRY
-# ============================================================
-
 def calculate_entry(ilm, current_price, direction):
     """
-    v8.6 Retest Entry:
-    - Возвращает retest-цену (trigger ± offset)
-    - В live бот ставит лимитку по этой цене
-    - Если цена откатится — сделка исполнится
-    - Если уйдёт в сторону — сигнал сгорит
+    v8.6.1: RETEST_OFFSET_PCT = 0.0
+    Возвращает trigger_price (instant entry).
     """
     if not ilm:
         return None
@@ -817,12 +811,12 @@ def calculate_entry(ilm, current_price, direction):
         return None
 
     offset = RETEST_OFFSET_PCT / 100.0
+    if offset <= 0:
+        return trigger
 
     if direction == "LONG":
-        # Вход ниже триггера — ждём откат
         return trigger * (1 - offset)
     elif direction == "SHORT":
-        # Вход выше триггера — ждём откат
         return trigger * (1 + offset)
     return trigger
 
@@ -1225,7 +1219,7 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     if ready_ok:
         result["stage"] = "READY"
         result["reason"] = (
-            f"Sweep → 15M → 5M ILM → Retest entry. "
+            f"Sweep → 15M → 5M ILM → Entry=ILM trigger. "
             f"Trend {trend_activity:.2f}. RR 1:{FIXED_RR}. BOS."
         )
     else:
