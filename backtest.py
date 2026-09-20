@@ -1,5 +1,5 @@
 """
-TradeMind backtest v9.13 FINAL.
+TradeMind backtest v9.13 (90 дней).
 BE в entry, be_at_r=1.0, trailing 1.3/0.8, cooldown per-symbol v3.
 Banned: BTC/SOL/SUI. Unprofitable: ETH/DOT/XRP.
 """
@@ -20,10 +20,11 @@ from market import (
 from strategy import analyze, get_1h_direction
 
 
-BT_LOOKBACK_D1 = 60
-BT_LOOKBACK_1H = 1200
-BT_LOOKBACK_15M = 4800
-BT_LOOKBACK_5M = 14400
+# ── 90 дней ──
+BT_LOOKBACK_D1 = 180
+BT_LOOKBACK_1H = 2160
+BT_LOOKBACK_15M = 8640
+BT_LOOKBACK_5M = 25920
 BT_LOOKBACK_1M = 500
 
 WARMUP_1H = 150
@@ -310,7 +311,6 @@ def simulate_trade_v913(trade, candles_5m, start_ts, max_hours, cfg,
             hit_tp = low <= tp
             hit_sl = high >= current_sl
 
-        # exit type
         exit_t = "SL"
         if be_moved and abs(current_sl - entry) < risk * 0.05:
             exit_t = "BE"
@@ -817,7 +817,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     print()
     print("#" * 70)
     print("### MULTI BACKTEST v9.13 - " + label
-          + " - " + str(len(symbols)) + " монет x 40 дней")
+          + " - " + str(len(symbols)) + " монет x 90 дней")
     print("#" * 70)
     print("### Banned: " + str(sorted(BANNED_SYMBOLS)))
     if exclude_unprofitable:
@@ -872,7 +872,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     print()
     print("=" * 78)
     print("СВОДКА - " + label
-          + " (max_hours=" + str(max_hours) + ", 40 дней)")
+          + " (max_hours=" + str(max_hours) + ", 90 дней)")
     print("=" * 78)
     hdr = ("Символ".ljust(10) + "Filled".ljust(8) + "NoFill".ljust(8)
            + "TP".ljust(5) + "SL".ljust(5) + "BE".ljust(5) + "TO".ljust(5)
@@ -913,16 +913,15 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     print("-" * 78)
     resolved = total_tp + total_sl
     total_wr = total_tp / resolved * 100 if resolved else 0
-    итого_line = ("ИТОГО".ljust(10)
-                  + str(total_trades).ljust(8)
-                  + str(total_no_fill).ljust(8)
-                  + str(total_tp).ljust(5)
-                  + str(total_sl).ljust(5)
-                  + str(total_be).ljust(5)
-                  + str(total_to).ljust(5)
-                  + ("%.1f" % total_wr).ljust(7)
-                  + ("%+.2f%%" % total_pnl))
-    print(итого_line)
+    print("ИТОГО".ljust(10)
+          + str(total_trades).ljust(8)
+          + str(total_no_fill).ljust(8)
+          + str(total_tp).ljust(5)
+          + str(total_sl).ljust(5)
+          + str(total_be).ljust(5)
+          + str(total_to).ljust(5)
+          + ("%.1f" % total_wr).ljust(7)
+          + ("%+.2f%%" % total_pnl))
     print()
     print("Всего filled сделок: " + str(total_trades))
     print("NO_FILL (лимитка не исполнилась): " + str(total_no_fill))
@@ -951,7 +950,7 @@ def run_multi_backtest():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TradeMind v9.13 backtest (40 дней)")
+        description="TradeMind v9.13 backtest (90 дней)")
     parser.add_argument("--symbol", default="INJUSDT")
     parser.add_argument("--max-hours", type=int,
                         default=DEFAULT_MAX_HOURS)
