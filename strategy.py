@@ -1,11 +1,13 @@
 """
-TradeMind 8.5.1 — strategy.py
+TradeMind 8.6 — strategy.py
+
+Retest Entry: вход на 0.5% откате от trigger-close.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "8.5.1"
+STRATEGY_VERSION = "8.6"
 
 ALLOW_SHORT = True
 
@@ -17,11 +19,13 @@ SESSION_BLOCK_START_HOUR = 2
 SESSION_BLOCK_END_HOUR = 7
 SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 
+RETEST_OFFSET_PCT = 0.5
+
 MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
 SL_BUFFER_PCT = 0.20
 STRUCTURAL_SL_LOOKBACK_15M = 50
-ENTRY_TOLERANCE_PCT = 0.5
+ENTRY_TOLERANCE_PCT = 0.7
 FIXED_RR = 2.0
 
 MIN_SWEEP_DEPTH_PCT = 0.15
@@ -794,12 +798,32 @@ def detect_5m_ilm(candles_5m, sweep, direction, confirmation_time=None):
     return True, best
 
 
+# ============================================================
+# v8.6 RETEST ENTRY
+# ============================================================
+
 def calculate_entry(ilm, current_price, direction):
+    """
+    v8.6 Retest Entry:
+    - Возвращает retest-цену (trigger ± offset)
+    - В live бот ставит лимитку по этой цене
+    - Если цена откатится — сделка исполнится
+    - Если уйдёт в сторону — сигнал сгорит
+    """
     if not ilm:
         return None
     trigger = _f(ilm.get("trigger_price"))
     if trigger is None or trigger <= 0:
         return None
+
+    offset = RETEST_OFFSET_PCT / 100.0
+
+    if direction == "LONG":
+        # Вход ниже триггера — ждём откат
+        return trigger * (1 - offset)
+    elif direction == "SHORT":
+        # Вход выше триггера — ждём откат
+        return trigger * (1 + offset)
     return trigger
 
 
@@ -1201,7 +1225,7 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     if ready_ok:
         result["stage"] = "READY"
         result["reason"] = (
-            f"Sweep → 15M → 5M ILM → Entry=ILM trigger. "
+            f"Sweep → 15M → 5M ILM → Retest entry. "
             f"Trend {trend_activity:.2f}. RR 1:{FIXED_RR}. BOS."
         )
     else:
@@ -1393,7 +1417,7 @@ __all__ = [
     "USE_ATR_SCALING",
     "MAX_ILM_AGE_FOR_ENTRY",
     "ATR_SL_MULT_SOFT",
-    "ENABLE_SESSION_FILTER",
+    "RETEST_OFFSET_PCT",
     "calculate_atr",
     "get_1h_direction",
     "get_higher_timeframe_direction",
