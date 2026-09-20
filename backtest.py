@@ -1,11 +1,12 @@
 """
-TradeMind backtest v9.14 (40 дней).
+TradeMind backtest v9.15 (40 дней).
 
-Улучшения vs v9.13:
-- ULTRA-tier для score>=95: be_at_r=1.5, trailing 1.5/1.0
-- Отсев READY-сделок со score < 90
-- LINK в UNPROFITABLE (было 4 пары, стало 3)
-- Trailing параметры через cfg (per-tier)
+Фикс vs v9.14:
+- ULTRA-tier (score>=95): be_at_r=1.0 (было 1.5) — TP получает шанс
+- Остальные улучшения v9.14 сохранены:
+  * MIN_SCORE_READY = 90 (отсев слабых READY)
+  * LINK в UNPROFITABLE
+  * Per-tier trailing через cfg
 
 ЗАПУСК:
   python backtest.py
@@ -28,7 +29,7 @@ from strategy import analyze, get_1h_direction
 
 
 # ============================================================
-# CONFIG v9.14 (40 дней)
+# CONFIG v9.15 (40 дней)
 # ============================================================
 
 BT_LOOKBACK_D1 = 60
@@ -40,7 +41,7 @@ BT_LOOKBACK_1M = 500
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
-# v9.14: минимальный score для READY
+# v9.15: минимальный score для READY
 MIN_SCORE_READY_BT = 90
 
 BANNED_SYMBOLS = {"BTCUSDT", "SOLUSDT", "SUIUSDT"}
@@ -68,9 +69,10 @@ BE_PROFIT_OFFSET_R = 0.0
 
 PARTIAL_ENABLED = True
 PARTIAL_CONFIGS = {
+    # v9.15: ultra tier с be_at_r=1.0 (было 1.5)
     "ultra": {
         "partial_1_r": 0.8, "partial_2_r": 1.5,
-        "be_at_r": 1.5,
+        "be_at_r": 1.0,
         "partial_1_pct": 40, "partial_2_pct": 30,
         "trailing_trigger_r": 1.5,
         "trailing_distance_r": 1.0,
@@ -266,7 +268,7 @@ def classify_reason(result, market_info):
     return "stage_" + stage.lower()
 
 
-def simulate_trade_v914(trade, candles_5m, start_ts, max_hours, cfg,
+def simulate_trade_v915(trade, candles_5m, start_ts, max_hours, cfg,
                         use_breakeven=False, use_partial_tp=False,
                         use_trailing=False):
     direction = trade["direction"]
@@ -454,7 +456,7 @@ def run_backtest(symbol, max_hours,
         banned = banned | UNPROFITABLE_SYMBOLS
 
     if symbol in banned:
-        log("[v9.14] SKIP banned symbol: " + symbol)
+        log("[v9.15] SKIP banned symbol: " + symbol)
         empty_diag = {
             "stage_counter": Counter(),
             "reason_counter": Counter(),
@@ -574,7 +576,7 @@ def run_backtest(symbol, max_hours,
         market_info = {"bsl_count": n_bsl, "ssl_count": n_ssl}
         reason_key = classify_reason(result, market_info)
 
-        # v9.14: отсев READY со score < 90
+        # v9.15: отсев READY со score < 90
         if stage == "READY" and score < MIN_SCORE_READY_BT:
             stage_counter["READY_LOW"] += 1
             reason_counter["ready_score_below_90"] += 1
@@ -620,7 +622,7 @@ def run_backtest(symbol, max_hours,
         cfg = get_partial_config(symbol, score)
 
         (res_type, exit_price, exit_ts, held, trade_pnl,
-         partial_hit) = simulate_trade_v914(
+         partial_hit) = simulate_trade_v915(
             trade, candles_5m, ts_now, max_hours,
             cfg=cfg,
             use_breakeven=use_breakeven,
@@ -697,7 +699,7 @@ def print_report(symbol, trades, diag,
 
     print()
     print("=" * 70)
-    print("ОТЧЁТ БЭКТЕСТА v9.14 - " + symbol + " [" + label + "]")
+    print("ОТЧЁТ БЭКТЕСТА v9.15 - " + symbol + " [" + label + "]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -854,7 +856,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("#" * 70)
-    print("### MULTI BACKTEST v9.14 - " + label
+    print("### MULTI BACKTEST v9.15 - " + label
           + " - " + str(len(symbols)) + " монет x 40 дней")
     print("#" * 70)
     print("### Banned: " + str(sorted(BANNED_SYMBOLS)))
@@ -862,7 +864,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
         print("### +Excluded: " + str(sorted(UNPROFITABLE_SYMBOLS)))
     print("### BE: в ENTRY (offset=" + str(BE_PROFIT_OFFSET_R) + "R)")
     print("### MIN_SCORE_READY: " + str(MIN_SCORE_READY_BT))
-    print("### ULTRA tier: score>=95 -> be_at_r=1.5, trail 1.5/1.0")
+    print("### ULTRA tier: score>=95 -> be_at_r=1.0, trail 1.5/1.0")
     print("#" * 70)
 
     all_summary = []
@@ -908,7 +910,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("=" * 78)
-    print("СВОДКА v9.14 - " + label
+    print("СВОДКА v9.15 - " + label
           + " (" + str(max_hours) + "h, 40 дней)")
     print("=" * 78)
     hdr = ("Символ".ljust(10) + "Filled".ljust(8) + "NoFill".ljust(8)
@@ -987,7 +989,7 @@ def run_multi_backtest():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TradeMind v9.14 backtest (40 дней)")
+        description="TradeMind v9.15 backtest (40 дней)")
     parser.add_argument("--symbol", default="INJUSDT")
     parser.add_argument("--max-hours", type=int,
                         default=DEFAULT_MAX_HOURS)
