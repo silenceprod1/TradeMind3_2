@@ -1,15 +1,15 @@
 """
-TradeMind backtest v9.17 (40 дней).
+TradeMind backtest v9.18 — research mode.
 
-Изменения vs v9.16:
-- MIN_SCORE_BY_SYMBOL: per-symbol фильтр READY
-  * INJUSDT: 88 (фильтр вредил в v9.14-v9.16, откат)
-  * BCHUSDT: 92 (фильтр помогает, чуть жёстче)
-  * APTUSDT: 90
-  * default: 90
+Новое:
+- Флаг --research: отключает BANNED и UNPROFITABLE (тестируем все 10 монет)
+- Флаг --min-score SYMBOL=N: точечный override MIN_SCORE
+  Пример: --min-score BTCUSDT=95 --min-score SOLUSDT=92
 
 ЗАПУСК:
-  python backtest.py
+  python backtest.py --research
+  python backtest.py --research --min-score BTCUSDT=95
+  python backtest.py                       (обычный режим v9.17)
 """
 
 import argparse
@@ -29,7 +29,7 @@ from strategy import analyze, get_1h_direction
 
 
 # ============================================================
-# CONFIG v9.17 (40 дней)
+# CONFIG v9.18 (40 дней)
 # ============================================================
 
 BT_LOOKBACK_D1 = 60
@@ -41,12 +41,12 @@ BT_LOOKBACK_1M = 500
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
-# v9.17: per-symbol MIN_SCORE для READY
+# per-symbol MIN_SCORE (v9.17 baseline)
 MIN_SCORE_BY_SYMBOL = {
     "default": 90,
-    "INJUSDT": 88,   # фильтр вредил (было +23% → +12%)
-    "BCHUSDT": 92,   # фильтр помогает (было +1.5% → +14%)
-    "APTUSDT": 90,   # как есть
+    "INJUSDT": 88,
+    "BCHUSDT": 92,
+    "APTUSDT": 90,
 }
 
 BANNED_SYMBOLS = {"BTCUSDT", "SOLUSDT", "SUIUSDT"}
@@ -99,6 +99,9 @@ PARTIAL_CONFIGS = {
 WEAK_SYMBOLS = {"SUIUSDT", "SOLUSDT", "APTUSDT", "BCHUSDT"}
 
 LIMIT_FILL_MAX_CANDLES = 12
+
+# research flags (переопределяются в main)
+RESEARCH_MODE = False
 
 
 def get_min_score(symbol):
@@ -269,7 +272,7 @@ def classify_reason(result, market_info):
     return "stage_" + stage.lower()
 
 
-def simulate_trade_v917(trade, candles_5m, start_ts, max_hours, cfg,
+def simulate_trade_v918(trade, candles_5m, start_ts, max_hours, cfg,
                         use_breakeven=False, use_partial_tp=False,
                         use_trailing=False):
     direction = trade["direction"]
@@ -454,12 +457,14 @@ def run_backtest(symbol, max_hours,
         + " min_score=" + str(min_score)
         + " cooldown=per-symbol)")
 
-    banned = set(BANNED_SYMBOLS)
-    if exclude_unprofitable:
-        banned = banned | UNPROFITABLE_SYMBOLS
+    banned = set()
+    if not RESEARCH_MODE:
+        banned = set(BANNED_SYMBOLS)
+        if exclude_unprofitable:
+            banned = banned | UNPROFITABLE_SYMBOLS
 
     if symbol in banned:
-        log("[v9.17] SKIP banned symbol: " + symbol)
+        log("[v9.18] SKIP banned symbol: " + symbol)
         empty_diag = {
             "stage_counter": Counter(),
             "reason_counter": Counter(),
@@ -579,7 +584,6 @@ def run_backtest(symbol, max_hours,
         market_info = {"bsl_count": n_bsl, "ssl_count": n_ssl}
         reason_key = classify_reason(result, market_info)
 
-        # v9.17: per-symbol MIN_SCORE
         if stage == "READY" and score < min_score:
             stage_counter["READY_LOW"] += 1
             reason_counter["ready_score_below_min"] += 1
@@ -625,7 +629,7 @@ def run_backtest(symbol, max_hours,
         cfg = get_partial_config(symbol, score)
 
         (res_type, exit_price, exit_ts, held, trade_pnl,
-         partial_hit) = simulate_trade_v917(
+         partial_hit) = simulate_trade_v918(
             trade, candles_5m, ts_now, max_hours,
             cfg=cfg,
             use_breakeven=use_breakeven,
@@ -702,7 +706,7 @@ def print_report(symbol, trades, diag,
 
     print()
     print("=" * 70)
-    print("ОТЧЁТ БЭКТЕСТА v9.17 - " + symbol + " [" + label + "]")
+    print("ОТЧЁТ БЭКТЕСТА v9.18 - " + symbol + " [" + label + "]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -857,15 +861,19 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     labels.append("CDv3")
     label = "+".join(labels)
 
+    mode_str = "RESEARCH" if RESEARCH_MODE else "PROD"
+
     print()
     print("#" * 70)
-    print("### MULTI BACKTEST v9.17 - " + label
+    print("### MULTI BACKTEST v9.18 [" + mode_str + "] - " + label
           + " - " + str(len(symbols)) + " монет x 40 дней")
     print("#" * 70)
-    print("### Banned: " + str(sorted(BANNED_SYMBOLS)))
-    if exclude_unprofitable:
-        print("### +Excluded: " + str(sorted(UNPROFITABLE_SYMBOLS)))
-    print("### BE: в ENTRY (offset=" + str(BE_PROFIT_OFFSET_R) + "R)")
+    if not RESEARCH_MODE:
+        print("### Banned: " + str(sorted(BANNED_SYMBOLS)))
+        if exclude_unprofitable:
+            print("### +Excluded: " + str(sorted(UNPROFITABLE_SYMBOLS)))
+    else:
+        print("### RESEARCH MODE: все баны отключены")
     print("### MIN_SCORE per-symbol: " + str(MIN_SCORE_BY_SYMBOL))
     print("#" * 70)
 
@@ -912,12 +920,13 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("=" * 78)
-    print("СВОДКА v9.17 - " + label
+    print("СВОДКА v9.18 [" + mode_str + "] - " + label
           + " (" + str(max_hours) + "h, 40 дней)")
     print("=" * 78)
-    hdr = ("Символ".ljust(10) + "Filled".ljust(8) + "NoFill".ljust(8)
-           + "TP".ljust(5) + "SL".ljust(5) + "BE".ljust(5) + "TO".ljust(5)
-           + "WR".ljust(7) + "PnL".ljust(10) + "Stat".ljust(8))
+    hdr = ("Символ".ljust(10) + "MS".ljust(5) + "Filled".ljust(8)
+           + "NoFill".ljust(8) + "TP".ljust(5) + "SL".ljust(5)
+           + "BE".ljust(5) + "TO".ljust(5) + "WR".ljust(7)
+           + "PnL".ljust(10) + "Stat".ljust(8))
     print(hdr)
     print("-" * 78)
 
@@ -932,7 +941,9 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     for row in all_summary:
         (sym, cnt, tp, sl, be, to, wr, pnl, no_fill, banned) = row
         stat = "BANNED" if banned else "OK"
+        ms = get_min_score(sym)
         line = (sym.ljust(10)
+                + str(ms).ljust(5)
                 + str(cnt).ljust(8)
                 + str(no_fill).ljust(8)
                 + str(tp).ljust(5)
@@ -954,7 +965,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     print("-" * 78)
     resolved = total_tp + total_sl
     total_wr = total_tp / resolved * 100 if resolved else 0
-    print("ИТОГО".ljust(10)
+    print("ИТОГО".ljust(15)
           + str(total_trades).ljust(8)
           + str(total_no_fill).ljust(8)
           + str(total_tp).ljust(5)
@@ -990,8 +1001,10 @@ def run_multi_backtest():
 
 
 def main():
+    global RESEARCH_MODE
+
     parser = argparse.ArgumentParser(
-        description="TradeMind v9.17 backtest (40 дней)")
+        description="TradeMind v9.18 backtest (40 дней, research mode)")
     parser.add_argument("--symbol", default="INJUSDT")
     parser.add_argument("--max-hours", type=int,
                         default=DEFAULT_MAX_HOURS)
@@ -1003,7 +1016,22 @@ def main():
     parser.add_argument("--include-unprofitable",
                         action="store_true",
                         help="включить ETH/DOT/XRP/LINK")
+    parser.add_argument("--research", action="store_true",
+                        help="отключить все баны, тестировать все 10 монет")
+    parser.add_argument("--min-score", action="append", default=[],
+                        help="override MIN_SCORE для символа "
+                             "(пример: --min-score BTCUSDT=92)")
     args = parser.parse_args()
+
+    if args.research:
+        RESEARCH_MODE = True
+
+    for override in args.min_score:
+        try:
+            sym, val = override.split("=")
+            MIN_SCORE_BY_SYMBOL[sym.strip().upper()] = int(val)
+        except Exception:
+            print("[WARN] Bad --min-score format: " + str(override))
 
     use_be = not args.no_be
     use_partial = not args.no_partial
