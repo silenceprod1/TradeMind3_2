@@ -1,5 +1,5 @@
 """
-TradeMind backtest v9.10 — BE+PARTIAL+TRAIL+COOLDOWN v2.
+TradeMind backtest v9.10 — BE+PARTIAL×2+TRAIL+COOLDOWN v2.
 
 Изменения vs v9.9:
 - BANNED_SYMBOLS: SOL/SUI/BTC отключены (WR<15% или PnL<-2% на 90d)
@@ -8,7 +8,7 @@ TradeMind backtest v9.10 — BE+PARTIAL+TRAIL+COOLDOWN v2.
 - Два partial уровня (например 0.7R + 1.3R)
 - BE на 0.5R (было 1.0R)
 - Trailing: триггер 1.3R / дистанция 0.8R (плотнее)
-- Fill rate NO_FILL: то же окно 12×5M = 1 час
+- NO_FILL окно 12×5M = 1 час
 """
 
 import argparse
@@ -51,7 +51,7 @@ COOLDOWN_V910 = {
     "BCHUSDT": {2: 4, 3: 8},
 }
 
-# ─── Trailing (общий для всех, в R-множителях) ───
+# ─── Trailing (R-множители) ───
 TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
 TRAILING_DISTANCE_R = 0.8
@@ -59,7 +59,7 @@ TRAILING_DISTANCE_R = 0.8
 # ─── Partial / BE — динамика по score и символу ───
 PARTIAL_ENABLED = True
 PARTIAL_CONFIGS = {
-    "strong": {  # score >= 95
+    "strong": {          # score >= 95
         "partial_1_r": 0.8, "partial_2_r": 1.5,
         "be_at_r": 0.6,
         "partial_1_pct": 40, "partial_2_pct": 30,
@@ -69,7 +69,7 @@ PARTIAL_CONFIGS = {
         "be_at_r": 0.5,
         "partial_1_pct": 50, "partial_2_pct": 25,
     },
-    "weak": {  # слабые пары исторически
+    "weak": {            # пары с исторически слабым partial-hit rate
         "partial_1_r": 0.5, "partial_2_r": 1.1,
         "be_at_r": 0.4,
         "partial_1_pct": 50, "partial_2_pct": 25,
@@ -77,7 +77,6 @@ PARTIAL_CONFIGS = {
 }
 WEAK_SYMBOLS = {"SUIUSDT", "SOLUSDT", "APTUSDT", "BCHUSDT"}
 
-# ─── NO_FILL: сколько свечей 5M ждём лимитку ───
 LIMIT_FILL_MAX_CANDLES = 12  # 1 час
 
 
@@ -90,7 +89,7 @@ def get_partial_config(symbol, score):
 
 
 # ============================================================
-# LOG / UTILS
+# UTILS
 # ============================================================
 
 def log(msg):
@@ -126,7 +125,7 @@ def blended_pnl_dual(entry, final_exit, direction,
                      p2_done, p2_exit, p2_pct):
     """
     PnL с учётом двух partial-тейков.
-    Оставшаяся позиция = 100% - p1_pct - p2_pct (если оба сработали).
+    Остаток = 100% - p1_pct - p2_pct (если оба сработали).
     """
     p1_w = (p1_pct / 100.0) if p1_done and p1_exit is not None else 0.0
     p2_w = (p2_pct / 100.0) if p2_done and p2_exit is not None else 0.0
@@ -143,15 +142,14 @@ def blended_pnl_dual(entry, final_exit, direction,
 
 
 # ============================================================
-# COOLDOWN MANAGER (per-symbol, серия SL)
+# COOLDOWN MANAGER (per-symbol, SL-серия)
 # ============================================================
 
 class CooldownMgr:
     """
     Считает SL-серию ПОДРЯД.
-    Правила:
-      - TP → серия сбрасывается
-      - SL → серия +1, запоминаем время
+      - TP   → серия сбрасывается
+      - SL   → серия +1, запоминаем время
       - NO_FILL / TIMEOUT → нейтрально
     Пауза = COOLDOWN_V910[symbol] после N-го подряд SL.
     """
@@ -162,7 +160,7 @@ class CooldownMgr:
         self.verbose = verbose
         self.cfg = COOLDOWN_V910.get(symbol, COOLDOWN_V910["default"])
 
-    def on_result(self, result_type, ts_sec_ms):
+    def on_result(self, result_type, ts_ms):
         if result_type == "TP":
             if self.consec > 0 and self.verbose:
                 print(f"[CD] {self.symbol}: TP → серия сброшена "
@@ -171,35 +169,34 @@ class CooldownMgr:
             self.last_sl_ts = None
         elif result_type == "SL":
             self.consec += 1
-            self.last_sl_ts = ts_sec_ms
+            self.last_sl_ts = ts_ms
             if self.verbose:
                 print(f"[CD] {self.symbol}: SL #{self.consec} "
-                      f"@ {ts_to_str(ts_sec_ms)}", flush=True)
+                      f"@ {ts_to_str(ts_ms)}", flush=True)
 
-    def can_trade(self, ts_sec_ms):
+    def can_trade(self, ts_ms):
         if self.consec < 2:
             return True
         if self.last_sl_ts is None:
             return True
-        # выбираем максимальный применимый порог
         hours = None
         for thresh in sorted(self.cfg.keys()):
             if self.consec >= thresh:
                 hours = self.cfg[thresh]
         if hours is None:
             hours = max(self.cfg.values())
-        elapsed_h = (ts_sec_ms - self.last_sl_ts) / 3600000.0
+        elapsed_h = (ts_ms - self.last_sl_ts) / 3600000.0
         ok = elapsed_h >= hours
         if not ok and self.verbose:
             print(f"[CD] {self.symbol}: blocked, "
-                  f"{ currentelapsed_h:.1f}h < {hours}h (consec={self.consec})_s",
+                  f"{elapsed_h:.1f}h < {hours}h (consec={self.consec})",
                   flush=True)
         return ok
 
 
 # ============================================================
-l# REASON CLASSIFIER (как было)
-# ================================= =========================== sl=
+# REASON CLASSIFIER
+# ============================================================
 
 def classify_reason(result, market_info):
     stage = result.get("stage", "WAIT")
@@ -207,10 +204,8 @@ def classify_reason(result, market_info):
 
     if stage == "READY":
         return "READY"
-
     if "session filter" in reason:
         return "session_blocked"
-
     if "нет актуальной major" in reason:
         n_bsl = market_info.get("bsl_count", 0)
         n_ssl = market_info.get("ssl_count", 0)
@@ -221,25 +216,18 @@ def classify_reason(result, market_info):
         if n_ssl == 0:
             return "no_levels_ssl"
         return "no_levels_matching"
-
     if "ilm" in reason or "5m ilm" in reason:
         return "no_5m_ilm"
-
     if "слишком старый" in reason:
         return "ilm_too_old"
-
     if "sweep есть" in reason and "15m" in reason:
         return "no_15m_conf"
-
     if "ждём" in reason and "sweep" in reason:
         return "no_sweep"
-
     if "rr" in reason and "<" in reason:
         return "rr_too_low"
-
     if "tp" in reason or "major liquidity не найдена" in reason:
         return "tp_failed"
-
     if "trend" in reason and "блок" in reason:
         return "trend_blocked"
     if "recovery" in reason and "блок" in reason:
@@ -250,9 +238,10 @@ def classify_reason(result, market_info):
         return "d1_blocked"
     if "volatility spike" in reason:
         return "volatility_spike"
+    if "v9.10 promote" in reason:
+        return "v910_promote"
     if "blocked" in reason or "заблок" in reason:
         return "other_blocked"
-
     return f"stage_{stage.lower()}"
 
 
@@ -260,19 +249,15 @@ def classify_reason(result, market_info):
 # SIMULATE TRADE v9.10 (dual partial + dynamic BE)
 # ============================================================
 
-def simulate_trade_v910(trade, candles_5m, start_ts, max_hours,
-                        cfg,
+def simulate_trade_v910(trade, candles_5m, start_ts, max_hours, cfg,
                         use_breakeven=False, use_partial_tp=False,
                         use_trailing=False):
     """
-    Симуляция одной сделки с:
-      - NO_FILL проверкой (лимитка 12×5M = 1ч)
+    Симуляция сделки с:
+      - NO_FILL (лимитка 12×5M = 1ч)
       - двумя partial уровнями из cfg
       - dynamic BE на cfg['be_at_r']
       - trailing после TRAILING_TRIGGER_R
-
-    Возвращает: (result, exit_price, exit_ts, held, pnl, partial_hit)
-    result ∈ {"NO_FILL", "TP", "SL", "TIMEOUT", "ERROR"}
     """
     direction = trade["direction"]
     entry = float(trade["entry"])
@@ -293,7 +278,6 @@ def simulate_trade_v910(trade, candles_5m, start_ts, max_hours,
     fill_check_until = start_ts + LIMIT_FILL_MAX_CANDLES * 5 * 60 * 1000
     limit_filled = False
     fill_ts = None
-
     for c in candles_5m:
         if c["open_time"] < start_ts:
             continue
@@ -313,8 +297,7 @@ def simulate_trade_v910(trade, candles_5m, start_ts, max_hours,
     if not limit_filled:
         return ("NO_FILL", entry, fill_check_until, 0, 0.0, False)
 
-    # ─── trade simulation ───
-   _initial
+    current_sl = sl_initial
     best_price = entry
     p1_done = False
     p1_exit = None
@@ -344,9 +327,8 @@ def simulate_trade_v910(trade, candles_5m, start_ts, max_hours,
             hit_tp = low <= tp
             hit_sl = high >= current_sl
 
-        # ─── SL / TP first ───
+        # SL/TP first (консервативно — SL при одновременном касании)
         if hit_sl and hit_tp:
-            # conservative: считаем SL (как в v9.9)
             final = blended_pnl_dual(
                 entry, current_sl, direction,
                 p1_done, p1_exit, p1_pct,
@@ -370,7 +352,7 @@ def simulate_trade_v910(trade, candles_5m, start_ts, max_hours,
             return ("TP", tp, c["open_time"], held, final,
                     p1_done or p2_done)
 
-        # ─── update best, move_r ───
+        # ─── обновление best и move_r ───
         if direction == "LONG":
             if high > best_price:
                 best_price = high
@@ -408,7 +390,8 @@ def simulate_trade_v910(trade, candles_5m, start_ts, max_hours,
                 be_moved = True
 
         # ─── trailing ───
-        if use_trailing and TRAILING_ENABLED and move_r >= TRAILING_TRIGGER_R:
+        if (use_trailing and TRAILING_ENABLED
+                and move_r >= TRAILING_TRIGGER_R):
             if direction == "LONG":
                 new_sl = best_price - risk * TRAILING_DISTANCE_R
                 if new_sl > current_sl:
@@ -493,7 +476,6 @@ def run_backtest(symbol, max_hours,
 
         if has_active_position(trades, ts_now):
             continue
-
         if not cooldown_mgr.can_trade(ts_now):
             cooldown_skips += 1
             continue
@@ -542,8 +524,8 @@ def run_backtest(symbol, max_hours,
                     d1_context = None
 
             result = analyze(c1h, c15, c5, price, levels, sweep,
-                             candles_1m=c1, d1_context=d1_context, fvgs=[],
-                             symbol=symbol)
+                             candles_1m=c1, d1_context=d1_context,
+                             fvgs=[], symbol=symbol)
         except Exception as exc:
             exception_counter[f"analyze:{type(exc).__name__}"] += 1
             if exception_counter[f"analyze:{type(exc).__name__}"] == 1:
@@ -597,7 +579,7 @@ def run_backtest(symbol, max_hours,
             use_trailing=use_trailing,
         )
 
-        # ─── NO_FILL: лимитка не исполнилась ───
+        # ─── NO_FILL ───
         if res_type == "NO_FILL":
             no_fill_count += 1
             no_fill_by_coin[symbol] += 1
@@ -615,8 +597,6 @@ def run_backtest(symbol, max_hours,
         trade["partial_cfg"] = cfg
 
         trades.append(trade)
-
-        # ─── cooldown update ───
         cooldown_mgr.on_result(res_type, exit_ts)
 
         partial_tag = "P" if partial_hit else " "
@@ -850,7 +830,8 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
                 all_summary.append((sym, len(trades), tp, sl, timeout, wr,
                                     pnl, no_fill, False))
             else:
-                all_summary.append((sym, 0, 0, 0, 0, 0, 0.0, no_fill, False))
+                all_summary.append((sym, 0, 0, 0, 0, 0, 0.0,
+                                    no_fill, False))
         except Exception as exc:
             print(f"[BT] {sym} FAILED: {exc}", flush=True)
             traceback.print_exc()
@@ -915,9 +896,12 @@ def main():
     parser.add_argument("--max-hours", type=int,
                         default=DEFAULT_MAX_HOURS)
     parser.add_argument("--multi", action="store_true")
-    parser.add_argument("--be", action="store_true")
-    parser.add_argument("--partial", action="store_true")
-    parser.add_argument("--trailing", action="store_true")
+    parser.add_argument("--be", action="store_true",
+                        help="breakeven по R")
+    parser.add_argument("--partial", action="store_true",
+                        help="partial TP (два уровня)")
+    parser.add_argument("--trailing", action="store_true",
+                        help="trailing по R")
     args = parser.parse_args()
 
     if args.multi:
