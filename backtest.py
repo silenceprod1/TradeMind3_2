@@ -1,7 +1,7 @@
 """
-TradeMind backtest v9.11 — рост PnL.
+TradeMind backtest v9.11 FINAL — рост PnL.
 
-Изменения vs v9.10:
+Фиксы v9.11:
 - BE в +0.3R после partial (гарантирует мини-профит на остатке)
 - Trailing плотнее: trigger 1.0R, distance 0.5R
 - Флаг --exclude-eth-dot для отключения ETH/DOT
@@ -42,8 +42,6 @@ WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
 BANNED_SYMBOLS = {"BTCUSDT", "SOLUSDT", "SUIUSDT"}
-
-# ─── v9.11: опциональный exclude для убыточных пар ───
 UNPROFITABLE_SYMBOLS = {"ETHUSDT", "DOTUSDT"}
 
 ALL_SYMBOLS = [
@@ -60,13 +58,11 @@ COOLDOWN_V910 = {
     "BCHUSDT": {2: 4, 3: 8},
 }
 
-# ─── v9.11: TRAILING плотнее ───
 TRAILING_ENABLED = True
-TRAILING_TRIGGER_R = 1.0      # было 1.3
-TRAILING_DISTANCE_R = 0.5     # было 0.8
+TRAILING_TRIGGER_R = 1.0
+TRAILING_DISTANCE_R = 0.5
 
-# ─── v9.11: BE в +0.3R после partial ───
-BE_PROFIT_OFFSET_R = 0.3      # новое: BE смещён в плюс
+BE_PROFIT_OFFSET_R = 0.3
 
 PARTIAL_ENABLED = True
 PARTIAL_CONFIGS = {
@@ -260,7 +256,7 @@ def classify_reason(result, market_info):
 
 
 # ============================================================
-# SIMULATE TRADE v9.11 — BE в +0.3R, плотный trail
+# SIMULATE TRADE v9.11
 # ============================================================
 
 def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
@@ -281,24 +277,25 @@ def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
     p1_pct = cfg["partial_1_pct"]
     p2_pct = cfg["partial_2_pct"]
 
-    # ─── NO_FILL ───
+    # --- NO_FILL ---
     fill_check_until = start_ts + LIMIT_FILL_MAX_CANDLES * 5 * 60 * 1000
     limit_filled = False
     fill_ts = None
+
     for c in candles_5m:
         if c["open_time"] < start_ts:
             continue
         if c["open_time"] > fill_check_until:
             break
         if direction == "LONG":
-            if c["low_t"] <= entry:
+            if c["low"] <= entry:
                 limit_filled = True
-                fillp_ andts = c["open_time"]
+                fill_ts = c["open_time"]
                 break
- PART        else:
+        else:
             if c["high"] >= entry:
-                limitIAL_filled = True
-                fill_EN_ts = c["open_time"]
+                limit_filled = True
+                fill_ts = c["open_time"]
                 break
 
     if not limit_filled:
@@ -334,7 +331,6 @@ def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
             hit_tp = low <= tp
             hit_sl = high >= current_sl
 
-        # ─── тип выхода ───
         def _exit_type():
             if be_moved and abs(current_sl - entry) < risk * 0.05:
                 return "BE"
@@ -368,7 +364,6 @@ def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
             return ("TP", tp, c["open_time"], held, final,
                     p1_done or p2_done)
 
-        # ─── обновление best и move_r ───
         if direction == "LONG":
             if high > best_price:
                 best_price = high
@@ -378,7 +373,6 @@ def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
                 best_price = low
             move_r = (entry - best_price) / risk
 
-        # ─── partial 1 ───
         if (use_partial_tp and PARTIAL_ENABLED
                 and not p1_done and move_r >= p1_r):
             if direction == "LONG":
@@ -387,8 +381,7 @@ def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
                 p1_exit = entry - risk * p1_r
             p1_done = True
 
-        # ─── partial 2 ───
-        if (use_partialABLED
+        if (use_partial_tp and PARTIAL_ENABLED
                 and p1_done and not p2_done and move_r >= p2_r):
             if direction == "LONG":
                 p2_exit = entry + risk * p2_r
@@ -396,7 +389,6 @@ def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
                 p2_exit = entry - risk * p2_r
             p2_done = True
 
-        # ─── v9.11 BE: в +0.3R после partial ───
         be_ready = (not use_partial_tp) or p1_done
 
         if use_breakeven and be_ready and not be_moved and move_r >= be_r:
@@ -416,7 +408,6 @@ def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
                     current_sl = new_be
                     be_moved = True
 
-        # ─── v9.11 trailing: 1.0R / 0.5R ───
         if (use_trailing and TRAILING_ENABLED
                 and move_r >= TRAILING_TRIGGER_R):
             if direction == "LONG":
@@ -428,7 +419,6 @@ def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
                 if new_sl < current_sl:
                     current_sl = new_sl
 
-    # ─── timeout ───
     if last_seen is not None:
         exit_price = last_seen["close"]
         final = blended_pnl_dual(
@@ -667,7 +657,7 @@ def print_report(symbol, trades, diag,
     if use_breakeven:
         labels.append("BE+0.3R")
     if use_partial_tp:
-        labels.append("PARTIAL×2")
+        labels.append("PARTIALx2")
     if use_trailing:
         labels.append("TRAIL1.0/0.5")
     labels.append("CDv3")
@@ -688,7 +678,7 @@ def print_report(symbol, trades, diag,
 
     if diag.get("banned"):
         print()
-        print(f"⛔ {symbol} в BANNED_SYMBOLS — пропущен.")
+        print(f"[SKIP] {symbol} в BANNED_SYMBOLS.")
         print("=" * 70)
         return
 
@@ -816,7 +806,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     if use_breakeven:
         labels.append("BE+0.3R")
     if use_partial_tp:
-        labels.append("PARTIAL×2")
+        labels.append("PARTIALx2")
     if use_trailing:
         labels.append("TRAIL1.0/0.5")
     labels.append("CDv3")
