@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind sweep ETH/SOL.
-Просто: python backtest.py
-Прогонит MS=92, 94, 96 для ETHUSDT и SOLUSDT.
+TradeMind backtest v9.19 FINAL.
+7 пар: BTC, XRP, LINK, BCH, APT, SUI, INJ.
+
+Отсеяны: ETH, SOL, DOT (по research).
 """
 
-from collections import Counter
+import argparse
 from datetime import datetime
 
 from market import (
@@ -19,8 +20,6 @@ from market import (
 from strategy import analyze, get_1h_direction
 
 
-# --- config ---
-
 BT_D1 = 60
 BT_1H = 1200
 BT_15M = 4800
@@ -28,18 +27,27 @@ BT_5M = 14400
 BT_1M = 500
 WARMUP = 150
 
-# символы для sweep
-SWEEP_SYMS = ["ETHUSDT", "SOLUSDT"]
-# значения MIN_SCORE
-SWEEP_MS = [92, 94, 96]
-
-# базовый MIN_SCORE (для INJ/BCH/APT если запустишь полный)
 MIN_SCORES = {
     "default": 90,
     "INJUSDT": 88,
     "BCHUSDT": 92,
     "APTUSDT": 90,
 }
+
+BANNED = set()
+BANNED.add("ETHUSDT")
+BANNED.add("SOLUSDT")
+BANNED.add("DOTUSDT")
+
+ALL_SYMS = [
+    "BTCUSDT",
+    "XRPUSDT",
+    "LINKUSDT",
+    "BCHUSDT",
+    "APTUSDT",
+    "SUIUSDT",
+    "INJUSDT",
+]
 
 COOLDOWN = {}
 COOLDOWN["default"] = {2: 3, 3: 6}
@@ -56,9 +64,10 @@ CFG_WEAK = (0.5, 1.1, 0.8, 50, 25)
 
 WEAK_SYMS = set()
 WEAK_SYMS.add("SUIUSDT")
-WEAK_SYMS.add("SOLUSDT")
 WEAK_SYMS.add("APTUSDT")
 WEAK_SYMS.add("BCHUSDT")
+
+RESEARCH_MODE = False
 
 
 def get_ms(sym):
@@ -77,14 +86,6 @@ def get_cfg(sym, score):
 
 def log(m):
     print("[BT] " + str(m), flush=True)
-
-
-def ts_str(ms):
-    try:
-        dt = datetime.fromtimestamp(ms / 1000.0)
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return "N/A"
 
 
 def c_until(cs, ts):
@@ -319,10 +320,15 @@ def sim(trade, c5, start, max_h, cfg):
     return ("TIMEOUT", e, start, 0, 0.0, False)
 
 
-def run_one(sym, max_h, override_ms):
+def run_one(sym, max_h):
     sym = _normalize_symbol(sym)
-    ms = override_ms
+    ms = get_ms(sym)
     log("Символ: " + sym + "  min_score=" + str(ms))
+
+    if not RESEARCH_MODE:
+        if sym in BANNED:
+            log("SKIP banned: " + sym)
+            return []
 
     c1d = get_klines_history("1d", BT_D1, sym)
     c1h = get_klines_history("1h", BT_1H, sym)
@@ -334,7 +340,7 @@ def run_one(sym, max_h, override_ms):
         log("Нет данных")
         return []
 
-    log("1H=" + str(len(c1h)) + "  5M=" + str(len(c5)))
+    log("1H=" + str(len(c1h)) + " 5M=" + str(len(c5)))
 
     if len(c1h) <= WARMUP:
         return []
@@ -479,16 +485,7 @@ def stats(trades):
     for t in trades:
         total = total + t["pnl"]
 
-    return {
-        "n": len(trades),
-        "tp": tp,
-        "sl": sl,
-        "be": be,
-        "to": to,
-        "ph": ph,
-        "wr": wr,
-        "pnl": total,
-    }
+    return (len(trades), tp, sl, be, to, ph, wr, total)
 
 
 def rep(sym, trades):
@@ -499,83 +496,127 @@ def rep(sym, trades):
 
     if not trades:
         print("Нет сделок.")
-        return {}
+        return
 
-    s = stats(trades)
+    st = stats(trades)
+    n = st[0]
+    tp = st[1]
+    sl = st[2]
+    be = st[3]
+    to = st[4]
+    ph = st[5]
+    wr = st[6]
+    total = st[7]
 
-    print("Всего сделок: " + str(s["n"]))
-    print("  TP: " + str(s["tp"]))
-    print("  SL: " + str(s["sl"]))
-    print("  BE: " + str(s["be"]))
-    print("  Timeout: " + str(s["to"]))
-    print("  Partial: " + str(s["ph"]))
-    print("Win rate: " + ("%.1f%%" % s["wr"]))
-    print("Total PnL: " + ("%+.2f%%" % s["pnl"]))
-
-    return s
+    print("Всего сделок: " + str(n))
+    print("  TP: " + str(tp))
+    print("  SL: " + str(sl))
+    print("  BE: " + str(be))
+    print("  Timeout: " + str(to))
+    print("  Partial: " + str(ph))
+    print("Win rate: " + ("%.1f%%" % wr))
+    print("Total PnL: " + ("%+.2f%%" % total))
 
 
-def run_sweep():
+def run_multi(max_h, syms):
+    mode = "PROD"
+    if RESEARCH_MODE:
+        mode = "RESEARCH"
+
     print("")
-    print("#" * 60)
-    print("### SWEEP ETH/SOL по MIN_SCORE")
-    print("### Значения: " + str(SWEEP_MS))
-    print("#" * 60)
+    print("#" * 70)
+    print("### MULTI v9.19 [" + mode + "]")
+    print("#" * 70)
+    print("### MIN_SCORE: " + str(MIN_SCORES))
+    print("### BANNED: " + str(sorted(BANNED)))
+    print("#" * 70)
 
-    all_results = {}
+    summary = []
 
-    for ms in SWEEP_MS:
-        print("")
-        print("=" * 60)
-        print(">>> ТЕСТ: MIN_SCORE = " + str(ms))
-        print("=" * 60)
+    for sym in syms:
+        try:
+            trades = run_one(sym, max_h)
+            rep(sym, trades)
+            st = stats(trades)
+            summary.append((sym,) + st)
+        except Exception as ex:
+            print("[BT] " + sym + " FAILED: " + str(ex))
+            summary.append(
+                (sym, 0, 0, 0, 0, 0, 0, 0.0, 0.0))
 
-        for sym in SWEEP_SYMS:
-            try:
-                trades = run_one(sym, 24, ms)
-                s = rep(sym, trades)
-                all_results[(sym, ms)] = s
-            except Exception as ex:
-                print("[ERROR] " + sym + ": " + str(ex))
-                all_results[(sym, ms)] = {
-                    "n": 0, "tp": 0, "sl": 0, "be": 0,
-                    "to": 0, "ph": 0, "wr": 0.0, "pnl": 0.0,
-                }
-
-    # финальная таблица
     print("")
-    print("")
-    print("#" * 78)
-    print("### ИТОГОВАЯ ТАБЛИЦА SWEEP")
-    print("#" * 78)
-    print("MS    ETH Fill  ETH PnL    ETH WR    SOL Fill  SOL PnL    SOL WR")
+    print("=" * 78)
+    print("СВОДКА v9.19 [" + mode + "]")
+    print("=" * 78)
+
+    hdr = "Символ     MS  Fill  TP  SL  BE  TO   WR      PnL"
+    print(hdr)
     print("-" * 78)
 
-    for ms in SWEEP_MS:
-        eth = all_results.get(("ETHUSDT", ms))
-        sol = all_results.get(("SOLUSDT", ms))
+    tt = 0
+    ttp = 0
+    tsl = 0
+    tpnl = 0.0
 
-        if eth is None:
-            eth = {"n": 0, "pnl": 0.0, "wr": 0.0}
-        if sol is None:
-            sol = {"n": 0, "pnl": 0.0, "wr": 0.0}
+    for row in summary:
+        sym = row[0]
+        n = row[1]
+        tp = row[2]
+        sl = row[3]
+        be = row[4]
+        to = row[5]
+        wr = row[7]
+        pnl = row[8]
+        ms = get_ms(sym)
 
-        ef = str(eth["n"]).ljust(7)
-        ep = ("%+.2f%%" % eth["pnl"]).ljust(10)
-        ew = ("%.1f" % eth["wr"]).ljust(9)
-
-        sf = str(sol["n"]).ljust(7)
-        sp = ("%+.2f%%" % sol["pnl"]).ljust(10)
-        sw = ("%.1f" % sol["wr"]).ljust(9)
-
-        line = str(ms).ljust(6)
-        line = line + ef + ep + ew
-        line = line + sf + sp + sw
+        line = sym.ljust(10)
+        line = line + " " + str(ms).ljust(3)
+        line = line + " " + str(n).ljust(5)
+        line = line + " " + str(tp).ljust(3)
+        line = line + " " + str(sl).ljust(3)
+        line = line + " " + str(be).ljust(3)
+        line = line + " " + str(to).ljust(3)
+        line = line + " " + ("%.1f" % wr).ljust(7)
+        line = line + " " + ("%+.2f%%" % pnl)
         print(line)
 
+        tt = tt + n
+        ttp = ttp + tp
+        tsl = tsl + sl
+        tpnl = tpnl + pnl
+
     print("-" * 78)
-    print("")
+    r = ttp + tsl
+    if r > 0:
+        twr = ttp / r * 100.0
+    else:
+        twr = 0.0
+
+    line = "ИТОГО".ljust(15)
+    line = line + str(tt).ljust(6)
+    line = line + str(ttp).ljust(4)
+    line = line + str(tsl).ljust(4)
+    line = line + " " * 12
+    line = line + ("%.1f" % twr).ljust(7)
+    line = line + " " + ("%+.2f%%" % tpnl)
+    print(line)
+    print("=" * 78)
+
+
+def main():
+    global RESEARCH_MODE
+
+    p = argparse.ArgumentParser()
+    p.add_argument("--max-hours", type=int, default=24)
+    p.add_argument("--research", action="store_true")
+    a = p.parse_args()
+
+    if a.research:
+        RESEARCH_MODE = True
+
+    syms = list(ALL_SYMS)
+    run_multi(a.max_hours, syms)
 
 
 if __name__ == "__main__":
-    run_sweep()
+    main()
