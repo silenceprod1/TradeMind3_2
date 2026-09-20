@@ -1,34 +1,25 @@
+# -*- coding: utf-8 -*-
 """
-TradeMind 9.10 — strategy.py
-
-Интегрированные улучшения v9.10:
-- ILM trigger window 3 → 5 свечей (главный bottleneck no_5m_ilm)
-- MIN_SWEEP_DEPTH_PCT 0.15 → 0.12
-- MIN_BODY_RATIO_TRIGGER_5M 0.50 → 0.40
-- MIN_5M_RECOVERY_RATIO 0.20 → 0.15
-- MIN_5M_ILM_SWEEP_DISTANCE_PCT 3.0 → 5.0
-- MAX_ILM_AGE_CANDLES_5M 36 → 48
-- MAX_ILM_AGE_FOR_ENTRY 4 → 6
-- ENTRY_TOLERANCE_PCT 0.5 → 1.0
-- MIN_TREND_ACTIVITY_READY 0.40 → 0.35
-- COUNTER_TREND_MIN_SCORE 92 → 88
-- READY promote для топ-сетапов (score≥88–95 + trend override)
+TradeMind strategy v9.19.
+MIN_SCORE_READY = 85 (per-symbol фильтр в bot.py).
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.10"
+STRATEGY_VERSION = "9.19"
 
 ALLOW_SHORT = True
 
-MAX_ILM_AGE_FOR_ENTRY = 6              # было 4
+MAX_ILM_AGE_FOR_ENTRY = 6
 ATR_SL_MULT_SOFT = 0.8
 
 ENABLE_SESSION_FILTER = False
 SESSION_BLOCK_START_HOUR = 2
 SESSION_BLOCK_END_HOUR = 7
-SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
+SESSION_FILTER_EXEMPT = set()
+SESSION_FILTER_EXEMPT.add("BTCUSDT")
+SESSION_FILTER_EXEMPT.add("ETHUSDT")
 
 RETEST_OFFSET_PCT = 0.0
 
@@ -36,10 +27,10 @@ MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
 SL_BUFFER_PCT = 0.20
 STRUCTURAL_SL_LOOKBACK_15M = 50
-ENTRY_TOLERANCE_PCT = 1.0              # было 0.5
+ENTRY_TOLERANCE_PCT = 1.0
 FIXED_RR = 2.0
 
-MIN_SWEEP_DEPTH_PCT = 0.12             # было 0.15
+MIN_SWEEP_DEPTH_PCT = 0.12
 MAX_SWEEP_AGE_1H = 24
 
 USE_ATR_SCALING = True
@@ -55,7 +46,7 @@ ENABLE_D1_BLOCK = False
 SL_USE_1H_SWINGS = True
 SL_USE_SWEEP_EXTREME = True
 MIN_SL_ATR_MULT = 1.2
-MIN_BODY_RATIO_TRIGGER_5M = 0.40       # было 0.50
+MIN_BODY_RATIO_TRIGGER_5M = 0.40
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = True
 
@@ -66,29 +57,26 @@ VOLUME_CONFIRMATION_LOOKBACK = 20
 MIN_BODY_RATIO = 0.35
 MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
-MAX_ILM_AGE_CANDLES_5M = 48            # было 36
+MAX_ILM_AGE_CANDLES_5M = 48
 
-MIN_5M_RECOVERY_RATIO = 0.15           # было 0.20
-MIN_5M_ILM_SWEEP_DISTANCE_PCT = 5.0    # было 3.0
+MIN_5M_RECOVERY_RATIO = 0.15
+MIN_5M_ILM_SWEEP_DISTANCE_PCT = 5.0
 
-MIN_TREND_ACTIVITY_READY = 0.35        # было 0.40
-COUNTER_TREND_MIN_SCORE = 88           # было 92
+MIN_TREND_ACTIVITY_READY = 0.35
+COUNTER_TREND_MIN_SCORE = 88
 
 FVG_TOLERANCE_PCT = 0.10
 FVG_SWEEP_BONUS = 10
 FVG_ENTRY_BONUS = 5
 FVG_MAX_BONUS = 15
 
-# ─── v9.10: READY promote для топ-сетапов ───
-# (score_min, trend_min, bos_required)
-READY_PROMOTE_TIERS = (
-    (95, 0.20, False),   # top-tier — bos не обязателен
-    (90, 0.25, True),    # strong — bos обязателен
-    (88, 0.30, True),    # good — bos обязателен
-)
-
-# ─── v9.10: ILM trigger window (было 3) ───
 ILM_TRIGGER_WINDOW = 5
+
+READY_PROMOTE_TIERS = (
+    (95, 0.20, False),
+    (90, 0.25, True),
+    (88, 0.30, True),
+)
 
 
 def _f(x):
@@ -103,35 +91,57 @@ def _v(candle, key, default=None):
         return default
     value = candle.get(key)
     if value is None:
-        aliases = {"open": "o", "high": "h", "low": "l",
-                   "close": "c", "open_time": "time",
-                   "volume": "v"}
+        aliases = {
+            "open": "o", "high": "h", "low": "l",
+            "close": "c", "open_time": "time",
+            "volume": "v",
+        }
         alias = aliases.get(key)
         if alias:
             value = candle.get(alias)
     if value is None:
         return default
-    converted = _f(value)
-    return converted if converted is not None else default
+    conv = _f(value)
+    if conv is not None:
+        return conv
+    return default
 
 
-def _o(c): return _v(c, "open")
-def _h(c): return _v(c, "high")
-def _l(c): return _v(c, "low")
-def _c(c): return _v(c, "close")
-def _t(c): return _v(c, "open_time")
-def _vol(c): return _v(c, "volume") or 0.0
+def _o(c):
+    return _v(c, "open")
+
+
+def _h(c):
+    return _v(c, "high")
+
+
+def _l(c):
+    return _v(c, "low")
+
+
+def _c(c):
+    return _v(c, "close")
+
+
+def _t(c):
+    return _v(c, "open_time")
+
+
+def _vol(c):
+    return _v(c, "volume") or 0.0
 
 
 def _body(c):
-    o, cl = _o(c), _c(c)
+    o = _o(c)
+    cl = _c(c)
     if o is None or cl is None:
         return 0.0
     return abs(cl - o)
 
 
 def _range(c):
-    h, l = _h(c), _l(c)
+    h = _h(c)
+    l = _l(c)
     if h is None or l is None:
         return 0.0
     return max(0.0, h - l)
@@ -139,28 +149,39 @@ def _range(c):
 
 def _body_ratio(c):
     r = _range(c)
-    return _body(c) / r if r > 0 else 0.0
+    if r > 0:
+        return _body(c) / r
+    return 0.0
 
 
 def _bull(c):
-    o, cl = _o(c), _c(c)
-    return o is not None and cl is not None and cl > o
+    o = _o(c)
+    cl = _c(c)
+    if o is None or cl is None:
+        return False
+    return cl > o
 
 
 def _bear(c):
-    o, cl = _o(c), _c(c)
-    return o is not None and cl is not None and cl < o
+    o = _o(c)
+    cl = _c(c)
+    if o is None or cl is None:
+        return False
+    return cl < o
 
 
-def _distance_pct(a, b):
-    a, b = _f(a), _f(b)
+def _dist_pct(a, b):
+    a = _f(a)
+    b = _f(b)
     if a is None or b is None or b == 0:
         return None
     return abs(a - b) / abs(b) * 100
 
 
 def calculate_atr(candles, period=14):
-    if not candles or len(candles) < period + 1:
+    if not candles:
+        return None
+    if len(candles) < period + 1:
         return None
     trs = []
     for i in range(1, len(candles)):
@@ -169,26 +190,31 @@ def calculate_atr(candles, period=14):
         pc = _c(candles[i - 1])
         if h is None or l is None or pc is None:
             continue
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        trs.append(tr)
     if len(trs) < period:
         return None
     return sum(trs[-period:]) / period
 
 
 def _avg_atr(candles, fast=14, slow=50):
-    if not candles or len(candles) < slow + 5:
+    if not candles:
         return None, None
-    fast_val = calculate_atr(candles, fast)
-    slow_val = calculate_atr(candles, slow)
-    return fast_val, slow_val
+    if len(candles) < slow + 5:
+        return None, None
+    fv = calculate_atr(candles, fast)
+    sv = calculate_atr(candles, slow)
+    return fv, sv
 
 
 def _swing_high(c, i):
     if i < 2 or i >= len(c) - 2:
         return False
     cur = _h(c[i])
-    l1, l2 = _h(c[i - 1]), _h(c[i - 2])
-    r1, r2 = _h(c[i + 1]), _h(c[i + 2])
+    l1 = _h(c[i - 1])
+    l2 = _h(c[i - 2])
+    r1 = _h(c[i + 1])
+    r2 = _h(c[i + 2])
     if any(x is None for x in (cur, l1, l2, r1, r2)):
         return False
     return cur > l1 and cur >= l2 and cur >= r1 and cur > r2
@@ -198,8 +224,10 @@ def _swing_low(c, i):
     if i < 2 or i >= len(c) - 2:
         return False
     cur = _l(c[i])
-    l1, l2 = _l(c[i - 1]), _l(c[i - 2])
-    r1, r2 = _l(c[i + 1]), _l(c[i + 2])
+    l1 = _l(c[i - 1])
+    l2 = _l(c[i - 2])
+    r1 = _l(c[i + 1])
+    r2 = _l(c[i + 2])
     if any(x is None for x in (cur, l1, l2, r1, r2)):
         return False
     return cur < l1 and cur <= l2 and cur <= r1 and cur < r2
@@ -230,27 +258,33 @@ def _swing_lows(c):
 
 
 def get_1h_direction(candles):
-    if not candles or len(candles) < 15:
+    if not candles:
+        return "NEUTRAL"
+    if len(candles) < 15:
         return "NEUTRAL"
     candles = candles[-60:]
     highs = _swing_highs(candles)
     lows = _swing_lows(candles)
-
     bull = False
     bear = False
     if len(highs) >= 2 and len(lows) >= 2:
-        bull = highs[-1][1] > highs[-2][1] and lows[-1][1] > lows[-2][1]
-        bear = highs[-1][1] < highs[-2][1] and lows[-1][1] < lows[-2][1]
-
+        bull = (highs[-1][1] > highs[-2][1]
+                and lows[-1][1] > lows[-2][1])
+        bear = (highs[-1][1] < highs[-2][1]
+                and lows[-1][1] < lows[-2][1])
     if not bull and not bear:
         recent = candles[-8:]
-        bb = sum(_body(c) for c in recent if _bull(c))
-        sb = sum(_body(c) for c in recent if _bear(c))
+        bb = 0.0
+        sb = 0.0
+        for c in recent:
+            if _bull(c):
+                bb += _body(c)
+            if _bear(c):
+                sb += _body(c)
         if bb > 0 and bb > sb * 1.4:
             bull = True
         elif sb > 0 and sb > bb * 1.4:
             bear = True
-
     if bull and not bear:
         return "LONG"
     if bear and not bull:
@@ -258,18 +292,21 @@ def get_1h_direction(candles):
     return "NEUTRAL"
 
 
-def get_higher_timeframe_direction(candles_1h, candles_d1=None, candles_w1=None):
-    return get_1h_direction(candles_1h)
+def get_higher_tf_direction(c1h, c1d=None, c1w=None):
+    return get_1h_direction(c1h)
 
 
 def _level_price(l):
-    return _f(l.get("price")) if isinstance(l, dict) else _f(l)
+    if isinstance(l, dict):
+        return _f(l.get("price"))
+    return _f(l)
 
 
 def _level_side(l):
     if not isinstance(l, dict):
         return None
-    return str(l.get("side") or l.get("direction") or "").upper()
+    side = l.get("side") or l.get("direction") or ""
+    return str(side).upper()
 
 
 def _level_type(l):
@@ -291,38 +328,45 @@ def _level_strength(l):
 def _is_swept_level(l):
     if not isinstance(l, dict):
         return False
-    return bool(l.get("swept") or l.get("taken")
-                or l.get("used") or l.get("consumed"))
+    return bool(l.get("swept")
+                or l.get("taken")
+                or l.get("used")
+                or l.get("consumed"))
 
 
-def _levels_for_direction(major_levels, direction):
-    result = []
-    expected = "SSL" if direction == "LONG" else "BSL"
-    for level in major_levels or []:
-        price = _level_price(level)
+def _levels_for_dir(levels, direction):
+    res = []
+    exp = "SSL" if direction == "LONG" else "BSL"
+    for lv in levels or []:
+        price = _level_price(lv)
         if price is None:
             continue
-        side = _level_side(level)
-        lt = _level_type(level)
-        if side == direction or lt == expected or lt.startswith(expected + "_"):
-            result.append(level)
-    return result
+        side = _level_side(lv)
+        lt = _level_type(lv)
+        if side == direction:
+            res.append(lv)
+        elif lt == exp:
+            res.append(lv)
+        elif lt.startswith(exp + "_"):
+            res.append(lv)
+    return res
 
 
-def is_inside_fvg(price, fvgs, direction, tolerance_pct=FVG_TOLERANCE_PCT):
+def is_inside_fvg(price, fvgs, direction,
+                  tol=FVG_TOLERANCE_PCT):
     p = _f(price)
     if p is None or not fvgs:
         return False
-    expected = "bullish" if direction == "LONG" else "bearish"
+    exp = "bullish" if direction == "LONG" else "bearish"
     for fvg in fvgs:
-        if fvg.get("type") != expected:
+        if fvg.get("type") != exp:
             continue
         top = _f(fvg.get("top"))
         bottom = _f(fvg.get("bottom"))
         if top is None or bottom is None:
             continue
-        tol = top * tolerance_pct / 100
-        if (bottom - tol) <= p <= (top + tol):
+        t = top * tol / 100
+        if (bottom - t) <= p <= (top + t):
             return True
     return False
 
@@ -330,45 +374,80 @@ def is_inside_fvg(price, fvgs, direction, tolerance_pct=FVG_TOLERANCE_PCT):
 def compute_fvg_bonus(sweep, entry, fvgs, direction):
     if not fvgs:
         return 0, False, False
-    sweep_extreme = _f((sweep or {}).get("extreme"))
-    entry_p = _f(entry)
-    sweep_inside = (is_inside_fvg(sweep_extreme, fvgs, direction)
-                    if sweep_extreme is not None else False)
-    entry_inside = (is_inside_fvg(entry_p, fvgs, direction)
-                    if entry_p is not None else False)
-    bonus = 0
-    if sweep_inside:
-        bonus += FVG_SWEEP_BONUS
-    if entry_inside:
-        bonus += FVG_ENTRY_BONUS
-    return min(bonus, FVG_MAX_BONUS), sweep_inside, entry_inside
+    se = _f((sweep or {}).get("extreme"))
+    ep = _f(entry)
+    si = False
+    if se is not None:
+        si = is_inside_fvg(se, fvgs, direction)
+    ei = False
+    if ep is not None:
+        ei = is_inside_fvg(ep, fvgs, direction)
+    b = 0
+    if si:
+        b += FVG_SWEEP_BONUS
+    if ei:
+        b += FVG_ENTRY_BONUS
+    return min(b, FVG_MAX_BONUS), si, ei
 
 
-def _sweep_candidate_score(candle, level, depth):
+def _sweep_cand_score(candle, level, depth):
     strength = _level_strength(level)
-    touches = level.get("touches", 1) if isinstance(level, dict) else 1
-    return depth * 4.0 + strength / 20.0 + min(touches, 5) * 3.0
+    touches = 1
+    if isinstance(level, dict):
+        touches = level.get("touches", 1)
+    return (depth * 4.0
+            + strength / 20.0
+            + min(touches, 5) * 3.0)
+
+
+def _has_vol_conf(candles, idx,
+                  lookback=VOLUME_CONFIRMATION_LOOKBACK,
+                  mult=VOLUME_CONFIRMATION_MULT):
+    if not candles:
+        return True
+    if idx < 0 or idx >= len(candles):
+        return True
+    if idx < lookback:
+        return True
+    start = idx - lookback
+    vols = []
+    for i in range(start, idx):
+        v = _vol(candles[i])
+        if v > 0:
+            vols.append(v)
+    if not vols:
+        return True
+    avg = sum(vols) / len(vols)
+    if avg <= 0:
+        return True
+    cur = _vol(candles[idx])
+    if cur <= 0:
+        return True
+    return cur >= avg * mult
 
 
 def find_sweep(candles_1h, major_levels, direction):
-    if direction not in {"LONG", "SHORT"}:
+    if direction not in ("LONG", "SHORT"):
         return None
-    if not candles_1h or len(candles_1h) < 3:
+    if not candles_1h:
+        return None
+    if len(candles_1h) < 3:
         return None
 
-    levels = _levels_for_direction(major_levels, direction)
+    levels = _levels_for_dir(major_levels, direction)
     if not levels:
         return None
 
     recent = candles_1h[-MAX_SWEEP_AGE_1H:]
     candidates = []
-    total_candles = len(candles_1h)
+    total = len(candles_1h)
 
-    for idx, candle in enumerate(reversed(recent)):
-        candle_idx_1h = total_candles - 1 - idx
+    for idx in range(len(recent)):
+        c = recent[len(recent) - 1 - idx]
+        cidx = total - 1 - idx
 
         if VOLUME_CONFIRMATION_ENABLED:
-            if not _has_volume_confirmation(candles_1h, candle_idx_1h):
+            if not _has_vol_conf(candles_1h, cidx):
                 continue
 
         for level in levels:
@@ -379,128 +458,134 @@ def find_sweep(candles_1h, major_levels, direction):
                 continue
 
             if direction == "LONG":
-                low = _l(candle)
-                close = _c(candle)
+                low = _l(c)
+                close = _c(c)
                 if low is None or close is None:
                     continue
                 depth = (price - low) / price * 100
-                if (low < price and depth >= MIN_SWEEP_DEPTH_PCT
-                        and close > price):
-                    open_p = _o(candle) or close
-                    body = abs(close - open_p)
-                    lower_wick = min(open_p, close) - low
-                    is_rejection = lower_wick > body or _bull(candle)
-                    if not is_rejection:
-                        continue
+                if depth < MIN_SWEEP_DEPTH_PCT:
+                    continue
+                if not (low < price and close > price):
+                    continue
+                op = _o(c) or close
+                body = abs(close - op)
+                wick = min(op, close) - low
+                rej = wick > body or _bull(c)
+                if not rej:
+                    continue
 
-                    is_invalidated = False
-                    consecutive_below = 0
-                    for k in range(candle_idx_1h + 1, total_candles):
-                        c_after = candles_1h[k]
-                        c_after_close = _c(c_after)
-                        if c_after_close is not None and c_after_close < low:
-                            consecutive_below += 1
-                            if consecutive_below >= 2:
-                                is_invalidated = True
-                                break
-                        else:
-                            consecutive_below = 0
-                    if is_invalidated:
-                        continue
+                inv = False
+                consec = 0
+                for k in range(cidx + 1, total):
+                    ca = candles_1h[k]
+                    cc = _c(ca)
+                    if cc is not None and cc < low:
+                        consec += 1
+                        if consec >= 2:
+                            inv = True
+                            break
+                    else:
+                        consec = 0
+                if inv:
+                    continue
 
-                    candidates.append({
-                        "swept": True, "direction": "LONG", "level": price,
-                        "extreme": low, "open_time": _t(candle), "price": low,
-                        "liquidity_type": "SSL",
-                        "touches": level.get("touches", 1),
-                        "strength": level.get("strength", 0),
-                        "depth_pct": depth,
-                        "_score": (_sweep_candidate_score(candle, level, depth)
-                                   - idx * 2.0),
-                    })
+                t = level.get("touches", 1)
+                s = level.get("strength", 0)
+                candidates.append({
+                    "swept": True,
+                    "direction": "LONG",
+                    "level": price,
+                    "extreme": low,
+                    "open_time": _t(c),
+                    "price": low,
+                    "liquidity_type": "SSL",
+                    "touches": t,
+                    "strength": s,
+                    "depth_pct": depth,
+                    "_score": (_sweep_cand_score(c, level, depth)
+                               - idx * 2.0),
+                })
             else:
-                high = _h(candle)
-                close = _c(candle)
+                high = _h(c)
+                close = _c(c)
                 if high is None or close is None:
                     continue
                 depth = (high - price) / price * 100
-                if (high > price and depth >= MIN_SWEEP_DEPTH_PCT
-                        and close < price):
-                    open_p = _o(candle) or close
-                    body = abs(close - open_p)
-                    upper_wick = high - max(open_p, close)
-                    is_rejection = upper_wick > body or _bear(candle)
-                    if not is_rejection:
-                        continue
+                if depth < MIN_SWEEP_DEPTH_PCT:
+                    continue
+                if not (high > price and close < price):
+                    continue
+                op = _o(c) or close
+                body = abs(close - op)
+                wick = high - max(op, close)
+                rej = wick > body or _bear(c)
+                if not rej:
+                    continue
 
-                    is_invalidated = False
-                    consecutive_above = 0
-                    for k in range(candle_idx_1h + 1, total_candles):
-                        c_after = candles_1h[k]
-                        c_after_close = _c(c_after)
-                        if c_after_close is not None and c_after_close > high:
-                            consecutive_above += 1
-                            if consecutive_above >= 2:
-                                is_invalidated = True
-                                break
-                        else:
-                            consecutive_above = 0
-                    if is_invalidated:
-                        continue
+                inv = False
+                consec = 0
+                for k in range(cidx + 1, total):
+                    ca = candles_1h[k]
+                    cc = _c(ca)
+                    if cc is not None and cc > high:
+                        consec += 1
+                        if consec >= 2:
+                            inv = True
+                            break
+                    else:
+                        consec = 0
+                if inv:
+                    continue
 
-                    candidates.append({
-                        "swept": True, "direction": "SHORT", "level": price,
-                        "extreme": high, "open_time": _t(candle), "price": high,
-                        "liquidity_type": "BSL",
-                        "touches": level.get("touches", 1),
-                        "strength": level.get("strength", 0),
-                        "depth_pct": depth,
-                        "_score": (_sweep_candidate_score(candle, level, depth)
-                                   - idx * 2.0),
-                    })
+                t = level.get("touches", 1)
+                s = level.get("strength", 0)
+                candidates.append({
+                    "swept": True,
+                    "direction": "SHORT",
+                    "level": price,
+                    "extreme": high,
+                    "open_time": _t(c),
+                    "price": high,
+                    "liquidity_type": "BSL",
+                    "touches": t,
+                    "strength": s,
+                    "depth_pct": depth,
+                    "_score": (_sweep_cand_score(c, level, depth)
+                               - idx * 2.0),
+                })
 
     if not candidates:
         return None
-    best = max(candidates, key=lambda x: x["_score"])
-    best.pop("_score", None)
+    best = None
+    best_score = -1e9
+    for cand in candidates:
+        sc = cand["_score"]
+        if sc > best_score:
+            best_score = sc
+            best = cand
+    if best is not None:
+        best.pop("_score", None)
     return best
 
 
-def _has_volume_confirmation(candles_1h, candle_index,
-                             lookback=VOLUME_CONFIRMATION_LOOKBACK,
-                             mult=VOLUME_CONFIRMATION_MULT):
-    if not candles_1h or candle_index < 0 or candle_index >= len(candles_1h):
-        return True
-    if candle_index < lookback:
-        return True
-    start = candle_index - lookback
-    vols = [_vol(candles_1h[i]) for i in range(start, candle_index)]
-    vols = [v for v in vols if v > 0]
-    if not vols:
-        return True
-    avg = sum(vols) / len(vols)
-    if avg <= 0:
-        return True
-    current = _vol(candles_1h[candle_index])
-    if current <= 0:
-        return True
-    return current >= avg * mult
-
-
 def measure_trend_activity(candles_1h, direction):
-    if not candles_1h or len(candles_1h) < 15:
+    if not candles_1h:
+        return 0.0
+    if len(candles_1h) < 15:
         return 0.0
     recent = candles_1h[-20:]
     total = 0.0
-    directional = 0.0
+    direc = 0.0
     for c in recent:
         b = _body(c)
         total += b
         if direction == "LONG" and _bull(c):
-            directional += b
+            direc += b
         elif direction == "SHORT" and _bear(c):
-            directional += b
-    return directional / total if total > 0 else 0.0
+            direc += b
+    if total > 0:
+        return direc / total
+    return 0.0
 
 
 def _is_local_high_15m(c, i):
@@ -526,16 +611,19 @@ def _is_local_low_15m(c, i):
 
 
 def confirmation_15m(candles_15m, sweep, direction):
-    if not sweep or direction not in {"LONG", "SHORT"} or not candles_15m:
+    if not sweep or not candles_15m:
+        return False, None, None, False
+    if direction not in ("LONG", "SHORT"):
         return False, None, None, False
 
-    sweep_time = _f(sweep.get("open_time"))
-
+    sweep_t = _f(sweep.get("open_time"))
     candidates = []
-    for candle in candles_15m:
-        t = _t(candle)
-        if sweep_time is None or (t is not None and t > sweep_time):
-            candidates.append(candle)
+    for c in candles_15m:
+        t = _t(c)
+        if sweep_t is None:
+            candidates.append(c)
+        elif t is not None and t > sweep_t:
+            candidates.append(c)
 
     candidates = candidates[-MAX_15M_CONFIRM_CANDLES:]
     if len(candidates) < 3:
@@ -544,79 +632,64 @@ def confirmation_15m(candles_15m, sweep, direction):
     fallback = None
 
     for i in range(1, len(candidates)):
-        candle = candidates[i]
-
-        if _body_ratio(candle) < MIN_BODY_RATIO:
+        c = candidates[i]
+        if _body_ratio(c) < MIN_BODY_RATIO:
             continue
-
-        close = _c(candle)
+        close = _c(c)
         if close is None:
             continue
-
         prev = candidates[i - 1]
-        prev_high = _h(prev)
-        prev_low = _l(prev)
-        prev_body = _body(prev)
+        prev_h = _h(prev)
+        prev_l = _l(prev)
+        prev_b = _body(prev)
 
         if direction == "LONG":
-            if not _bull(candle):
+            if not _bull(c):
                 continue
-
-            local_highs = []
+            highs = []
             for j in range(i - 1):
                 if _is_local_high_15m(candidates, j):
                     h = _h(candidates[j])
                     if h is not None:
-                        local_highs.append(h)
-
-            if not local_highs:
+                        highs.append(h)
+            if not highs:
                 continue
-
-            reference = max(local_highs[-3:])
-            bos = close > reference
-
+            ref = max(highs[-3:])
+            bos = close > ref
             if bos:
-                return (True, "15M BOS", _t(candle), True)
-
-            is_engulfing = (
-                prev_high is not None
-                and close > prev_high
-                and _body(candle) > prev_body
-            )
-            if is_engulfing and fallback is None:
-                fallback = (True, "15M engulfing (no BOS)", _t(candle), False)
-
+                return (True, "15M BOS",
+                        _t(c), True)
+            engulf = (prev_h is not None
+                      and close > prev_h
+                      and _body(c) > prev_b)
+            if engulf and fallback is None:
+                fallback = (True, "15M engulf",
+                            _t(c), False)
         else:
-            if not _bear(candle):
+            if not _bear(c):
                 continue
-
-            local_lows = []
+            lows = []
             for j in range(i - 1):
                 if _is_local_low_15m(candidates, j):
                     lo = _l(candidates[j])
                     if lo is not None:
-                        local_lows.append(lo)
-
-            if not local_lows:
+                        lows.append(lo)
+            if not lows:
                 continue
-
-            reference = min(local_lows[-3:])
-            bos = close < reference
-
+            ref = min(lows[-3:])
+            bos = close < ref
             if bos:
-                return (True, "15M BOS", _t(candle), True)
-
-            is_engulfing = (
-                prev_low is not None
-                and close < prev_low
-                and _body(candle) > prev_body
-            )
-            if is_engulfing and fallback is None:
-                fallback = (True, "15M engulfing (no BOS)", _t(candle), False)
+                return (True, "15M BOS",
+                        _t(c), True)
+            engulf = (prev_l is not None
+                      and close < prev_l
+                      and _body(c) > prev_b)
+            if engulf and fallback is None:
+                fallback = (True, "15M engulf",
+                            _t(c), False)
 
     if fallback is not None:
         return fallback
-
     return False, None, None, False
 
 
@@ -642,287 +715,303 @@ def _is_local_low(c, i):
     return cur <= l and cur < r
 
 
-def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
-    """v9.10: trigger window 5 свечей (было 3)."""
+def _ilm_long(candles, i, sweep_lvl, sweep_ext):
     m = candles[i]
     if not _is_local_low(candles, i):
         return None
-
-    ml, mh = _l(m), _h(m)
+    ml = _l(m)
+    mh = _h(m)
     if ml is None or mh is None:
         return None
-
     before = candles[max(0, i - 2):i]
     if not before:
         return None
-
-    bl = [_l(x) for x in before if _l(x) is not None]
+    bl = []
+    for x in before:
+        v = _l(x)
+        if v is not None:
+            bl.append(v)
     if not bl:
         return None
-
     left_ref = min(bl)
     if left_ref <= ml:
         return None
-
     m_range = left_ref - ml
     if m_range <= 0:
         return None
-
     m_pct = m_range / left_ref * 100
     if m_pct < MIN_SWEEP_DEPTH_PCT:
         return None
 
-    trigger_idx = None
-    for j in range(i + 1, min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)):
+    trig_idx = None
+    end = min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)
+    for j in range(i + 1, end):
         trig = candles[j]
         tc = _c(trig)
-        if (_bull(trig) and _body_ratio(trig) >= MIN_BODY_RATIO_TRIGGER_5M
-                and tc is not None and tc > mh):
-            trigger_idx = j
+        if (tc is not None
+                and _bull(trig)
+                and _body_ratio(trig)
+                >= MIN_BODY_RATIO_TRIGGER_5M
+                and tc > mh):
+            trig_idx = j
             break
-
-    if trigger_idx is None:
+    if trig_idx is None:
         return None
-
-    trig = candles[trigger_idx]
+    trig = candles[trig_idx]
     tc = _c(trig)
     if tc is None:
         return None
-
-    recovery = (tc - ml) / m_range
-    if recovery < MIN_5M_RECOVERY_RATIO:
+    rec = (tc - ml) / m_range
+    if rec < MIN_5M_RECOVERY_RATIO:
         return None
-
-    if sweep_level is not None:
-        dist = abs(ml - sweep_level) / sweep_level * 100
-        if dist > MIN_5M_ILM_SWEEP_DISTANCE_PCT:
+    if sweep_lvl is not None:
+        d = abs(ml - sweep_lvl) / sweep_lvl * 100
+        if d > MIN_5M_ILM_SWEEP_DISTANCE_PCT:
             return None
-
-    if (sweep_extreme is not None
-            and ml > sweep_extreme * (1 + MIN_5M_ILM_SWEEP_DISTANCE_PCT / 100)):
-        return None
-
+    if sweep_ext is not None:
+        lim = sweep_ext * (1
+            + MIN_5M_ILM_SWEEP_DISTANCE_PCT / 100)
+        if ml > lim:
+            return None
     return {
         "direction": "LONG",
         "extreme": ml,
         "trigger_time": _t(trig),
         "trigger_price": tc,
         "reason": "5M V-ILM",
-        "recovery_ratio": recovery,
+        "recovery_ratio": rec,
         "manipulation_pct": m_pct,
-        "age_candles": len(candles) - 1 - trigger_idx,
-        "_score": recovery * 30 + _body_ratio(trig) * 20 + m_pct * 5,
+        "age_candles": len(candles) - 1 - trig_idx,
+        "_score": (rec * 30
+                   + _body_ratio(trig) * 20
+                   + m_pct * 5),
     }
 
 
-def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
-    """v9.10: trigger window 5 свечей (было 3)."""
+def _ilm_short(candles, i, sweep_lvl, sweep_ext):
     m = candles[i]
     if not _is_local_high(candles, i):
         return None
-
-    mh, ml = _h(m), _l(m)
+    mh = _h(m)
+    ml = _l(m)
     if mh is None or ml is None:
         return None
-
     before = candles[max(0, i - 2):i]
     if not before:
         return None
-
-    bh = [_h(x) for x in before if _h(x) is not None]
+    bh = []
+    for x in before:
+        v = _h(x)
+        if v is not None:
+            bh.append(v)
     if not bh:
         return None
-
     left_ref = max(bh)
     if mh <= left_ref:
         return None
-
     m_range = mh - left_ref
     if m_range <= 0:
         return None
-
     m_pct = m_range / left_ref * 100
     if m_pct < MIN_SWEEP_DEPTH_PCT:
         return None
 
-    trigger_idx = None
-    for j in range(i + 1, min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)):
+    trig_idx = None
+    end = min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)
+    for j in range(i + 1, end):
         trig = candles[j]
         tc = _c(trig)
-        if (_bear(trig) and _body_ratio(trig) >= MIN_BODY_RATIO_TRIGGER_5M
-                and tc is not None and tc < ml):
-            trigger_idx = j
+        if (tc is not None
+                and _bear(trig)
+                and _body_ratio(trig)
+                >= MIN_BODY_RATIO_TRIGGER_5M
+                and tc < ml):
+            trig_idx = j
             break
-
-    if trigger_idx is None:
+    if trig_idx is None:
         return None
-
-    trig = candles[trigger_idx]
+    trig = candles[trig_idx]
     tc = _c(trig)
     if tc is None:
         return None
-
-    recovery = (mh - tc) / m_range
-    if recovery < MIN_5M_RECOVERY_RATIO:
+    rec = (mh - tc) / m_range
+    if rec < MIN_5M_RECOVERY_RATIO:
         return None
-
-    if sweep_level is not None:
-        dist = abs(mh - sweep_level) / sweep_level * 100
-        if dist > MIN_5M_ILM_SWEEP_DISTANCE_PCT:
+    if sweep_lvl is not None:
+        d = abs(mh - sweep_lvl) / sweep_lvl * 100
+        if d > MIN_5M_ILM_SWEEP_DISTANCE_PCT:
             return None
-
-    if (sweep_extreme is not None
-            and mh < sweep_extreme * (1 - MIN_5M_ILM_SWEEP_DISTANCE_PCT / 100)):
-        return None
-
+    if sweep_ext is not None:
+        lim = sweep_ext * (1
+            - MIN_5M_ILM_SWEEP_DISTANCE_PCT / 100)
+        if mh < lim:
+            return None
     return {
         "direction": "SHORT",
         "extreme": mh,
         "trigger_time": _t(trig),
         "trigger_price": tc,
         "reason": "5M L-ILM",
-        "recovery_ratio": recovery,
+        "recovery_ratio": rec,
         "manipulation_pct": m_pct,
-        "age_candles": len(candles) - 1 - trigger_idx,
-        "_score": recovery * 30 + _body_ratio(trig) * 20 + m_pct * 5,
+        "age_candles": len(candles) - 1 - trig_idx,
+        "_score": (rec * 30
+                   + _body_ratio(trig) * 20
+                   + m_pct * 5),
     }
 
 
-def detect_5m_ilm(candles_5m, sweep, direction, confirmation_time=None):
-    if not sweep or direction not in {"LONG", "SHORT"}:
+def detect_5m_ilm(candles_5m, sweep, direction,
+                   conf_time=None):
+    if not sweep:
+        return False, None
+    if direction not in ("LONG", "SHORT"):
         return False, None
 
-    start = _f(confirmation_time) or _f(sweep.get("open_time"))
+    start = _f(conf_time) or _f(sweep.get("open_time"))
     candles = []
-    for candle in candles_5m or []:
-        t = _t(candle)
-        if start is None or (t is not None and t > start):
-            candles.append(candle)
+    for c in candles_5m or []:
+        t = _t(c)
+        if start is None:
+            candles.append(c)
+        elif t is not None and t > start:
+            candles.append(c)
 
     candles = candles[-MAX_5M_ILM_CANDLES:]
     if len(candles) < 5:
         return False, None
 
-    sweep_level = _f(sweep.get("level"))
-    sweep_extreme = _f(sweep.get("extreme"))
+    sl = _f(sweep.get("level"))
+    se = _f(sweep.get("extreme"))
 
-    candidates = []
+    cands = []
     for i in range(2, len(candles) - 2):
         if direction == "LONG":
-            ilm = _ilm_long_candidate(candles, i, sweep_level, sweep_extreme)
+            ilm = _ilm_long(candles, i, sl, se)
         else:
-            ilm = _ilm_short_candidate(candles, i, sweep_level, sweep_extreme)
+            ilm = _ilm_short(candles, i, sl, se)
         if ilm:
-            candidates.append(ilm)
+            cands.append(ilm)
 
-    if not candidates:
+    if not cands:
         return False, None
-    best = max(candidates, key=lambda x: x["_score"])
-    best.pop("_score", None)
+    best = None
+    best_score = -1e9
+    for cand in cands:
+        sc = cand["_score"]
+        if sc > best_score:
+            best_score = sc
+            best = cand
+    if best is not None:
+        best.pop("_score", None)
     return True, best
 
 
-def calculate_entry(ilm, current_price, direction):
+def calculate_entry(ilm, price, direction):
     if not ilm:
         return None
-    trigger = _f(ilm.get("trigger_price"))
-    if trigger is None or trigger <= 0:
+    trig = _f(ilm.get("trigger_price"))
+    if trig is None or trig <= 0:
         return None
-
     offset = RETEST_OFFSET_PCT / 100.0
     if offset <= 0:
-        return trigger
-
+        return trig
     if direction == "LONG":
-        return trigger * (1 - offset)
-    elif direction == "SHORT":
-        return trigger * (1 + offset)
-    return trigger
-
-
-def find_structural_stop_level(candles_15m, direction, entry,
-                                ilm_extreme, sweep_extreme=None,
-                                candles_1h=None):
-    entry_f = _f(entry)
-    if entry_f is None:
-        return ilm_extreme
-
-    candidates = []
-
-    if candles_15m and len(candles_15m) >= 10:
-        window = candles_15m[-STRUCTURAL_SL_LOOKBACK_15M:]
-        if direction == "LONG":
-            candidates.extend([p for _, p in _swing_lows(window)])
-        elif direction == "SHORT":
-            candidates.extend([p for _, p in _swing_highs(window)])
-
-    if SL_USE_1H_SWINGS and candles_1h and len(candles_1h) >= 20:
-        w1h = candles_1h[-60:]
-        if direction == "LONG":
-            candidates.extend([p for _, p in _swing_lows(w1h)])
-        elif direction == "SHORT":
-            candidates.extend([p for _, p in _swing_highs(w1h)])
-
-    se = _f(sweep_extreme) if SL_USE_SWEEP_EXTREME else None
-    if se is not None:
-        candidates.append(se)
-
-    ie = _f(ilm_extreme)
-    if ie is not None:
-        candidates.append(ie)
-
-    candidates = [c for c in candidates if c is not None]
-    if not candidates:
-        return ilm_extreme
-
-    if direction == "LONG":
-        if se is not None and se < entry_f:
-            return se
-        below = [c for c in candidates if c < entry_f]
-        if not below:
-            return ilm_extreme
-        return max(below)
-
+        return trig * (1 - offset)
     if direction == "SHORT":
-        if se is not None and se > entry_f:
+        return trig * (1 + offset)
+    return trig
+
+
+def find_structural_sl(candles_15m, direction, entry,
+                        ilm_ext, sweep_ext=None,
+                        candles_1h=None):
+    ef = _f(entry)
+    if ef is None:
+        return ilm_ext
+    cands = []
+
+    if candles_15m:
+        if len(candles_15m) >= 10:
+            w = candles_15m[-STRUCTURAL_SL_LOOKBACK_15M:]
+            if direction == "LONG":
+                for _, p in _swing_lows(w):
+                    cands.append(p)
+            elif direction == "SHORT":
+                for _, p in _swing_highs(w):
+                    cands.append(p)
+
+    if SL_USE_1H_SWINGS and candles_1h:
+        if len(candles_1h) >= 20:
+            w1 = candles_1h[-60:]
+            if direction == "LONG":
+                for _, p in _swing_lows(w1):
+                    cands.append(p)
+            elif direction == "SHORT":
+                for _, p in _swing_highs(w1):
+                    cands.append(p)
+
+    se = None
+    if SL_USE_SWEEP_EXTREME:
+        se = _f(sweep_ext)
+        if se is not None:
+            cands.append(se)
+    ie = _f(ilm_ext)
+    if ie is not None:
+        cands.append(ie)
+
+    cands = [c for c in cands if c is not None]
+    if not cands:
+        return ilm_ext
+
+    if direction == "LONG":
+        if se is not None and se < ef:
             return se
-        above = [c for c in candidates if c > entry_f]
+        below = [c for c in cands if c < ef]
+        if not below:
+            return ilm_ext
+        return max(below)
+    if direction == "SHORT":
+        if se is not None and se > ef:
+            return se
+        above = [c for c in cands if c > ef]
         if not above:
-            return ilm_extreme
+            return ilm_ext
         return min(above)
+    return ilm_ext
 
-    return ilm_extreme
 
-
-def calculate_stop(entry, structural_level, direction, atr=None):
+def calculate_stop(entry, struct_level, direction, atr=None):
     entry = _f(entry)
-    level = _f(structural_level)
+    level = _f(struct_level)
     if entry is None or level is None:
         return None
 
     if USE_ATR_SCALING and atr is not None and atr > 0:
-        min_dist = atr * ATR_SL_MULT_SOFT
-        max_dist = atr * ATR_SL_MAX_MULT
+        min_d = atr * ATR_SL_MULT_SOFT
+        max_d = atr * ATR_SL_MAX_MULT
     else:
-        min_dist = entry * MIN_SL_DISTANCE_PCT / 100
-        max_dist = entry * MAX_SL_DISTANCE_PCT / 100
+        min_d = entry * MIN_SL_DISTANCE_PCT / 100
+        max_d = entry * MAX_SL_DISTANCE_PCT / 100
 
     if direction == "LONG":
         sl = level * (1 - SL_BUFFER_PCT / 100)
-        if (entry - sl) < min_dist:
-            sl = entry - min_dist
-        if (entry - sl) > max_dist:
-            sl = entry - max_dist
-        return sl if sl < entry else None
-
+        if (entry - sl) < min_d:
+            sl = entry - min_d
+        if (entry - sl) > max_d:
+            sl = entry - max_d
+        if sl < entry:
+            return sl
+        return None
     if direction == "SHORT":
         sl = level * (1 + SL_BUFFER_PCT / 100)
-        if (sl - entry) < min_dist:
-            sl = entry + min_dist
-        if (sl - entry) > max_dist:
-            sl = entry + max_dist
-        return sl if sl > entry else None
-
+        if (sl - entry) < min_d:
+            sl = entry + min_d
+        if (sl - entry) > max_d:
+            sl = entry + max_d
+        if sl > entry:
+            return sl
+        return None
     return None
 
 
@@ -967,13 +1056,12 @@ def validate_geometry(entry, sl, tp, direction):
     return False
 
 
-def _score(direction, context_direction, sweep, confirmation_strength,
-           bos, ilm, rr, major_strength, fvg_bonus):
+def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
+           rr, maj_str, fvg_bonus):
     score = 0
-
-    if direction == context_direction:
+    if direction == ctx_dir:
         score += 15
-    elif context_direction == "NEUTRAL":
+    elif ctx_dir == "NEUTRAL":
         score += 8
     else:
         score += 5
@@ -989,11 +1077,11 @@ def _score(direction, context_direction, sweep, confirmation_strength,
         else:
             score += 6
 
-    if confirmation_strength >= 0.75:
+    if conf_str >= 0.75:
         score += 15
-    elif confirmation_strength >= 0.50:
+    elif conf_str >= 0.50:
         score += 11
-    elif confirmation_strength > 0:
+    elif conf_str > 0:
         score += 7
 
     if bos:
@@ -1011,49 +1099,46 @@ def _score(direction, context_direction, sweep, confirmation_strength,
     if rr is not None and rr >= FIXED_RR:
         score += 15
 
-    score += min(10, major_strength / 10.0)
+    score += min(10, maj_str / 10.0)
     score += fvg_bonus
-
     return int(min(100, max(0, round(score))))
 
 
 def _apply_ready_promote(result):
-    """
-    v9.10: если analyze заблокировал READY из-за score/trend/bos,
-    но сетап топ-уровня — повышаем до READY по tiers.
-    """
     if result.get("stage") != "15M_CONFIRMED":
         return result
     reason = result.get("reason", "")
     if "READY заблокирован" not in reason:
         return result
-    if any(result.get(k) is None for k in ("entry", "sl", "tp", "rr")):
+    if any(result.get(k) is None
+           for k in ("entry", "sl", "tp", "rr")):
         return result
 
     score = int(result.get("score", 0))
     trend = float(result.get("trend_activity", 0.0))
     bos = bool(result.get("bos", False))
 
-    for score_min, trend_min, need_bos in READY_PROMOTE_TIERS:
-        if score < score_min:
+    for sc_min, tr_min, need_bos in READY_PROMOTE_TIERS:
+        if score < sc_min:
             continue
-        if trend < trend_min:
+        if trend < tr_min:
             continue
         if need_bos and not bos:
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.10 promote: score={score} trend={trend:.2f} "
-            f"bos={bos}"
+            f"v9.19 promote: score={score} "
+            f"trend={trend:.2f} bos={bos}"
         )
         result["_v910_promoted"] = True
         return result
     return result
 
 
-def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
-                       major_levels, direction, context_direction,
-                       d1_context=None, fvgs=None, symbol=None):
+def _analyze_scenario(c1h, c15, c5, price,
+                      levels, direction, ctx_dir,
+                      d1_context=None, fvgs=None,
+                      symbol=None):
     result = {
         "stage": "WAIT",
         "direction": direction,
@@ -1065,7 +1150,7 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
         "tp_source": "fixed_rr",
         "rr": None,
         "sweep": None,
-        "major_levels": major_levels or [],
+        "major_levels": levels or [],
         "confirmation_15m": False,
         "confirmation_15m_time": None,
         "confirmation": None,
@@ -1087,193 +1172,188 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
         result["reason"] = "SHORT disabled"
         return result
 
-    price = _f(current_price)
-    if price is None or not candles_1h or not candles_15m or not candles_5m:
-        result["reason"] = "Недостаточно рыночных данных."
+    price = _f(price)
+    if price is None or not c1h or not c15 or not c5:
+        result["reason"] = "Недостаточно данных."
         return result
 
-    trend_activity = measure_trend_activity(candles_1h, direction)
-    result["trend_activity"] = round(trend_activity, 3)
+    trend = measure_trend_activity(c1h, direction)
+    result["trend_activity"] = round(trend, 3)
 
-    levels = _levels_for_direction(major_levels, direction)
-    if not levels:
+    lv = _levels_for_dir(levels, direction)
+    if not lv:
         result["score"] = 20
-        result["reason"] = (
-            f"Нет актуальной Major "
-            f"{'SSL' if direction == 'LONG' else 'BSL'}."
-        )
+        t = "SSL" if direction == "LONG" else "BSL"
+        result["reason"] = f"Нет Major {t}."
         return result
 
-    sweep = find_sweep(candles_1h, levels, direction)
+    sweep = find_sweep(c1h, lv, direction)
     result["sweep"] = sweep
 
     if sweep is None:
         result["score"] = 25
-        result["reason"] = (
-            f"Ждём {'SSL sweep' if direction == 'LONG' else 'BSL sweep'}."
-        )
+        t = "SSL sweep" if direction == "LONG" else "BSL sweep"
+        result["reason"] = f"Ждём {t}."
         return result
 
     result["stage"] = "SWEPT"
     result["sweep_extreme"] = sweep.get("extreme")
 
-    conf_ok, conf_text, conf_time, bos = confirmation_15m(
-        candles_15m, sweep, direction)
+    conf_ok, conf_text, conf_t, bos = confirmation_15m(
+        c15, sweep, direction)
 
     result["confirmation_15m"] = conf_ok
-    result["confirmation_15m_time"] = conf_time
+    result["confirmation_15m_time"] = conf_t
     result["confirmation"] = conf_text
     result["bos"] = bos
 
     if not conf_ok:
         result["score"] = 50
-        result["reason"] = "Sweep есть. Ждём 15M confirmation."
+        result["reason"] = "Ждём 15M."
         return result
 
     result["stage"] = "15M_CONFIRMED"
 
-    ilm_ok, ilm = detect_5m_ilm(candles_5m, sweep, direction, conf_time)
+    ilm_ok, ilm = detect_5m_ilm(c5, sweep, direction,
+                                 conf_t)
     result["ilm"] = ilm
 
     if not ilm_ok:
         result["score"] = 65
-        result["reason"] = "15M подтверждение есть. Ждём 5M ILM."
+        result["reason"] = "Ждём 5M ILM."
         return result
 
-    ilm_age = int(ilm.get("age_candles", 0))
-    if ilm_age > MAX_ILM_AGE_CANDLES_5M:
+    age = int(ilm.get("age_candles", 0))
+    if age > MAX_ILM_AGE_CANDLES_5M:
         result["score"] = 65
-        result["reason"] = f"ILM устарел ({ilm_age} свечей 5M)."
+        result["reason"] = f"ILM устарел ({age})"
         return result
 
-    if ilm_age > MAX_ILM_AGE_FOR_ENTRY:
+    if age > MAX_ILM_AGE_FOR_ENTRY:
         result["score"] = 68
         result["reason"] = (
-            f"ILM триггер слишком старый для входа "
-            f"({ilm_age} > {MAX_ILM_AGE_FOR_ENTRY})."
+            f"ILM старый ({age} > "
+            f"{MAX_ILM_AGE_FOR_ENTRY})"
         )
         return result
 
     entry = calculate_entry(ilm, price, direction)
     if entry is None:
         result["score"] = 68
-        result["reason"] = "Не удалось определить Entry (ILM trigger)."
+        result["reason"] = "Нет Entry."
         return result
 
-    dist_pct = _distance_pct(price, entry)
-    if dist_pct is None or dist_pct > ENTRY_TOLERANCE_PCT:
+    dist = _dist_pct(price, entry)
+    if dist is None or dist > ENTRY_TOLERANCE_PCT:
         result["score"] = 68
         result["reason"] = (
-            f"Цена ушла от entry на {dist_pct:.2f}% "
-            f"(лимит {ENTRY_TOLERANCE_PCT}%)."
+            f"Цена ушла на {dist:.2f}%"
         )
         return result
 
-    ilm_extreme = _f(ilm.get("extreme"))
+    ilm_ext = _f(ilm.get("extreme"))
 
     if ENABLE_VOLATILITY_FILTER:
-        atr_fast, atr_slow = _avg_atr(candles_15m, fast=14, slow=50)
-        if (atr_fast is not None and atr_slow is not None
-                and atr_slow > 0
-                and atr_fast > atr_slow * VOLATILITY_ATR_SPIKE_MULT):
+        fa, sa = _avg_atr(c15, fast=14, slow=50)
+        if (fa is not None and sa is not None
+                and sa > 0
+                and fa > sa * VOLATILITY_ATR_SPIKE_MULT):
             result["score"] = 70
-            result["reason"] = (
-                f"Volatility spike: ATR {atr_fast:.4f} "
-                f"> {VOLATILITY_ATR_SPIKE_MULT}x avg {atr_slow:.4f}"
-            )
+            result["reason"] = "Volatility spike"
             return result
 
-    atr_15m = calculate_atr(candles_15m, 14)
+    atr_15m = calculate_atr(c15, 14)
 
-    structural_level = find_structural_stop_level(
-        candles_15m, direction, entry, ilm_extreme,
-        sweep_extreme=sweep.get("extreme") if sweep else None,
-        candles_1h=candles_1h,
+    struct_lvl = find_structural_sl(
+        c15, direction, entry, ilm_ext,
+        sweep_ext=sweep.get("extreme") if sweep else None,
+        candles_1h=c1h,
     )
 
-    sl = calculate_stop(entry, structural_level, direction, atr=atr_15m)
+    sl = calculate_stop(entry, struct_lvl, direction,
+                        atr=atr_15m)
     if sl is None:
         result["score"] = 68
-        result["reason"] = "Не удалось построить структурный SL."
+        result["reason"] = "Нет SL."
         return result
 
     tp = calculate_tp_by_rr(entry, sl, direction, FIXED_RR)
     if tp is None:
         result["score"] = 70
-        result["reason"] = "Не удалось рассчитать TP."
+        result["reason"] = "Нет TP."
         return result
 
     if not validate_geometry(entry, sl, tp, direction):
         result["score"] = 68
-        result["reason"] = "Некорректная геометрия сделки."
+        result["reason"] = "Геометрия сломана."
         return result
 
     result["geometry_valid"] = True
 
-    rr_value = calculate_rr(entry, sl, tp)
-    if rr_value is None:
+    rr = calculate_rr(entry, sl, tp)
+    if rr is None:
         result["score"] = 68
-        result["reason"] = "Не удалось рассчитать RR."
+        result["reason"] = "Нет RR."
         return result
 
     result.update({
         "entry": round(entry, 8),
         "sl": round(sl, 8),
         "tp": round(tp, 8),
-        "rr": round(rr_value, 3),
+        "rr": round(rr, 3),
         "tp_reason": f"Fixed RR 1:{FIXED_RR}",
     })
 
     try:
-        result["sl_distance_pct"] = round(abs(entry - sl) / entry * 100, 3)
-        result["atr_15m"] = round(atr_15m, 6) if atr_15m else None
-        if atr_15m and abs(entry - sl) < atr_15m * ATR_SL_MULT_SOFT * 1.001:
-            result["sl_source"] = "atr_floor"
-        else:
-            result["sl_source"] = "structural"
+        sdp = abs(entry - sl) / entry * 100
+        result["sl_distance_pct"] = round(sdp, 3)
+        if atr_15m:
+            result["atr_15m"] = round(atr_15m, 6)
+        if atr_15m:
+            if abs(entry - sl) < atr_15m * ATR_SL_MULT_SOFT:
+                result["sl_source"] = "atr_floor"
+            else:
+                result["sl_source"] = "structural"
     except Exception:
         pass
 
     try:
-        major_strength = max([_level_strength(l) for l in levels] or [0])
+        ms = max([_level_strength(l) for l in lv] or [0])
     except Exception:
-        major_strength = 0
+        ms = 0
 
-    fvg_bonus, fvg_sweep, fvg_entry = compute_fvg_bonus(
+    fb, fs, fe = compute_fvg_bonus(
         sweep, entry, fvgs or [], direction)
-    result["fvg_bonus"] = fvg_bonus
-    result["fvg_sweep"] = fvg_sweep
-    result["fvg_entry"] = fvg_entry
+    result["fvg_bonus"] = fb
+    result["fvg_sweep"] = fs
+    result["fvg_entry"] = fe
 
-    conf_strength = 0.8 if conf_ok else 0.6
+    conf_str = 0.8 if conf_ok else 0.6
 
     score = _score(
         direction=direction,
-        context_direction=context_direction,
+        ctx_dir=ctx_dir,
         sweep=sweep,
-        confirmation_strength=conf_strength,
+        conf_str=conf_str,
         bos=bos,
         ilm=ilm,
-        rr=rr_value,
-        major_strength=major_strength,
-        fvg_bonus=fvg_bonus,
+        rr=rr,
+        maj_str=ms,
+        fvg_bonus=fb,
     )
     result["score"] = score
 
-    trend_ok = trend_activity >= MIN_TREND_ACTIVITY_READY
+    trend_ok = trend >= MIN_TREND_ACTIVITY_READY
     bos_ok = (not REQUIRE_BOS_FOR_READY) or bos
 
-    ready_ok = (
-        score >= MIN_SCORE_READY
-        and trend_ok
-        and bos_ok
-    )
+    ready_ok = (score >= MIN_SCORE_READY
+                and trend_ok and bos_ok)
 
     if ready_ok:
         result["stage"] = "READY"
         result["reason"] = (
-            f"Sweep → 15M → 5M ILM → Entry=ILM trigger. "
-            f"Trend {trend_activity:.2f}. RR 1:{FIXED_RR}. BOS."
+            f"Sweep→15M→5M ILM. "
+            f"Trend {trend:.2f}. RR {FIXED_RR}. BOS."
         )
         return result
 
@@ -1282,27 +1362,29 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     if score < MIN_SCORE_READY:
         blocks.append(f"score {score}")
     if not trend_ok:
-        blocks.append(f"trend {trend_activity:.2f}")
+        blocks.append(f"trend {trend:.2f}")
     if not bos_ok:
         blocks.append("no_bos")
-    result["reason"] = ("READY заблокирован: " + ", ".join(blocks))
-
-    # ─── v9.10: пробуем promote до READY для топ-сетапов ───
+    result["reason"] = ("READY заблокирован: "
+                        + ", ".join(blocks))
     result = _apply_ready_promote(result)
     return result
 
 
-def analyze(candles_1h, candles_15m, candles_5m, current_price,
-            major_levels=None, sweep=None, order_flow=None,
-            candles_1m=None, d1_context=None, fvgs=None, symbol=None):
+def analyze(candles_1h, candles_15m, candles_5m,
+            current_price, major_levels=None,
+            sweep=None, order_flow=None,
+            candles_1m=None, d1_context=None,
+            fvgs=None, symbol=None):
     price = _f(current_price)
-    context_direction = get_1h_direction(candles_1h)
+    ctx_dir = get_1h_direction(candles_1h)
 
     base = {
         "stage": "WAIT",
-        "direction": context_direction,
-        "context_direction": context_direction,
-        "d1_trend": (d1_context or {}).get("trend", "NEUTRAL"),
+        "direction": ctx_dir,
+        "context_direction": ctx_dir,
+        "d1_trend": (d1_context or {}).get("trend",
+                                            "NEUTRAL"),
         "d1_point_a": (d1_context or {}).get("point_a"),
         "d1_point_b": (d1_context or {}).get("point_b"),
         "score": 0,
@@ -1330,49 +1412,60 @@ def analyze(candles_1h, candles_15m, candles_5m, current_price,
         "short": None,
     }
 
-    if price is None or not candles_1h or not candles_15m or not candles_5m:
-        base["reason"] = "Недостаточно рыночных данных."
+    if price is None:
+        base["reason"] = "Недостаточно данных."
+        return base
+    if not candles_1h or not candles_15m or not candles_5m:
+        base["reason"] = "Недостаточно данных."
         return base
 
-    long_result = _analyze_scenario(
+    lr = _analyze_scenario(
         candles_1h, candles_15m, candles_5m, price,
-        major_levels, "LONG", context_direction,
-        d1_context=d1_context, fvgs=fvgs, symbol=symbol,
-    )
+        major_levels, "LONG", ctx_dir,
+        d1_context=d1_context, fvgs=fvgs,
+        symbol=symbol)
 
-    short_result = _analyze_scenario(
+    sr = _analyze_scenario(
         candles_1h, candles_15m, candles_5m, price,
-        major_levels, "SHORT", context_direction,
-        d1_context=d1_context, fvgs=fvgs, symbol=symbol,
-    )
+        major_levels, "SHORT", ctx_dir,
+        d1_context=d1_context, fvgs=fvgs,
+        symbol=symbol)
 
-    base["long"] = long_result
-    base["short"] = short_result
+    base["long"] = lr
+    base["short"] = sr
 
-    if context_direction == "NEUTRAL":
-        best = max([long_result, short_result],
-                   key=lambda x: x.get("score", 0))
+    if ctx_dir == "NEUTRAL":
+        if lr.get("score", 0) >= sr.get("score", 0):
+            best = lr
+        else:
+            best = sr
+        stage = best.get("stage", "WAIT")
+        if stage == "READY":
+            stage = "WAIT"
         base.update({
-            "stage": "WAIT" if best.get("stage") == "READY"
-                     else best.get("stage", "WAIT"),
+            "stage": stage,
             "direction": "NEUTRAL",
             "score": best.get("score", 0),
-            "reason": "1H NEUTRAL. READY не разрешаем.",
+            "reason": "1H NEUTRAL",
             "entry": best.get("entry"),
             "sl": best.get("sl"),
             "tp": best.get("tp"),
             "tp_source": best.get("tp_source"),
             "rr": best.get("rr"),
             "sweep": best.get("sweep"),
-            "confirmation_15m": best.get("confirmation_15m", False),
-            "confirmation_15m_time": best.get("confirmation_15m_time"),
+            "confirmation_15m": best.get(
+                "confirmation_15m", False),
+            "confirmation_15m_time": best.get(
+                "confirmation_15m_time"),
             "confirmation": best.get("confirmation"),
             "bos": best.get("bos", False),
             "ilm": best.get("ilm"),
             "sweep_extreme": best.get("sweep_extreme"),
             "tp_reason": best.get("tp_reason"),
-            "geometry_valid": best.get("geometry_valid", False),
-            "trend_activity": best.get("trend_activity", 0.0),
+            "geometry_valid": best.get(
+                "geometry_valid", False),
+            "trend_activity": best.get(
+                "trend_activity", 0.0),
             "fvg_bonus": best.get("fvg_bonus", 0),
             "fvg_sweep": best.get("fvg_sweep", False),
             "fvg_entry": best.get("fvg_entry", False),
@@ -1380,75 +1473,109 @@ def analyze(candles_1h, candles_15m, candles_5m, current_price,
         return base
 
     ready = []
-    if (long_result.get("stage") == "READY"
-            and long_result.get("score", 0) >= MIN_SCORE_READY):
-        ready.append(long_result)
-    if (short_result.get("stage") == "READY"
-            and short_result.get("score", 0) >= MIN_SCORE_READY):
-        ready.append(short_result)
+    if lr.get("stage") == "READY":
+        if lr.get("score", 0) >= MIN_SCORE_READY:
+            ready.append(lr)
+    if sr.get("stage") == "READY":
+        if sr.get("score", 0) >= MIN_SCORE_READY:
+            ready.append(sr)
 
     if ready:
-        aligned = [x for x in ready if x["direction"] == context_direction]
-        counter = [x for x in ready if x["direction"] != context_direction]
+        aligned = []
+        counter = []
+        for x in ready:
+            if x["direction"] == ctx_dir:
+                aligned.append(x)
+            else:
+                counter.append(x)
 
+        chosen = None
         if aligned:
-            chosen = max(aligned, key=lambda x: x["score"])
+            best_sc = -1
+            for a in aligned:
+                if a["score"] > best_sc:
+                    best_sc = a["score"]
+                    chosen = a
         elif counter:
-            counter_ready = [x for x in counter
-                             if x["score"] >= COUNTER_TREND_MIN_SCORE]
-            if not counter_ready:
-                base["score"] = max(long_result["score"],
-                                    short_result["score"])
-                base["reason"] = "Контртренд недостаточно сильный."
+            cr = []
+            for x in counter:
+                if x["score"] >= COUNTER_TREND_MIN_SCORE:
+                    cr.append(x)
+            if not cr:
+                base["score"] = max(lr["score"],
+                                     sr["score"])
+                base["reason"] = "Counter-тренд слаб."
                 return base
-            chosen = max(counter_ready, key=lambda x: x["score"])
-        else:
-            chosen = None
+            best_sc = -1
+            for x in cr:
+                if x["score"] > best_sc:
+                    best_sc = x["score"]
+                    chosen = x
 
         if chosen:
             base.update(chosen)
-            base["context_direction"] = context_direction
-            base["long"] = long_result
-            base["short"] = short_result
+            base["context_direction"] = ctx_dir
+            base["long"] = lr
+            base["short"] = sr
             return base
 
-    candidates = [long_result, short_result]
+    candidates = [lr, sr]
 
-    def stage_weight(r):
-        return {"READY": 5, "15M_CONFIRMED": 4,
-                "SWEPT": 3, "WAIT": 1}.get(r.get("stage"), 0)
+    def stage_wt(r):
+        m = {
+            "READY": 5, "15M_CONFIRMED": 4,
+            "SWEPT": 3, "WAIT": 1,
+        }
+        return m.get(r.get("stage"), 0)
 
-    aligned_candidates = [x for x in candidates
-                          if x["direction"] == context_direction]
-    pool = aligned_candidates if aligned_candidates else candidates
+    aligned_c = []
+    for x in candidates:
+        if x["direction"] == ctx_dir:
+            aligned_c.append(x)
 
-    chosen = max(pool, key=lambda x: (stage_weight(x), x.get("score", 0)))
+    if aligned_c:
+        pool = aligned_c
+    else:
+        pool = candidates
 
-    base.update({
-        "stage": chosen.get("stage", "WAIT"),
-        "direction": chosen.get("direction", context_direction),
-        "score": chosen.get("score", 0),
-        "reason": chosen.get("reason", ""),
-        "entry": chosen.get("entry"),
-        "sl": chosen.get("sl"),
-        "tp": chosen.get("tp"),
-        "tp_source": chosen.get("tp_source"),
-        "rr": chosen.get("rr"),
-        "sweep": chosen.get("sweep"),
-        "confirmation_15m": chosen.get("confirmation_15m", False),
-        "confirmation_15m_time": chosen.get("confirmation_15m_time"),
-        "confirmation": chosen.get("confirmation"),
-        "bos": chosen.get("bos", False),
-        "ilm": chosen.get("ilm"),
-        "sweep_extreme": chosen.get("sweep_extreme"),
-        "tp_reason": chosen.get("tp_reason"),
-        "geometry_valid": chosen.get("geometry_valid", False),
-        "trend_activity": chosen.get("trend_activity", 0.0),
-        "fvg_bonus": chosen.get("fvg_bonus", 0),
-        "fvg_sweep": chosen.get("fvg_sweep", False),
-        "fvg_entry": chosen.get("fvg_entry", False),
-    })
-    base["context_direction"] = context_direction
+    chosen = None
+    best_k = None
+    for x in pool:
+        k = (stage_wt(x), x.get("score", 0))
+        if best_k is None or k > best_k:
+            best_k = k
+            chosen = x
+
+    if chosen is not None:
+        base.update({
+            "stage": chosen.get("stage", "WAIT"),
+            "direction": chosen.get("direction", ctx_dir),
+            "score": chosen.get("score", 0),
+            "reason": chosen.get("reason", ""),
+            "entry": chosen.get("entry"),
+            "sl": chosen.get("sl"),
+            "tp": chosen.get("tp"),
+            "tp_source": chosen.get("tp_source"),
+            "rr": chosen.get("rr"),
+            "sweep": chosen.get("sweep"),
+            "confirmation_15m": chosen.get(
+                "confirmation_15m", False),
+            "confirmation_15m_time": chosen.get(
+                "confirmation_15m_time"),
+            "confirmation": chosen.get("confirmation"),
+            "bos": chosen.get("bos", False),
+            "ilm": chosen.get("ilm"),
+            "sweep_extreme": chosen.get("sweep_extreme"),
+            "tp_reason": chosen.get("tp_reason"),
+            "geometry_valid": chosen.get(
+                "geometry_valid", False),
+            "trend_activity": chosen.get(
+                "trend_activity", 0.0),
+            "fvg_bonus": chosen.get("fvg_bonus", 0),
+            "fvg_sweep": chosen.get("fvg_sweep", False),
+            "fvg_entry": chosen.get("fvg_entry", False),
+        })
+    base["context_direction"] = ctx_dir
     return base
 
 
@@ -1470,7 +1597,7 @@ __all__ = [
     "RETEST_OFFSET_PCT",
     "calculate_atr",
     "get_1h_direction",
-    "get_higher_timeframe_direction",
+    "get_higher_tf_direction",
     "measure_trend_activity",
     "find_sweep",
     "confirmation_15m",
@@ -1479,7 +1606,7 @@ __all__ = [
     "calculate_stop",
     "calculate_tp_by_rr",
     "calculate_rr",
-    "find_structural_stop_level",
+    "find_structural_sl",
     "validate_geometry",
     "analyze",
     "analyze_sol",
