@@ -1,22 +1,29 @@
 """
-TradeMind 8.5.1 — strategy.py
+TradeMind 8.5.2 — strategy.py
 
-Изменения vs 8.5:
-- MAX_ILM_AGE_FOR_ENTRY: 2 -> 4 (вернули часть сделок)
-- Sweep invalidation: мягче — только 2+ свечи подряд за extreme
-- STRATEGY_VERSION: 8.5 -> 8.5.1
+Изменения vs 8.5.1:
+- ATR_SL_MULT_SOFT: 0.8 -> 1.2 (вернули широкий структурный SL)
+- Session filter: не торгуем 02:00-07:00 UTC (кроме BTC/ETH)
+- analyze() принимает symbol для session-фильтра
+- STRATEGY_VERSION: 8.5.1 -> 8.5.2
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "8.5.1"
+STRATEGY_VERSION = "8.5.2"
 
 ALLOW_SHORT = True
 
-# v8.5.1 fixes
+# v8.5.2 fixes
 MAX_ILM_AGE_FOR_ENTRY = 4
-ATR_SL_MULT_SOFT = 0.8
+ATR_SL_MULT_SOFT = 1.2
+
+# v8.5.2 Session Filter
+ENABLE_SESSION_FILTER = True
+SESSION_BLOCK_START_HOUR = 2
+SESSION_BLOCK_END_HOUR = 7
+SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 
 MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
@@ -326,10 +333,6 @@ def _sweep_candidate_score(candle, level, depth):
 
 
 def find_sweep(candles_1h, major_levels, direction):
-    """
-    v8.5.1: пинбары валидны + sweep invalidation.
-    Invalidation: только если 2+ свечи подряд закрылись за extreme.
-    """
     if direction not in {"LONG", "SHORT"}:
         return None
     if not candles_1h or len(candles_1h) < 3:
@@ -365,7 +368,6 @@ def find_sweep(candles_1h, major_levels, direction):
                 depth = (price - low) / price * 100
                 if (low < price and depth >= MIN_SWEEP_DEPTH_PCT
                         and close > price):
-                    # пинбар валиден
                     open_p = _o(candle) or close
                     body = abs(close - open_p)
                     lower_wick = min(open_p, close) - low
@@ -373,7 +375,6 @@ def find_sweep(candles_1h, major_levels, direction):
                     if not is_rejection:
                         continue
 
-                    # v8.5.1: invalidation — только 2+ свечи подряд ниже extreme
                     is_invalidated = False
                     consecutive_below = 0
                     for k in range(candle_idx_1h + 1, total_candles):
@@ -407,7 +408,6 @@ def find_sweep(candles_1h, major_levels, direction):
                 depth = (high - price) / price * 100
                 if (high > price and depth >= MIN_SWEEP_DEPTH_PCT
                         and close < price):
-                    # пинбар валиден
                     open_p = _o(candle) or close
                     body = abs(close - open_p)
                     upper_wick = high - max(open_p, close)
@@ -415,7 +415,6 @@ def find_sweep(candles_1h, major_levels, direction):
                     if not is_rejection:
                         continue
 
-                    # v8.5.1: invalidation — только 2+ свечи подряд выше extreme
                     is_invalidated = False
                     consecutive_above = 0
                     for k in range(candle_idx_1h + 1, total_candles):
@@ -509,10 +508,6 @@ def _is_local_low_15m(c, i):
 
 
 def confirmation_15m(candles_15m, sweep, direction):
-    """
-    v8.5.1: BOS по всему массиву кандидатов.
-    Fallback: engulfing предыдущей свечи (без BOS).
-    """
     if not sweep or direction not in {"LONG", "SHORT"} or not candles_15m:
         return False, None, None, False
 
@@ -819,9 +814,6 @@ def calculate_entry(ilm, current_price, direction):
 def find_structural_stop_level(candles_15m, direction, entry,
                                 ilm_extreme, sweep_extreme=None,
                                 candles_1h=None):
-    """
-    v8.5.1: SL за sweep extreme. Не уходим глубже.
-    """
     entry_f = _f(entry)
     if entry_f is None:
         return ilm_extreme
@@ -996,9 +988,24 @@ def _score(direction, context_direction, sweep, confirmation_strength,
     return int(min(100, max(0, round(score))))
 
 
+def _is_session_blocked(symbol, ts_ms):
+    if not ENABLE_SESSION_FILTER:
+        return False
+    if symbol in SESSION_FILTER_EXEMPT:
+        return False
+    try:
+        if ts_ms is None:
+            return False
+        from datetime import datetime, timezone
+        hour = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).hour
+        return SESSION_BLOCK_START_HOUR <= hour < SESSION_BLOCK_END_HOUR
+    except Exception:
+        return False
+
+
 def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
                        major_levels, direction, context_direction,
-                       d1_context=None, fvgs=None):
+                       d1_context=None, fvgs=None, symbol=None):
     result = {
         "stage": "WAIT",
         "direction": direction,
@@ -1036,6 +1043,14 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     if price is None or not candles_1h or not candles_15m or not candles_5m:
         result["reason"] = "Недостаточно рыночных данных."
         return result
+
+    # v8.5.2 Session filter
+    if symbol and candles_1h:
+        last_ts = _t(candles_1h[-1])
+        if _is_session_blocked(symbol, last_ts):
+            result["score"] = 30
+            result["reason"] = "Session filter: мёртвая зона UTC."
+            return result
 
     trend_activity = measure_trend_activity(candles_1h, direction)
     result["trend_activity"] = round(trend_activity, 3)
@@ -1236,7 +1251,7 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
 
 def analyze(candles_1h, candles_15m, candles_5m, current_price,
             major_levels=None, sweep=None, order_flow=None,
-            candles_1m=None, d1_context=None, fvgs=None):
+            candles_1m=None, d1_context=None, fvgs=None, symbol=None):
     price = _f(current_price)
     context_direction = get_1h_direction(candles_1h)
 
@@ -1279,13 +1294,13 @@ def analyze(candles_1h, candles_15m, candles_5m, current_price,
     long_result = _analyze_scenario(
         candles_1h, candles_15m, candles_5m, price,
         major_levels, "LONG", context_direction,
-        d1_context=d1_context, fvgs=fvgs,
+        d1_context=d1_context, fvgs=fvgs, symbol=symbol,
     )
 
     short_result = _analyze_scenario(
         candles_1h, candles_15m, candles_5m, price,
         major_levels, "SHORT", context_direction,
-        d1_context=d1_context, fvgs=fvgs,
+        d1_context=d1_context, fvgs=fvgs, symbol=symbol,
     )
 
     base["long"] = long_result
@@ -1409,6 +1424,7 @@ __all__ = [
     "USE_ATR_SCALING",
     "MAX_ILM_AGE_FOR_ENTRY",
     "ATR_SL_MULT_SOFT",
+    "ENABLE_SESSION_FILTER",
     "calculate_atr",
     "get_1h_direction",
     "get_higher_timeframe_direction",
