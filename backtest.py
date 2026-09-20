@@ -3,7 +3,7 @@ TradeMind backtest v9.11 FINAL — рост PnL.
 
 Фиксы v9.11:
 - BE в +0.3R после partial (гарантирует мини-профит на остатке)
-- Trailing плотнее: trigger 1.0R, distance 0.5R
+- Trailing 1.3R / 0.8R (как в v9.10 — не режет TP)
 - Флаг --exclude-eth-dot для отключения ETH/DOT
 
 ЗАПУСК:
@@ -58,10 +58,12 @@ COOLDOWN_V910 = {
     "BCHUSDT": {2: 4, 3: 8},
 }
 
+# ─── v9.11 FINAL: trailing как v9.10 (не режет TP) ───
 TRAILING_ENABLED = True
-TRAILING_TRIGGER_R = 1.0
-TRAILING_DISTANCE_R = 0.5
+TRAILING_TRIGGER_R = 1.3
+TRAILING_DISTANCE_R = 0.8
 
+# ─── v9.11: BE в +0.3R после partial ───
 BE_PROFIT_OFFSET_R = 0.3
 
 PARTIAL_ENABLED = True
@@ -256,7 +258,7 @@ def classify_reason(result, market_info):
 
 
 # ============================================================
-# SIMULATE TRADE v9.11
+# SIMULATE TRADE v9.11 FINAL
 # ============================================================
 
 def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
@@ -659,7 +661,7 @@ def print_report(symbol, trades, diag,
     if use_partial_tp:
         labels.append("PARTIALx2")
     if use_trailing:
-        labels.append("TRAIL1.0/0.5")
+        labels.append("TRAIL1.3/0.8")
     labels.append("CDv3")
     label = "+".join(labels)
 
@@ -808,7 +810,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     if use_partial_tp:
         labels.append("PARTIALx2")
     if use_trailing:
-        labels.append("TRAIL1.0/0.5")
+        labels.append("TRAIL1.3/0.8")
     labels.append("CDv3")
     label = "+".join(labels)
 
@@ -939,7 +941,7 @@ def main():
     parser.add_argument("--symbols", default=None,
                         help="список через запятую")
     parser.add_argument("--exclude-eth-dot", action="store_true",
-                        help="убрать ETH/DOT (убыточные в v9.10)")
+                        help="убрать ETH/DOT (убыточные)")
     args = parser.parse_args()
 
     use_be = not args.no_be
