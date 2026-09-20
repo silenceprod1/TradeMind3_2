@@ -1,5 +1,5 @@
 """
-Диагностический бэктест v9.7 — 40 дней, 10 монет.
+Диагностический бэктест v9.8 — 40 дней, 10 монет, с session filter.
 """
 
 import argparse
@@ -81,6 +81,9 @@ def classify_reason(result, market_info):
 
     if stage == "READY":
         return "READY"
+
+    if "session filter" in reason:
+        return "session_blocked"
 
     if "нет актуальной major" in reason:
         n_bsl = market_info.get("bsl_count", 0)
@@ -328,7 +331,8 @@ def run_backtest(symbol, max_hours,
                     d1_context = None
 
             result = analyze(c1h, c15, c5, price, levels, sweep,
-                             candles_1m=c1, d1_context=d1_context, fvgs=[])
+                             candles_1m=c1, d1_context=d1_context, fvgs=[],
+                             symbol=symbol)
         except Exception as exc:
             exception_counter[f"analyze:{type(exc).__name__}"] += 1
             if exception_counter[f"analyze:{type(exc).__name__}"] == 1:
@@ -421,7 +425,7 @@ def print_report(symbol, trades, diag, use_breakeven=False,
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v9.7 - {symbol} [{label}]")
+    print(f"ОТЧЁТ БЭКТЕСТА v9.8 - {symbol} [{label}]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -558,7 +562,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v9.7 - {label} - "
+    print(f"### MULTI BACKTEST v9.8 - {label} - "
           f"{len(symbols)} монет x 40 дней")
     print("#" * 70)
 
