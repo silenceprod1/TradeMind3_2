@@ -1,15 +1,17 @@
 """
-TradeMind 8.3 — strategy.py
+TradeMind 8.4 — strategy.py
 
-Изменения vs 8.2:
-- MIN_SWEEP_DEPTH_PCT: 0.25 -> 0.15 (возврат к v7.6)
-- Всё остальное — как v8.2 (ATR scaling SL сохранён)
+Изменения vs 8.3:
+- ФИКС LOOKAHEAD BIAS в _ilm_long_candidate / _ilm_short_candidate
+  recovery_ratio теперь считается только по закрытию триггерной свечи,
+  а не по max/min из i+1..i+3 (это было подглядывание в будущее).
+- STRATEGY_VERSION: 8.3 -> 8.4
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "8.3"
+STRATEGY_VERSION = "8.4"
 
 ALLOW_SHORT = True
 
@@ -538,6 +540,10 @@ def _is_local_low(c, i):
     return cur <= l and cur < r
 
 
+# ============================================================
+# v8.4 FIX: _ilm_long_candidate без lookahead
+# ============================================================
+
 def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
     m = candles[i]
     if not _is_local_low(candles, i):
@@ -548,17 +554,14 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
         return None
 
     before = candles[max(0, i - 2):i]
-    after = candles[i + 1:min(len(candles), i + 4)]
-    if not before or not after:
+    if not before:
         return None
 
     bl = [_l(x) for x in before if _l(x) is not None]
-    ac = [_c(x) for x in after if _c(x) is not None]
-    if not bl or not ac:
+    if not bl:
         return None
 
     left_ref = min(bl)
-    right_close = max(ac)
     if left_ref <= ml:
         return None
 
@@ -570,10 +573,7 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
     if m_pct < MIN_SWEEP_DEPTH_PCT:
         return None
 
-    recovery = (right_close - ml) / m_range
-    if recovery < MIN_5M_RECOVERY_RATIO:
-        return None
-
+    # v8.4: сначала находим триггер — потом считаем recovery
     trigger_idx = None
     for j in range(i + 1, min(len(candles), i + 4)):
         trig = candles[j]
@@ -588,6 +588,13 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
 
     trig = candles[trigger_idx]
     tc = _c(trig)
+    if tc is None:
+        return None
+
+    # v8.4: recovery только по закрытию триггерной свечи — без lookahead
+    recovery = (tc - ml) / m_range
+    if recovery < MIN_5M_RECOVERY_RATIO:
+        return None
 
     if sweep_level is not None:
         dist = abs(ml - sweep_level) / sweep_level * 100
@@ -611,6 +618,10 @@ def _ilm_long_candidate(candles, i, sweep_level, sweep_extreme):
     }
 
 
+# ============================================================
+# v8.4 FIX: _ilm_short_candidate без lookahead
+# ============================================================
+
 def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
     m = candles[i]
     if not _is_local_high(candles, i):
@@ -621,17 +632,14 @@ def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
         return None
 
     before = candles[max(0, i - 2):i]
-    after = candles[i + 1:min(len(candles), i + 4)]
-    if not before or not after:
+    if not before:
         return None
 
     bh = [_h(x) for x in before if _h(x) is not None]
-    ac = [_c(x) for x in after if _c(x) is not None]
-    if not bh or not ac:
+    if not bh:
         return None
 
     left_ref = max(bh)
-    right_close = min(ac)
     if mh <= left_ref:
         return None
 
@@ -643,10 +651,7 @@ def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
     if m_pct < MIN_SWEEP_DEPTH_PCT:
         return None
 
-    recovery = (mh - right_close) / m_range
-    if recovery < MIN_5M_RECOVERY_RATIO:
-        return None
-
+    # v8.4: сначала триггер
     trigger_idx = None
     for j in range(i + 1, min(len(candles), i + 4)):
         trig = candles[j]
@@ -661,6 +666,13 @@ def _ilm_short_candidate(candles, i, sweep_level, sweep_extreme):
 
     trig = candles[trigger_idx]
     tc = _c(trig)
+    if tc is None:
+        return None
+
+    # v8.4: recovery только по триггеру
+    recovery = (mh - tc) / m_range
+    if recovery < MIN_5M_RECOVERY_RATIO:
+        return None
 
     if sweep_level is not None:
         dist = abs(mh - sweep_level) / sweep_level * 100
