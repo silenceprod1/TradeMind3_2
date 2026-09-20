@@ -1,8 +1,8 @@
 """
-Диагностический бэктест v9.3.
+Диагностический бэктест v9.4.
 
-Изменения vs v9.2:
-- symbols: 8 -> 20 монет (больше выборка)
+Изменения vs v9.3:
+- symbols: 20 -> 14 монет (убраны токсичные: AVAX, TRX, OP, ARB, SEI, ATOM)
 """
 
 import argparse
@@ -421,7 +421,7 @@ def print_report(symbol, trades, diag, use_breakeven=False,
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v9.3 - {symbol} [{label}]")
+    print(f"ОТЧЁТ БЭКТЕСТА v9.4 - {symbol} [{label}]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -540,11 +540,11 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
                                   cooldown_hours=0):
     symbols = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
-        "ADAUSDT", "AVAXUSDT", "LINKUSDT",
+        "ADAUSDT", "LINKUSDT",
         "APTUSDT",
         "XRPUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT",
-        "TRXUSDT", "SUIUSDT", "OPUSDT", "ARBUSDT",
-        "INJUSDT", "TIAUSDT", "SEIUSDT", "ATOMUSDT",
+        "SUIUSDT",
+        "INJUSDT", "TIAUSDT",
     ]
 
     labels = []
@@ -560,7 +560,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v9.3 - {label} - "
+    print(f"### MULTI BACKTEST v9.4 - {label} - "
           f"{len(symbols)} монет x 40 дней")
     print("#" * 70)
 
