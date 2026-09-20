@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
+"""
+TradeMind sweep ETH/SOL.
+Просто: python backtest.py
+Прогонит MS=92, 94, 96 для ETHUSDT и SOLUSDT.
+"""
 
-import argparse
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime
 
 from market import (
     get_klines,
@@ -15,6 +19,8 @@ from market import (
 from strategy import analyze, get_1h_direction
 
 
+# --- config ---
+
 BT_D1 = 60
 BT_1H = 1200
 BT_15M = 4800
@@ -22,36 +28,18 @@ BT_5M = 14400
 BT_1M = 500
 WARMUP = 150
 
+# символы для sweep
+SWEEP_SYMS = ["ETHUSDT", "SOLUSDT"]
+# значения MIN_SCORE
+SWEEP_MS = [92, 94, 96]
+
+# базовый MIN_SCORE (для INJ/BCH/APT если запустишь полный)
 MIN_SCORES = {
     "default": 90,
     "INJUSDT": 88,
     "BCHUSDT": 92,
     "APTUSDT": 90,
 }
-
-BANNED = set()
-BANNED.add("BTCUSDT")
-BANNED.add("SOLUSDT")
-BANNED.add("SUIUSDT")
-
-UNPROF = set()
-UNPROF.add("ETHUSDT")
-UNPROF.add("DOTUSDT")
-UNPROF.add("XRPUSDT")
-UNPROF.add("LINKUSDT")
-
-ALL_SYMS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "SOLUSDT",
-    "XRPUSDT",
-    "LINKUSDT",
-    "DOTUSDT",
-    "BCHUSDT",
-    "APTUSDT",
-    "SUIUSDT",
-    "INJUSDT",
-]
 
 COOLDOWN = {}
 COOLDOWN["default"] = {2: 3, 3: 6}
@@ -71,8 +59,6 @@ WEAK_SYMS.add("SUIUSDT")
 WEAK_SYMS.add("SOLUSDT")
 WEAK_SYMS.add("APTUSDT")
 WEAK_SYMS.add("BCHUSDT")
-
-RESEARCH_MODE = True
 
 
 def get_ms(sym):
@@ -199,8 +185,7 @@ def sim(trade, c5, start, max_h, cfg):
     p1p = cfg[3]
     p2p = cfg[4]
 
-    fill_max = start
-    fill_max = fill_max + 12 * 5 * 60 * 1000
+    fill_max = start + 12 * 5 * 60 * 1000
     filled = False
     fts = None
 
@@ -334,20 +319,10 @@ def sim(trade, c5, start, max_h, cfg):
     return ("TIMEOUT", e, start, 0, 0.0, False)
 
 
-def run_one(sym, max_h):
+def run_one(sym, max_h, override_ms):
     sym = _normalize_symbol(sym)
-    ms = get_ms(sym)
-    log("Символ: " + sym)
-    log("min_score=" + str(ms))
-
-    banned = set()
-    if not RESEARCH_MODE:
-        banned = set(BANNED)
-        banned.update(UNPROF)
-
-    if sym in banned:
-        log("SKIP banned: " + sym)
-        return []
+    ms = override_ms
+    log("Символ: " + sym + "  min_score=" + str(ms))
 
     c1d = get_klines_history("1d", BT_D1, sym)
     c1h = get_klines_history("1h", BT_1H, sym)
@@ -359,8 +334,7 @@ def run_one(sym, max_h):
         log("Нет данных")
         return []
 
-    log("1H=" + str(len(c1h)))
-    log("5M=" + str(len(c5)))
+    log("1H=" + str(len(c1h)) + "  5M=" + str(len(c5)))
 
     if len(c1h) <= WARMUP:
         return []
@@ -470,30 +444,18 @@ def run_one(sym, max_h):
         line = "[" + str(i) + "] "
         line = line + trade["direction"] + " "
         line = line + "score=" + str(score) + " "
-        line = line + pt + " -> "
-        line = line + rtype + " "
-        line = line + pl
+        line = line + pt + " -> " + rtype + " " + pl
         log(line)
 
     return trades
 
 
-def rep(sym, trades):
-    print("")
-    print("=" * 70)
-    print("ОТЧЁТ - " + sym)
-    print("=" * 70)
-
-    if not trades:
-        print("Нет сделок.")
-        return
-
+def stats(trades):
     tp = 0
     sl = 0
     be = 0
     to = 0
     ph = 0
-
     for t in trades:
         rt = t["result"]
         if rt == "TP":
@@ -517,182 +479,103 @@ def rep(sym, trades):
     for t in trades:
         total = total + t["pnl"]
 
-    eq = 0.0
-    peak = 0.0
-    dd_max = 0.0
-    for t in trades:
-        eq = eq + t["pnl"]
-        if eq > peak:
-            peak = eq
-        dd = peak - eq
-        if dd > dd_max:
-            dd_max = dd
-
-    print("Всего сделок: " + str(len(trades)))
-    print("  TP:      " + str(tp))
-    print("  SL:      " + str(sl))
-    print("  BE:      " + str(be))
-    print("  Timeout: " + str(to))
-    print("  Partial: " + str(ph))
-    print("Win rate: " + ("%.1f%%" % wr))
-    print("Total PnL: " + ("%+.2f%%" % total))
-    print("Max DD:    " + ("%.2f%%" % (-dd_max)))
+    return {
+        "n": len(trades),
+        "tp": tp,
+        "sl": sl,
+        "be": be,
+        "to": to,
+        "ph": ph,
+        "wr": wr,
+        "pnl": total,
+    }
 
 
-def run_multi(max_h, syms):
-    mode = "RESEARCH"
-    if not RESEARCH_MODE:
-        mode = "PROD"
-
+def rep(sym, trades):
     print("")
-    print("#" * 70)
-    print("### MULTI v9.18 [" + mode + "]")
-    print("#" * 70)
-    print("### MIN_SCORE: " + str(MIN_SCORES))
-    print("#" * 70)
+    print("=" * 60)
+    print("ОТЧЁТ - " + sym)
+    print("=" * 60)
 
-    summary = []
+    if not trades:
+        print("Нет сделок.")
+        return {}
 
-    for sym in syms:
-        try:
-            trades = run_one(sym, max_h)
-            rep(sym, trades)
+    s = stats(trades)
 
-            if trades:
-                tp = 0
-                sl = 0
-                be = 0
-                to = 0
-                for t in trades:
-                    rt = t["result"]
-                    if rt == "TP":
-                        tp = tp + 1
-                    elif rt == "SL":
-                        sl = sl + 1
-                    elif rt == "BE":
-                        be = be + 1
-                    elif rt == "TIMEOUT":
-                        to = to + 1
-                r = tp + sl
-                if r > 0:
-                    wr = tp / r * 100.0
-                else:
-                    wr = 0.0
-                pnl = 0.0
-                for t in trades:
-                    pnl = pnl + t["pnl"]
-                row = (sym, len(trades), tp, sl, be, to, wr, pnl)
-                summary.append(row)
-            else:
-                row = (sym, 0, 0, 0, 0, 0, 0.0, 0.0)
-                summary.append(row)
-        except Exception as ex:
-            print("[BT] " + sym + " FAILED: " + str(ex))
-            row = (sym, 0, 0, 0, 0, 0, 0.0, 0.0)
-            summary.append(row)
+    print("Всего сделок: " + str(s["n"]))
+    print("  TP: " + str(s["tp"]))
+    print("  SL: " + str(s["sl"]))
+    print("  BE: " + str(s["be"]))
+    print("  Timeout: " + str(s["to"]))
+    print("  Partial: " + str(s["ph"]))
+    print("Win rate: " + ("%.1f%%" % s["wr"]))
+    print("Total PnL: " + ("%+.2f%%" % s["pnl"]))
 
+    return s
+
+
+def run_sweep():
     print("")
-    print("=" * 78)
-    print("СВОДКА v9.18 [" + mode + "]")
-    print("=" * 78)
-    print("Символ     MS  Fill  TP  SL  BE  TO   WR      PnL")
+    print("#" * 60)
+    print("### SWEEP ETH/SOL по MIN_SCORE")
+    print("### Значения: " + str(SWEEP_MS))
+    print("#" * 60)
+
+    all_results = {}
+
+    for ms in SWEEP_MS:
+        print("")
+        print("=" * 60)
+        print(">>> ТЕСТ: MIN_SCORE = " + str(ms))
+        print("=" * 60)
+
+        for sym in SWEEP_SYMS:
+            try:
+                trades = run_one(sym, 24, ms)
+                s = rep(sym, trades)
+                all_results[(sym, ms)] = s
+            except Exception as ex:
+                print("[ERROR] " + sym + ": " + str(ex))
+                all_results[(sym, ms)] = {
+                    "n": 0, "tp": 0, "sl": 0, "be": 0,
+                    "to": 0, "ph": 0, "wr": 0.0, "pnl": 0.0,
+                }
+
+    # финальная таблица
+    print("")
+    print("")
+    print("#" * 78)
+    print("### ИТОГОВАЯ ТАБЛИЦА SWEEP")
+    print("#" * 78)
+    print("MS    ETH Fill  ETH PnL    ETH WR    SOL Fill  SOL PnL    SOL WR")
     print("-" * 78)
 
-    tt = 0
-    ttp = 0
-    tsl = 0
-    tpnl = 0.0
+    for ms in SWEEP_MS:
+        eth = all_results.get(("ETHUSDT", ms))
+        sol = all_results.get(("SOLUSDT", ms))
 
-    for row in summary:
-        sym = row[0]
-        cnt = row[1]
-        tp = row[2]
-        sl = row[3]
-        be = row[4]
-        to = row[5]
-        wr = row[6]
-        pnl = row[7]
+        if eth is None:
+            eth = {"n": 0, "pnl": 0.0, "wr": 0.0}
+        if sol is None:
+            sol = {"n": 0, "pnl": 0.0, "wr": 0.0}
 
-        ms = get_ms(sym)
+        ef = str(eth["n"]).ljust(7)
+        ep = ("%+.2f%%" % eth["pnl"]).ljust(10)
+        ew = ("%.1f" % eth["wr"]).ljust(9)
 
-        line = sym.ljust(10)
-        line = line + " " + str(ms).ljust(3)
-        line = line + " " + str(cnt).ljust(5)
-        line = line + " " + str(tp).ljust(3)
-        line = line + " " + str(sl).ljust(3)
-        line = line + " " + str(be).ljust(3)
-        line = line + " " + str(to).ljust(3)
-        line = line + " " + ("%.1f" % wr).ljust(7)
-        line = line + " " + ("%+.2f%%" % pnl)
+        sf = str(sol["n"]).ljust(7)
+        sp = ("%+.2f%%" % sol["pnl"]).ljust(10)
+        sw = ("%.1f" % sol["wr"]).ljust(9)
+
+        line = str(ms).ljust(6)
+        line = line + ef + ep + ew
+        line = line + sf + sp + sw
         print(line)
 
-        tt = tt + cnt
-        ttp = ttp + tp
-        tsl = tsl + sl
-        tpnl = tpnl + pnl
-
     print("-" * 78)
-
-    r = ttp + tsl
-    if r > 0:
-        twr = ttp / r * 100.0
-    else:
-        twr = 0.0
-
-    line = "ИТОГО".ljust(15)
-    line = line + str(tt).ljust(6)
-    line = line + str(ttp).ljust(4)
-    line = line + str(tsl).ljust(4)
-    line = line + " " * 12
-    line = line + ("%.1f" % twr).ljust(7)
-    line = line + " " + ("%+.2f%%" % tpnl)
-    print(line)
-    print("=" * 78)
-
-
-def main():
-    global RESEARCH_MODE
-
-    p = argparse.ArgumentParser()
-    p.add_argument("--symbol", default="INJUSDT")
-    p.add_argument("--max-hours", type=int, default=24)
-    p.add_argument("--single", action="store_true")
-    p.add_argument("--symbols", default=None)
-    p.add_argument("--research", action="store_true")
-    p.add_argument("--prod", action="store_true")
-    p.add_argument("--min-score", action="append", default=[])
-    a = p.parse_args()
-
-    if a.prod:
-        RESEARCH_MODE = False
-    if a.research:
-        RESEARCH_MODE = True
-
-    for ov in a.min_score:
-        try:
-            parts = ov.split("=")
-            sy = parts[0].strip().upper()
-            va = int(parts[1])
-            MIN_SCORES[sy] = va
-        except Exception:
-            print("[WARN] bad --min-score: " + ov)
-
-    if a.single:
-        trades = run_one(a.symbol, a.max_hours)
-        rep(a.symbol, trades)
-    else:
-        syms = None
-        if a.symbols:
-            syms = []
-            parts = a.symbols.split(",")
-            for s in parts:
-                s = s.strip().upper()
-                if s:
-                    syms.append(s)
-        if syms is None:
-            syms = ALL_SYMS
-        run_multi(a.max_hours, syms)
+    print("")
 
 
 if __name__ == "__main__":
-    main()
+    run_sweep()
