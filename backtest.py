@@ -1,15 +1,14 @@
 """
-TradeMind backtest v9.11 FINAL — рост PnL.
+TradeMind backtest v9.12 FINAL — возврат к v9.10 + малые улучшения.
 
-Фиксы v9.11:
-- BE в +0.3R после partial (гарантирует мини-профит на остатке)
-- Trailing 1.3R / 0.8R (как в v9.10 — не режет TP)
-- Флаг --exclude-eth-dot для отключения ETH/DOT
+Фиксы v9.12:
+- BE обратно в ENTRY (BE_PROFIT_OFFSET_R = 0.0) — как в v9.10
+- be_at_r = 1.0R (позже, даёт TP шанс дойти)
+- ETH/DOT в UNPROFITABLE — исключаются по умолчанию
 
 ЗАПУСК:
-  python backtest.py
-  python backtest.py --exclude-eth-dot
-  python backtest.py --single --symbol INJUSDT
+  python backtest.py                    → только XRP/LINK/BCH/APT/INJ
+  python backtest.py --include-eth-dot  → включить ETH/DOT обратно
 """
 
 import argparse
@@ -29,7 +28,7 @@ from strategy import analyze, get_1h_direction
 
 
 # ============================================================
-# CONFIG v9.11
+# CONFIG v9.12
 # ============================================================
 
 BT_LOOKBACK_D1 = 60
@@ -58,29 +57,29 @@ COOLDOWN_V910 = {
     "BCHUSDT": {2: 4, 3: 8},
 }
 
-# ─── v9.11 FINAL: trailing как v9.10 (не режет TP) ───
+# ─── v9.12: trailing как v9.10 ───
 TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
 TRAILING_DISTANCE_R = 0.8
 
-# ─── v9.11: BE в +0.3R после partial ───
-BE_PROFIT_OFFSET_R = 0.3
+# ─── v9.12: BE обратно в entry ───
+BE_PROFIT_OFFSET_R = 0.0
 
 PARTIAL_ENABLED = True
 PARTIAL_CONFIGS = {
     "strong": {
         "partial_1_r": 0.8, "partial_2_r": 1.5,
-        "be_at_r": 0.8,
+        "be_at_r": 1.0,        # v9.12: позже (было 0.8)
         "partial_1_pct": 40, "partial_2_pct": 30,
     },
     "default": {
         "partial_1_r": 0.7, "partial_2_r": 1.3,
-        "be_at_r": 0.7,
+        "be_at_r": 1.0,        # v9.12: позже (было 0.7)
         "partial_1_pct": 50, "partial_2_pct": 25,
     },
     "weak": {
         "partial_1_r": 0.5, "partial_2_r": 1.1,
-        "be_at_r": 0.5,
+        "be_at_r": 0.8,        # v9.12: позже (было 0.5)
         "partial_1_pct": 50, "partial_2_pct": 25,
     },
 }
@@ -147,7 +146,7 @@ def blended_pnl_dual(entry, final_exit, direction,
 
 
 # ============================================================
-# COOLDOWN MANAGER v3
+# COOLDOWN
 # ============================================================
 
 class CooldownMgr:
@@ -258,10 +257,10 @@ def classify_reason(result, market_info):
 
 
 # ============================================================
-# SIMULATE TRADE v9.11 FINAL
+# SIMULATE TRADE v9.12
 # ============================================================
 
-def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
+def simulate_trade_v912(trade, candles_5m, start_ts, max_hours, cfg,
                         use_breakeven=False, use_partial_tp=False,
                         use_trailing=False):
     direction = trade["direction"]
@@ -391,6 +390,7 @@ def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
                 p2_exit = entry - risk * p2_r
             p2_done = True
 
+        # ─── v9.12: BE в entry (offset = 0.0) ───
         be_ready = (not use_partial_tp) or p1_done
 
         if use_breakeven and be_ready and not be_moved and move_r >= be_r:
@@ -434,7 +434,7 @@ def simulate_trade_v911(trade, candles_5m, start_ts, max_hours, cfg,
 
 
 # ============================================================
-# RUN BACKTEST v9.11
+# RUN BACKTEST
 # ============================================================
 
 def run_backtest(symbol, max_hours,
@@ -451,7 +451,7 @@ def run_backtest(symbol, max_hours,
         banned |= UNPROFITABLE_SYMBOLS
 
     if symbol in banned:
-        log(f"[v9.11] SKIP banned symbol: {symbol}")
+        log(f"[v9.12] SKIP banned symbol: {symbol}")
         return [], {
             "stage_counter": Counter(),
             "reason_counter": Counter(),
@@ -595,7 +595,7 @@ def run_backtest(symbol, max_hours,
         cfg = get_partial_config(symbol, score)
 
         (res_type, exit_price, exit_ts, held, trade_pnl,
-         partial_hit) = simulate_trade_v911(
+         partial_hit) = simulate_trade_v912(
             trade, candles_5m, ts_now, max_hours,
             cfg=cfg,
             use_breakeven=use_breakeven,
@@ -657,7 +657,7 @@ def print_report(symbol, trades, diag,
                  use_trailing=False):
     labels = []
     if use_breakeven:
-        labels.append("BE+0.3R")
+        labels.append("BEentry")
     if use_partial_tp:
         labels.append("PARTIALx2")
     if use_trailing:
@@ -667,7 +667,7 @@ def print_report(symbol, trades, diag,
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v9.11 - {symbol} [{label}]")
+    print(f"ОТЧЁТ БЭКТЕСТА v9.12 - {symbol} [{label}]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -800,13 +800,13 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
                                   use_partial_tp=False,
                                   use_trailing=False,
                                   symbols=None,
-                                  exclude_unprofitable=False):
+                                  exclude_unprofitable=True):
     if symbols is None:
         symbols = ALL_SYMBOLS
 
     labels = []
     if use_breakeven:
-        labels.append("BE+0.3R")
+        labels.append("BEentry")
     if use_partial_tp:
         labels.append("PARTIALx2")
     if use_trailing:
@@ -816,13 +816,14 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v9.11 - {label} - "
+    print(f"### MULTI BACKTEST v9.12 - {label} - "
           f"{len(symbols)} монет x 40 дней")
     print("#" * 70)
     print(f"### Banned: {sorted(BANNED_SYMBOLS)}")
     if exclude_unprofitable:
         print(f"### +Excluded: {sorted(UNPROFITABLE_SYMBOLS)}")
-    print(f"### BE: +{BE_PROFIT_OFFSET_R}R после partial")
+    print(f"### BE: в ENTRY (offset={BE_PROFIT_OFFSET_R}R)")
+    print(f"### be_at_r: strong=1.0, default=1.0, weak=0.8")
     print(f"### Trailing: trigger {TRAILING_TRIGGER_R}R, "
           f"dist {TRAILING_DISTANCE_R}R")
     print("#" * 70)
@@ -930,7 +931,7 @@ def run_multi_backtest():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TradeMind v9.11 backtest (40 дней)")
+        description="TradeMind v9.12 backtest (40 дней)")
     parser.add_argument("--symbol", default="ETHUSDT")
     parser.add_argument("--max-hours", type=int,
                         default=DEFAULT_MAX_HOURS)
@@ -938,15 +939,15 @@ def main():
     parser.add_argument("--no-be", action="store_true")
     parser.add_argument("--no-partial", action="store_true")
     parser.add_argument("--no-trailing", action="store_true")
-    parser.add_argument("--symbols", default=None,
-                        help="список через запятую")
-    parser.add_argument("--exclude-eth-dot", action="store_true",
-                        help="убрать ETH/DOT (убыточные)")
+    parser.add_argument("--symbols", default=None)
+    parser.add_argument("--include-eth-dot", action="store_true",
+                        help="включить ETH/DOT обратно")
     args = parser.parse_args()
 
     use_be = not args.no_be
     use_partial = not args.no_partial
     use_trailing = not args.no_trailing
+    exclude_unprof = not args.include_eth_dot
 
     if args.single:
         trades, diag = run_backtest(
@@ -954,7 +955,7 @@ def main():
             use_breakeven=use_be,
             use_partial_tp=use_partial,
             use_trailing=use_trailing,
-            exclude_unprofitable=args.exclude_eth_dot,
+            exclude_unprofitable=exclude_unprof,
         )
         print_report(args.symbol, trades, diag,
                      use_breakeven=use_be,
@@ -971,7 +972,7 @@ def main():
             use_partial_tp=use_partial,
             use_trailing=use_trailing,
             symbols=symbols,
-            exclude_unprofitable=args.exclude_eth_dot,
+            exclude_unprofitable=exclude_unprof,
         )
 
 
