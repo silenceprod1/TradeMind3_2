@@ -1,17 +1,19 @@
 """
-TradeMind backtest v9.10 FINAL — BE+PARTIAL×2+TRAIL+COOLDOWN v3.
+TradeMind backtest v9.10 FINAL — 40 дней + BE fix.
 
-Изменения vs предыдущей v9.10:
-- simulate_trade_v910 различает SL vs BE (безубыток / трейл в плюс)
-- CooldownMgr: BE сбрасывает серию, авто-reset через 24ч, MAX_CONSEC=5
-- В отчёте появилась строка BE
-- Multi-режим по умолчанию
+Изменения vs предыдущей версии:
+- BT_LOOKBACK уменьшены под 40-дневный прогон (было 90)
+- BE срабатывает ТОЛЬКО после partial_1 (не съедает позицию)
+- be_at_r == partial_1_r во всех конфигах (страховка)
+- SL vs BE разделены в отчёте
+- CooldownMgr: BE сбрасывает серию, MAX_CONSEC=5, авто-reset 24h
+- Multi по умолчанию
 
 ЗАПУСК:
-  python backtest.py                    → все 10 монет, BE+partial+trail ON
-  python backtest.py --single --symbol ETHUSDT   → только один
-  python backtest.py --no-partial                → без partial
-  python backtest.py --symbols ETHUSDT,XRPUSDT   → только указанные
+  python backtest.py                    → все 10 монет, 40 дней, все фичи ON
+  python backtest.py --single --symbol ETHUSDT
+  python backtest.py --no-partial
+  python backtest.py --symbols ETHUSDT,XRPUSDT
 """
 
 import argparse
@@ -31,13 +33,14 @@ from strategy import analyze, get_1h_direction
 
 
 # ============================================================
-# CONFIG v9.10
+# CONFIG v9.10 — 40 дней
 # ============================================================
 
-BT_LOOKBACK_D1 = 180
-BT_LOOKBACK_1H = 2160
-BT_LOOKBACK_15M = 8640
-BT_LOOKBACK_5M = 25920
+# 40 дней + запас на warmup (150 свечей 1H)
+BT_LOOKBACK_D1 = 60       # 40 + запас
+BT_LOOKBACK_1H = 1200     # ~50 дней × 24ч
+BT_LOOKBACK_15M = 4800    # ~50 дней × 96
+BT_LOOKBACK_5M = 14400    # ~50 дней × 288
 BT_LOOKBACK_1M = 500
 
 WARMUP_1H = 150
@@ -64,20 +67,22 @@ TRAILING_TRIGGER_R = 1.3
 TRAILING_DISTANCE_R = 0.8
 
 PARTIAL_ENABLED = True
+
+# ─── BE теперь = partial_1_r (страховка от съедания) ───
 PARTIAL_CONFIGS = {
     "strong": {
         "partial_1_r": 0.8, "partial_2_r": 1.5,
-        "be_at_r": 0.6,
+        "be_at_r": 0.8,        # == partial_1_r
         "partial_1_pct": 40, "partial_2_pct": 30,
     },
     "default": {
         "partial_1_r": 0.7, "partial_2_r": 1.3,
-        "be_at_r": 0.5,
+        "be_at_r": 0.7,        # == partial_1_r
         "partial_1_pct": 50, "partial_2_pct": 25,
     },
     "weak": {
         "partial_1_r": 0.5, "partial_2_r": 1.1,
-        "be_at_r": 0.4,
+        "be_at_r": 0.5,        # == partial_1_r
         "partial_1_pct": 50, "partial_2_pct": 25,
     },
 }
@@ -149,11 +154,10 @@ def blended_pnl_dual(entry, final_exit, direction,
 
 class CooldownMgr:
     """
-    v3:
-      - TP / BE → серия сброшена
-      - SL      → серия +1 (cap на MAX_CONSEC=5)
-      - авто-reset если > 24ч без SL
-      - NO_FILL / TIMEOUT / PARTIAL → нейтрально
+    - TP / BE → серия сброшена
+    - SL      → серия +1 (cap MAX_CONSEC=5)
+    - авто-reset если > 24ч без SL
+    - NO_FILL / TIMEOUT / PARTIAL → нейтрально
     """
     RESET_AFTER_HOURS = 24
     MAX_CONSEC = 5
@@ -166,7 +170,6 @@ class CooldownMgr:
         self.cfg = COOLDOWN_V910.get(symbol, COOLDOWN_V910["default"])
 
     def on_result(self, result_type, ts_ms):
-        # авто-reset если давно не было SL
         if (self.last_sl_ts is not None
                 and (ts_ms - self.last_sl_ts) / 3600000.0
                 > self.RESET_AFTER_HOURS
@@ -263,7 +266,7 @@ def classify_reason(result, market_info):
 
 
 # ============================================================
-# SIMULATE TRADE v9.10 FINAL (SL vs BE)
+# SIMULATE TRADE v9.10 FINAL (BE после partial)
 # ============================================================
 
 def simulate_trade_v910(trade, candles_5m, start_ts, max_hours, cfg,
@@ -337,19 +340,16 @@ def simulate_trade_v910(trade, candles_5m, start_ts, max_hours, cfg,
             hit_tp = low <= tp
             hit_sl = high >= current_sl
 
-        # ─── определяем тип выхода ───
+        # ─── тип выхода ───
         def _exit_type():
-            # SL перемещён в BE-зону (в пределах 5% от entry)
             if be_moved and abs(current_sl - entry) < risk * 0.05:
                 return "BE"
-            # trailing вышел в плюс
             if direction == "LONG" and current_sl > entry:
                 return "BE"
             if direction == "SHORT" and current_sl < entry:
                 return "BE"
             return "SL"
 
-        # SL/TP first (консервативно — SL при одновременном касании)
         if hit_sl and hit_tp:
             final = blended_pnl_dual(
                 entry, current_sl, direction,
@@ -402,8 +402,11 @@ def simulate_trade_v910(trade, candles_5m, start_ts, max_hours, cfg,
                 p2_exit = entry - risk * p2_r
             p2_done = True
 
-        # ─── BE ───
-        if use_breakeven and not be_moved and move_r >= be_r:
+        # ─── BE: только после partial_1 ───
+        # если partial отключён — BE работает как обычно
+        be_ready = (not use_partial_tp) or p1_done
+
+        if use_breakeven and be_ready and not be_moved and move_r >= be_r:
             if direction == "LONG" and entry > current_sl:
                 current_sl = entry
                 be_moved = True
@@ -814,7 +817,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     print()
     print("#" * 70)
     print(f"### MULTI BACKTEST v9.10 - {label} - "
-          f"{len(symbols)} монет x 90 дней")
+          f"{len(symbols)} монет x 40 дней")
     print("#" * 70)
     print(f"### Banned: {sorted(BANNED_SYMBOLS)}")
     print(f"### Cooldown: {COOLDOWN_V910}")
@@ -860,7 +863,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("=" * 78)
-    print(f"СВОДКА - {label} (max_hours={max_hours}, 90 дней)")
+    print(f"СВОДКА - {label} (max_hours={max_hours}, 40 дней)")
     print("=" * 78)
     print(f"{'Символ':<10}{'Filled':<8}{'NoFill':<8}{'TP':<5}{'SL':<5}"
           f"{'BE':<5}{'TO':<5}{'WR':<7}{'PnL':<10}{'Stat':<8}")
@@ -917,12 +920,12 @@ def run_multi_backtest():
 
 
 # ============================================================
-# MAIN — multi по умолчанию
+# MAIN
 # ============================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TradeMind v9.10 backtest (multi по умолчанию)")
+        description="TradeMind v9.10 backtest (40 дней, multi по умолчанию)")
     parser.add_argument("--symbol", default="ETHUSDT",
                         help="только для --single")
     parser.add_argument("--max-hours", type=int,
@@ -936,7 +939,7 @@ def main():
     parser.add_argument("--no-trailing", action="store_true",
                         help="отключить trailing")
     parser.add_argument("--symbols", default=None,
-                        help="список через запятую (перебивает ALL_SYMBOLS)")
+                        help="список через запятую")
     args = parser.parse_args()
 
     use_be = not args.no_be
