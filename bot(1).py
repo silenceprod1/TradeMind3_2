@@ -56,7 +56,7 @@ BACKTEST_SYMBOL = "SOLUSDT"
 BACKTEST_MULTI = True
 BACKTEST_MAX_HOURS = 24
 
-# === v8.3 Position Management (R-based) ===
+# === v8.3.1 Position Management (R-based) ===
 TRAILING_ENABLED = True
 BREAKEVEN_TRIGGER_R = 1.0
 PARTIAL_TP_ENABLED = True
@@ -80,11 +80,11 @@ COOLDOWN_AFTER_TP_HOURS = 0
 COINS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
     "BNB": "BNBUSDT", "XRP": "XRPUSDT", "ADA": "ADAUSDT",
-    "AVAX": "AVAXUSDT", "LINK": "LINKUSDT", "DOT": "DOTUSDT",
-    "LTC": "LTCUSDT", "BCH": "BCHUSDT", "TRX": "TRXUSDT",
+    "LINK": "LINKUSDT", "DOT": "DOTUSDT",
+    "LTC": "LTCUSDT", "BCH": "BCHUSDT",
     "APT": "APTUSDT", "SUI": "SUIUSDT", "HYPE": "HYPEUSDT",
-    "OP": "OPUSDT", "ARB": "ARBUSDT", "INJ": "INJUSDT",
-    "TIA": "TIAUSDT", "SEI": "SEIUSDT", "ATOM": "ATOMUSDT",
+    "INJ": "INJUSDT",
+    "TIA": "TIAUSDT",
 }
 
 
