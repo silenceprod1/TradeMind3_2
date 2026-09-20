@@ -1,7 +1,14 @@
 """
-TradeMind backtest v9.13 (90 дней).
-BE в entry, be_at_r=1.0, trailing 1.3/0.8, cooldown per-symbol v3.
-Banned: BTC/SOL/SUI. Unprofitable: ETH/DOT/XRP.
+TradeMind backtest v9.14 (40 дней).
+
+Улучшения vs v9.13:
+- ULTRA-tier для score>=95: be_at_r=1.5, trailing 1.5/1.0
+- Отсев READY-сделок со score < 90
+- LINK в UNPROFITABLE (было 4 пары, стало 3)
+- Trailing параметры через cfg (per-tier)
+
+ЗАПУСК:
+  python backtest.py
 """
 
 import argparse
@@ -20,18 +27,24 @@ from market import (
 from strategy import analyze, get_1h_direction
 
 
-# ── 90 дней ──
-BT_LOOKBACK_D1 = 180
-BT_LOOKBACK_1H = 2160
-BT_LOOKBACK_15M = 8640
-BT_LOOKBACK_5M = 25920
+# ============================================================
+# CONFIG v9.14 (40 дней)
+# ============================================================
+
+BT_LOOKBACK_D1 = 60
+BT_LOOKBACK_1H = 1200
+BT_LOOKBACK_15M = 4800
+BT_LOOKBACK_5M = 14400
 BT_LOOKBACK_1M = 500
 
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
+# v9.14: минимальный score для READY
+MIN_SCORE_READY_BT = 90
+
 BANNED_SYMBOLS = {"BTCUSDT", "SOLUSDT", "SUIUSDT"}
-UNPROFITABLE_SYMBOLS = {"ETHUSDT", "DOTUSDT", "XRPUSDT"}
+UNPROFITABLE_SYMBOLS = {"ETHUSDT", "DOTUSDT", "XRPUSDT", "LINKUSDT"}
 
 ALL_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT",
@@ -55,20 +68,33 @@ BE_PROFIT_OFFSET_R = 0.0
 
 PARTIAL_ENABLED = True
 PARTIAL_CONFIGS = {
+    "ultra": {
+        "partial_1_r": 0.8, "partial_2_r": 1.5,
+        "be_at_r": 1.5,
+        "partial_1_pct": 40, "partial_2_pct": 30,
+        "trailing_trigger_r": 1.5,
+        "trailing_distance_r": 1.0,
+    },
     "strong": {
         "partial_1_r": 0.8, "partial_2_r": 1.5,
         "be_at_r": 1.0,
         "partial_1_pct": 40, "partial_2_pct": 30,
+        "trailing_trigger_r": 1.3,
+        "trailing_distance_r": 0.8,
     },
     "default": {
         "partial_1_r": 0.7, "partial_2_r": 1.3,
         "be_at_r": 1.0,
         "partial_1_pct": 50, "partial_2_pct": 25,
+        "trailing_trigger_r": 1.3,
+        "trailing_distance_r": 0.8,
     },
     "weak": {
         "partial_1_r": 0.5, "partial_2_r": 1.1,
         "be_at_r": 0.8,
         "partial_1_pct": 50, "partial_2_pct": 25,
+        "trailing_trigger_r": 1.3,
+        "trailing_distance_r": 0.8,
     },
 }
 WEAK_SYMBOLS = {"SUIUSDT", "SOLUSDT", "APTUSDT", "BCHUSDT"}
@@ -78,7 +104,7 @@ LIMIT_FILL_MAX_CANDLES = 12
 
 def get_partial_config(symbol, score):
     if score >= 95:
-        return PARTIAL_CONFIGS["strong"]
+        return PARTIAL_CONFIGS["ultra"]
     if symbol in WEAK_SYMBOLS:
         return PARTIAL_CONFIGS["weak"]
     return PARTIAL_CONFIGS["default"]
@@ -240,7 +266,7 @@ def classify_reason(result, market_info):
     return "stage_" + stage.lower()
 
 
-def simulate_trade_v913(trade, candles_5m, start_ts, max_hours, cfg,
+def simulate_trade_v914(trade, candles_5m, start_ts, max_hours, cfg,
                         use_breakeven=False, use_partial_tp=False,
                         use_trailing=False):
     direction = trade["direction"]
@@ -257,6 +283,8 @@ def simulate_trade_v913(trade, candles_5m, start_ts, max_hours, cfg,
     be_r = cfg["be_at_r"]
     p1_pct = cfg["partial_1_pct"]
     p2_pct = cfg["partial_2_pct"]
+    trail_trigger = cfg.get("trailing_trigger_r", TRAILING_TRIGGER_R)
+    trail_dist = cfg.get("trailing_distance_r", TRAILING_DISTANCE_R)
 
     fill_check_until = start_ts + LIMIT_FILL_MAX_CANDLES * 5 * 60 * 1000
     limit_filled = False
@@ -388,13 +416,13 @@ def simulate_trade_v913(trade, candles_5m, start_ts, max_hours, cfg,
                     be_moved = True
 
         if (use_trailing and TRAILING_ENABLED
-                and move_r >= TRAILING_TRIGGER_R):
+                and move_r >= trail_trigger):
             if direction == "LONG":
-                new_sl = best_price - risk * TRAILING_DISTANCE_R
+                new_sl = best_price - risk * trail_dist
                 if new_sl > current_sl:
                     current_sl = new_sl
             else:
-                new_sl = best_price + risk * TRAILING_DISTANCE_R
+                new_sl = best_price + risk * trail_dist
                 if new_sl < current_sl:
                     current_sl = new_sl
 
@@ -426,7 +454,7 @@ def run_backtest(symbol, max_hours,
         banned = banned | UNPROFITABLE_SYMBOLS
 
     if symbol in banned:
-        log("[v9.13] SKIP banned symbol: " + symbol)
+        log("[v9.14] SKIP banned symbol: " + symbol)
         empty_diag = {
             "stage_counter": Counter(),
             "reason_counter": Counter(),
@@ -546,6 +574,12 @@ def run_backtest(symbol, max_hours,
         market_info = {"bsl_count": n_bsl, "ssl_count": n_ssl}
         reason_key = classify_reason(result, market_info)
 
+        # v9.14: отсев READY со score < 90
+        if stage == "READY" and score < MIN_SCORE_READY_BT:
+            stage_counter["READY_LOW"] += 1
+            reason_counter["ready_score_below_90"] += 1
+            continue
+
         stage_counter[stage] += 1
         reason_counter[reason_key] += 1
 
@@ -586,7 +620,7 @@ def run_backtest(symbol, max_hours,
         cfg = get_partial_config(symbol, score)
 
         (res_type, exit_price, exit_ts, held, trade_pnl,
-         partial_hit) = simulate_trade_v913(
+         partial_hit) = simulate_trade_v914(
             trade, candles_5m, ts_now, max_hours,
             cfg=cfg,
             use_breakeven=use_breakeven,
@@ -616,6 +650,7 @@ def run_backtest(symbol, max_hours,
         cooldown_mgr.on_result(res_type, exit_ts)
 
         partial_tag = "P" if partial_hit else " "
+        ultra_tag = "U" if score >= 95 else " "
         log("[" + str(i).rjust(4) + "] "
             + trade["direction"].ljust(5)
             + " entry=" + str(round(entry, 4))
@@ -623,7 +658,7 @@ def run_backtest(symbol, max_hours,
             + " tp=" + str(round(tp, 4))
             + " rr=" + str(round(trade["rr"], 2))
             + " score=" + str(score)
-            + " " + partial_tag
+            + " " + ultra_tag + partial_tag
             + " -> " + res_type.ljust(7)
             + " pnl=" + ("%+.2f%%" % trade["pnl"]))
 
@@ -656,13 +691,13 @@ def print_report(symbol, trades, diag,
     if use_partial_tp:
         labels.append("PARTIALx2")
     if use_trailing:
-        labels.append("TRAIL1.3/0.8")
+        labels.append("TRAILvar")
     labels.append("CDv3")
     label = "+".join(labels)
 
     print()
     print("=" * 70)
-    print("ОТЧЁТ БЭКТЕСТА v9.13 - " + symbol + " [" + label + "]")
+    print("ОТЧЁТ БЭКТЕСТА v9.14 - " + symbol + " [" + label + "]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -706,7 +741,8 @@ def print_report(symbol, trades, diag,
     print()
 
     print("РАСПРЕДЕЛЕНИЕ ПО СТАДИЯМ:")
-    for stage in ["READY", "15M_CONFIRMED", "SWEPT", "WAIT"]:
+    for stage in ["READY", "READY_LOW", "15M_CONFIRMED",
+                  "SWEPT", "WAIT"]:
         cnt = stage_counter.get(stage, 0)
         pct = cnt / total * 100 if total else 0
         print("  " + stage.ljust(16) + " " + str(cnt).rjust(4)
@@ -757,6 +793,7 @@ def print_report(symbol, trades, diag,
     be = sum(1 for t in trades if t["result"] == "BE")
     timeout = sum(1 for t in trades if t["result"] == "TIMEOUT")
     partial_hits = sum(1 for t in trades if t.get("partial_hit"))
+    ultra_count = sum(1 for t in trades if t.get("score", 0) >= 95)
 
     resolved = tp + sl
     win_rate = tp / resolved * 100 if resolved else 0
@@ -784,6 +821,7 @@ def print_report(symbol, trades, diag,
     print("  SL:      " + str(sl))
     print("  BE:      " + str(be))
     print("  Timeout: " + str(timeout))
+    print("  ULTRA (score>=95): " + str(ultra_count))
     if use_partial_tp:
         pct = partial_hits / len(trades) * 100
         print("  Partial hits: " + str(partial_hits)
@@ -810,22 +848,21 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     if use_partial_tp:
         labels.append("PARTIALx2")
     if use_trailing:
-        labels.append("TRAIL1.3/0.8")
+        labels.append("TRAILvar")
     labels.append("CDv3")
     label = "+".join(labels)
 
     print()
     print("#" * 70)
-    print("### MULTI BACKTEST v9.13 - " + label
-          + " - " + str(len(symbols)) + " монет x 90 дней")
+    print("### MULTI BACKTEST v9.14 - " + label
+          + " - " + str(len(symbols)) + " монет x 40 дней")
     print("#" * 70)
     print("### Banned: " + str(sorted(BANNED_SYMBOLS)))
     if exclude_unprofitable:
         print("### +Excluded: " + str(sorted(UNPROFITABLE_SYMBOLS)))
     print("### BE: в ENTRY (offset=" + str(BE_PROFIT_OFFSET_R) + "R)")
-    print("### be_at_r: strong=1.0, default=1.0, weak=0.8")
-    print("### Trailing: trigger " + str(TRAILING_TRIGGER_R)
-          + "R, dist " + str(TRAILING_DISTANCE_R) + "R")
+    print("### MIN_SCORE_READY: " + str(MIN_SCORE_READY_BT))
+    print("### ULTRA tier: score>=95 -> be_at_r=1.5, trail 1.5/1.0")
     print("#" * 70)
 
     all_summary = []
@@ -871,8 +908,8 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("=" * 78)
-    print("СВОДКА - " + label
-          + " (max_hours=" + str(max_hours) + ", 90 дней)")
+    print("СВОДКА v9.14 - " + label
+          + " (" + str(max_hours) + "h, 40 дней)")
     print("=" * 78)
     hdr = ("Символ".ljust(10) + "Filled".ljust(8) + "NoFill".ljust(8)
            + "TP".ljust(5) + "SL".ljust(5) + "BE".ljust(5) + "TO".ljust(5)
@@ -950,7 +987,7 @@ def run_multi_backtest():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TradeMind v9.13 backtest (90 дней)")
+        description="TradeMind v9.14 backtest (40 дней)")
     parser.add_argument("--symbol", default="INJUSDT")
     parser.add_argument("--max-hours", type=int,
                         default=DEFAULT_MAX_HOURS)
@@ -961,7 +998,7 @@ def main():
     parser.add_argument("--symbols", default=None)
     parser.add_argument("--include-unprofitable",
                         action="store_true",
-                        help="включить ETH/DOT/XRP")
+                        help="включить ETH/DOT/XRP/LINK")
     args = parser.parse_args()
 
     use_be = not args.no_be
