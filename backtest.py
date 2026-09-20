@@ -1,8 +1,13 @@
 """
-Диагностический бэктест v9.4.
+Диагностический бэктест v9.5 — 90 дней.
 
-Изменения vs v9.3:
-- symbols: 20 -> 14 монет (убраны токсичные: AVAX, TRX, OP, ARB, SEI, ATOM)
+Изменения vs v9.4:
+- BT_LOOKBACK_1H: 1000 -> 2160 (~90 дней)
+- BT_LOOKBACK_15M: 4000 -> 8640
+- BT_LOOKBACK_5M: 12000 -> 25920
+- BT_LOOKBACK_D1: 90 -> 180
+- BT_LOOKBACK_1M: 200 -> 500
+- Символов: 14
 """
 
 import argparse
@@ -21,11 +26,11 @@ from market import (
 from strategy import analyze, get_1h_direction
 
 
-BT_LOOKBACK_D1 = 90
-BT_LOOKBACK_1H = 1000
-BT_LOOKBACK_15M = 4000
-BT_LOOKBACK_5M = 12000
-BT_LOOKBACK_1M = 200
+BT_LOOKBACK_D1 = 180
+BT_LOOKBACK_1H = 2160
+BT_LOOKBACK_15M = 8640
+BT_LOOKBACK_5M = 25920
+BT_LOOKBACK_1M = 500
 
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
@@ -421,7 +426,7 @@ def print_report(symbol, trades, diag, use_breakeven=False,
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v9.4 - {symbol} [{label}]")
+    print(f"ОТЧЁТ БЭКТЕСТА v9.5 - {symbol} [{label}]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -560,8 +565,8 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v9.4 - {label} - "
-          f"{len(symbols)} монет x 40 дней")
+    print(f"### MULTI BACKTEST v9.5 - {label} - "
+          f"{len(symbols)} монет x 90 дней")
     print("#" * 70)
 
     all_summary = []
@@ -596,7 +601,7 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("=" * 70)
-    print(f"СВОДКА - {label} (max_hours={max_hours}, 40 дней)")
+    print(f"СВОДКА - {label} (max_hours={max_hours}, 90 дней)")
     print("=" * 70)
     print(f"{'Символ':<10}{'Сделок':<8}{'TP':<5}{'SL':<5}"
           f"{'TO':<5}{'WinRate':<10}{'PnL':<10}")
