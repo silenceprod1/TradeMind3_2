@@ -1,24 +1,21 @@
 """
-TradeMind 8.5 — strategy.py
+TradeMind 8.5.1 — strategy.py
 
-Фиксы vs 8.4:
-- confirmation_15m: не выходим на первой свече, ищем BOS по всему массиву
-- find_sweep: ловим пинбары + sweep invalidation
-- ILM age: вход только на 1-2 свечах после триггера (MAX_ILM_AGE_FOR_ENTRY=2)
-- SL: стоит за sweep extreme, не уходит глубже
-- ATR floor: смягчён с 1.2 до 0.8
-- Counter-trend: +5 баллов вместо 0 (иначе порог 92 недостижим)
+Изменения vs 8.5:
+- MAX_ILM_AGE_FOR_ENTRY: 2 -> 4 (вернули часть сделок)
+- Sweep invalidation: мягче — только 2+ свечи подряд за extreme
+- STRATEGY_VERSION: 8.5 -> 8.5.1
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "8.5"
+STRATEGY_VERSION = "8.5.1"
 
 ALLOW_SHORT = True
 
-# v8.5 fixes
-MAX_ILM_AGE_FOR_ENTRY = 2
+# v8.5.1 fixes
+MAX_ILM_AGE_FOR_ENTRY = 4
 ATR_SL_MULT_SOFT = 0.8
 
 MIN_SCORE_READY = 85
@@ -330,7 +327,8 @@ def _sweep_candidate_score(candle, level, depth):
 
 def find_sweep(candles_1h, major_levels, direction):
     """
-    v8.5: пинбары валидны + sweep invalidation (закрытие за extreme сбрасывает).
+    v8.5.1: пинбары валидны + sweep invalidation.
+    Invalidation: только если 2+ свечи подряд закрылись за extreme.
     """
     if direction not in {"LONG", "SHORT"}:
         return None
@@ -367,7 +365,7 @@ def find_sweep(candles_1h, major_levels, direction):
                 depth = (price - low) / price * 100
                 if (low < price and depth >= MIN_SWEEP_DEPTH_PCT
                         and close > price):
-                    # v8.5: пинбар валиден
+                    # пинбар валиден
                     open_p = _o(candle) or close
                     body = abs(close - open_p)
                     lower_wick = min(open_p, close) - low
@@ -375,14 +373,19 @@ def find_sweep(candles_1h, major_levels, direction):
                     if not is_rejection:
                         continue
 
-                    # v8.5: sweep invalidation
+                    # v8.5.1: invalidation — только 2+ свечи подряд ниже extreme
                     is_invalidated = False
+                    consecutive_below = 0
                     for k in range(candle_idx_1h + 1, total_candles):
                         c_after = candles_1h[k]
                         c_after_close = _c(c_after)
                         if c_after_close is not None and c_after_close < low:
-                            is_invalidated = True
-                            break
+                            consecutive_below += 1
+                            if consecutive_below >= 2:
+                                is_invalidated = True
+                                break
+                        else:
+                            consecutive_below = 0
                     if is_invalidated:
                         continue
 
@@ -404,7 +407,7 @@ def find_sweep(candles_1h, major_levels, direction):
                 depth = (high - price) / price * 100
                 if (high > price and depth >= MIN_SWEEP_DEPTH_PCT
                         and close < price):
-                    # v8.5: пинбар валиден
+                    # пинбар валиден
                     open_p = _o(candle) or close
                     body = abs(close - open_p)
                     upper_wick = high - max(open_p, close)
@@ -412,14 +415,19 @@ def find_sweep(candles_1h, major_levels, direction):
                     if not is_rejection:
                         continue
 
-                    # v8.5: sweep invalidation
+                    # v8.5.1: invalidation — только 2+ свечи подряд выше extreme
                     is_invalidated = False
+                    consecutive_above = 0
                     for k in range(candle_idx_1h + 1, total_candles):
                         c_after = candles_1h[k]
                         c_after_close = _c(c_after)
                         if c_after_close is not None and c_after_close > high:
-                            is_invalidated = True
-                            break
+                            consecutive_above += 1
+                            if consecutive_above >= 2:
+                                is_invalidated = True
+                                break
+                        else:
+                            consecutive_above = 0
                     if is_invalidated:
                         continue
 
@@ -502,8 +510,7 @@ def _is_local_low_15m(c, i):
 
 def confirmation_15m(candles_15m, sweep, direction):
     """
-    v8.5: не выходим на первой свече.
-    Ищем BOS по всему массиву кандидатов.
+    v8.5.1: BOS по всему массиву кандидатов.
     Fallback: engulfing предыдущей свечи (без BOS).
     """
     if not sweep or direction not in {"LONG", "SHORT"} or not candles_15m:
@@ -813,7 +820,7 @@ def find_structural_stop_level(candles_15m, direction, entry,
                                 ilm_extreme, sweep_extreme=None,
                                 candles_1h=None):
     """
-    v8.5: SL за sweep extreme. Не уходим глубже (граница инвалидации).
+    v8.5.1: SL за sweep extreme. Не уходим глубже.
     """
     entry_f = _f(entry)
     if entry_f is None:
@@ -943,7 +950,6 @@ def _score(direction, context_direction, sweep, confirmation_strength,
            bos, ilm, rr, major_strength, fvg_bonus):
     score = 0
 
-    # v8.5: контртренд получает 5 вместо 0 (порог 92 был недостижим)
     if direction == context_direction:
         score += 15
     elif context_direction == "NEUTRAL":
@@ -1085,7 +1091,6 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
         result["reason"] = f"ILM устарел ({ilm_age} свечей 5M)."
         return result
 
-    # v8.5: вход только на свежих триггерах
     if ilm_age > MAX_ILM_AGE_FOR_ENTRY:
         result["score"] = 68
         result["reason"] = (
