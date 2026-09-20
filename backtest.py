@@ -1,16 +1,7 @@
 """
-TradeMind backtest v9.13 FINAL — рабочая версия.
-
-- Banned: BTC / SOL / SUI
-- Unprofitable: ETH / DOT / XRP
-- BE в entry, be_at_r = 1.0R
-- Trailing 1.3R / 0.8R
-- Cooldown per-symbol v3
-
-ЗАПУСК:
-  python backtest.py                       → 4 монеты (LINK/BCH/APT/INJ)
-  python backtest.py --include-unprofitable → все 7 пар
-  python backtest.py --single --symbol INJUSDT
+TradeMind backtest v9.13 FINAL.
+BE в entry, be_at_r=1.0, trailing 1.3/0.8, cooldown per-symbol v3.
+Banned: BTC/SOL/SUI. Unprofitable: ETH/DOT/XRP.
 """
 
 import argparse
@@ -39,7 +30,7 @@ WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
 BANNED_SYMBOLS = {"BTCUSDT", "SOLUSDT", "SUIUSDT"}
-UNPROFITABLE_SYMBOLS = {"ETHUSDT", "DOTUSDT", "XRPUSDT"}   # v9.13: +XRP
+UNPROFITABLE_SYMBOLS = {"ETHUSDT", "DOTUSDT", "XRPUSDT"}
 
 ALL_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT",
@@ -93,7 +84,7 @@ def get_partial_config(symbol, score):
 
 
 def log(msg):
-    print(f"[BT] {msg}", flush=True)
+    print("[BT] " + str(msg), flush=True)
 
 
 def ts_to_str(ms):
@@ -123,8 +114,12 @@ def pnl_pct(entry, exit_price, direction):
 def blended_pnl_dual(entry, final_exit, direction,
                      p1_done, p1_exit, p1_pct,
                      p2_done, p2_exit, p2_pct):
-    p1_w = (p1_pct / 100.0) if p1_done and p1_exit is not None else 0.0
-    p2_w = (p2_pct / 100.0) if p2_done and p2_exit is not None else 0.0
+    p1_w = 0.0
+    p2_w = 0.0
+    if p1_done and p1_exit is not None:
+        p1_w = p1_pct / 100.0
+    if p2_done and p2_exit is not None:
+        p2_w = p2_pct / 100.0
     rem_w = max(0.0, 1.0 - p1_w - p2_w)
     total = 0.0
     if p1_w > 0:
@@ -145,32 +140,37 @@ class CooldownMgr:
         self.consec = 0
         self.last_sl_ts = None
         self.verbose = verbose
-        self.cfg = COOLDOWN_V910.get(symbol, COOLDOWN_V910["default"])
+        cfg = COOLDOWN_V910.get(symbol)
+        if cfg is None:
+            cfg = COOLDOWN_V910["default"]
+        self.cfg = cfg
 
     def on_result(self, result_type, ts_ms):
-        if (self.last_sl_ts is not None
-                and (ts_ms - self.last_sl_ts) / 3600000.0
-                > self.RESET_AFTER_HOURS
-                and self.consec > 0):
-            if self.verbose:
-                print(f"[CD] {self.symbol}: auto-reset "
-                      f"(> {self.RESET_AFTER_HOURS}h без SL, "
-                      f"было {self.consec})", flush=True)
-            self.consec = 0
-            self.last_sl_ts = None
+        if self.last_sl_ts is not None:
+            hours_gap = (ts_ms - self.last_sl_ts) / 3600000.0
+            if hours_gap > self.RESET_AFTER_HOURS and self.consec > 0:
+                if self.verbose:
+                    print("[CD] " + self.symbol + ": auto-reset "
+                          + "(> " + str(self.RESET_AFTER_HOURS)
+                          + "h без SL, было " + str(self.consec) + ")",
+                          flush=True)
+                self.consec = 0
+                self.last_sl_ts = None
 
-        if result_type in ("TP", "BE"):
+        if result_type == "TP" or result_type == "BE":
             if self.consec > 0 and self.verbose:
-                print(f"[CD] {self.symbol}: {result_type} → серия сброшена "
-                      f"(было {self.consec} SL)", flush=True)
+                print("[CD] " + self.symbol + ": " + result_type
+                      + " -> серия сброшена (было "
+                      + str(self.consec) + " SL)", flush=True)
             self.consec = 0
             self.last_sl_ts = None
         elif result_type == "SL":
             self.consec = min(self.consec + 1, self.MAX_CONSEC)
             self.last_sl_ts = ts_ms
             if self.verbose:
-                print(f"[CD] {self.symbol}: SL #{self.consec} "
-                      f"@ {ts_to_str(ts_ms)}", flush=True)
+                ts_str = ts_to_str(ts_ms)
+                print("[CD] " + self.symbol + ": SL #"
+                      + str(self.consec) + " @ " + ts_str, flush=True)
 
     def can_trade(self, ts_ms):
         if self.consec < 2:
@@ -186,15 +186,16 @@ class CooldownMgr:
         elapsed_h = (ts_ms - self.last_sl_ts) / 3600000.0
         ok = elapsed_h >= hours
         if not ok and self.verbose:
-            print(f"[CD] {self.symbol}: blocked, "
-                  f"{elapsed_h:.1f}h < {hours}h (consec={self.consec})",
-                  flush=True)
+            print("[CD] " + self.symbol + ": blocked, "
+                  + str(round(elapsed_h, 1)) + "h < " + str(hours)
+                  + "h (consec=" + str(self.consec) + ")", flush=True)
         return ok
 
 
 def classify_reason(result, market_info):
     stage = result.get("stage", "WAIT")
     reason = str(result.get("reason", "")).lower()
+
     if stage == "READY":
         return "READY"
     if "session filter" in reason:
@@ -235,7 +236,7 @@ def classify_reason(result, market_info):
         return "v910_promote"
     if "blocked" in reason or "заблок" in reason:
         return "other_blocked"
-    return f"stage_{stage.lower()}"
+    return "stage_" + stage.lower()
 
 
 def simulate_trade_v913(trade, candles_5m, start_ts, max_hours, cfg,
@@ -309,21 +310,21 @@ def simulate_trade_v913(trade, candles_5m, start_ts, max_hours, cfg,
             hit_tp = low <= tp
             hit_sl = high >= current_sl
 
-        def _exit_type():
-            if be_moved and abs(current_sl - entry) < risk * 0.05:
-                return "BE"
-            if direction == "LONG" and current_sl > entry:
-                return "BE"
-            if direction == "SHORT" and current_sl < entry:
-                return "BE"
-            return "SL"
+        # exit type
+        exit_t = "SL"
+        if be_moved and abs(current_sl - entry) < risk * 0.05:
+            exit_t = "BE"
+        elif direction == "LONG" and current_sl > entry:
+            exit_t = "BE"
+        elif direction == "SHORT" and current_sl < entry:
+            exit_t = "BE"
 
         if hit_sl and hit_tp:
             final = blended_pnl_dual(
                 entry, current_sl, direction,
                 p1_done, p1_exit, p1_pct,
                 p2_done, p2_exit, p2_pct)
-            return (_exit_type(), current_sl, c["open_time"], held, final,
+            return (exit_t, current_sl, c["open_time"], held, final,
                     p1_done or p2_done)
 
         if hit_sl:
@@ -331,7 +332,7 @@ def simulate_trade_v913(trade, candles_5m, start_ts, max_hours, cfg,
                 entry, current_sl, direction,
                 p1_done, p1_exit, p1_pct,
                 p2_done, p2_exit, p2_pct)
-            return (_exit_type(), current_sl, c["open_time"], held, final,
+            return (exit_t, current_sl, c["open_time"], held, final,
                     p1_done or p2_done)
 
         if hit_tp:
@@ -403,8 +404,8 @@ def simulate_trade_v913(trade, candles_5m, start_ts, max_hours, cfg,
             entry, exit_price, direction,
             p1_done, p1_exit, p1_pct,
             p2_done, p2_exit, p2_pct)
-        return ("TIMEOUT", exit_price, last_seen["open_time"], held, final,
-                p1_done or p2_done)
+        return ("TIMEOUT", exit_price, last_seen["open_time"], held,
+                final, p1_done or p2_done)
 
     return ("TIMEOUT", entry, start_ts, 0, 0.0, False)
 
@@ -414,17 +415,19 @@ def run_backtest(symbol, max_hours,
                  use_trailing=False,
                  exclude_unprofitable=True):
     symbol = _normalize_symbol(symbol)
-    log(f"Символ: {symbol} "
-        f"(BE={use_breakeven} partial={use_partial_tp} "
-        f"trail={use_trailing} cooldown=per-symbol)")
+    log("Символ: " + symbol
+        + " (BE=" + str(use_breakeven)
+        + " partial=" + str(use_partial_tp)
+        + " trail=" + str(use_trailing)
+        + " cooldown=per-symbol)")
 
     banned = set(BANNED_SYMBOLS)
     if exclude_unprofitable:
-        banned |= UNPROFITABLE_SYMBOLS
+        banned = banned | UNPROFITABLE_SYMBOLS
 
     if symbol in banned:
-        log(f"[v9.13] SKIP banned symbol: {symbol}")
-        return [], {
+        log("[v9.13] SKIP banned symbol: " + symbol)
+        empty_diag = {
             "stage_counter": Counter(),
             "reason_counter": Counter(),
             "exception_counter": Counter(),
@@ -435,6 +438,7 @@ def run_backtest(symbol, max_hours,
             "no_fill_by_coin": {},
             "banned": True,
         }
+        return [], empty_diag
 
     candles_d1 = get_klines_history("1d", BT_LOOKBACK_D1, symbol)
     candles_1h = get_klines_history("1h", BT_LOOKBACK_1H, symbol)
@@ -446,8 +450,12 @@ def run_backtest(symbol, max_hours,
         log("Нет данных 1H")
         return [], {}
 
-    log(f"Данных: D1={len(candles_d1)} 1H={len(candles_1h)} "
-        f"15M={len(candles_15m)} 5M={len(candles_5m)} 1M={len(candles_1m)}")
+    data_msg = ("Данных: D1=" + str(len(candles_d1))
+                + " 1H=" + str(len(candles_1h))
+                + " 15M=" + str(len(candles_15m))
+                + " 5M=" + str(len(candles_5m))
+                + " 1M=" + str(len(candles_1m)))
+    log(data_msg)
 
     if len(candles_1h) <= WARMUP_1H:
         return [], {}
@@ -465,7 +473,7 @@ def run_backtest(symbol, max_hours,
     cooldown_mgr = CooldownMgr(symbol, verbose=True)
 
     total = len(candles_1h) - WARMUP_1H
-    log(f"Шагов: {total}")
+    log("Шагов: " + str(total))
 
     for i in range(WARMUP_1H, len(candles_1h)):
         ts_now = candles_1h[i]["open_time"]
@@ -483,16 +491,16 @@ def run_backtest(symbol, max_hours,
         cd1 = candles_until(candles_d1, ts_now)
 
         if len(c15) < 60 or len(c5) < 60:
-            exception_counter["not_enough_cand
-les       "] += 1
+            exception_counter["n_short"] += 1
             continue
 
-        price = c1[-1]["close"] if c1 else c1 elifh[-1]["close"]
+        price = c1[-1]["close"] if c1 else c1h[-1]["close"]
 
-        n try:
-            levels = find_major_liquidity(c_1h, price, 12, c15ssl, c5, c1)
+        try:
+            levels = find_major_liquidity(c1h, price, 12, c15, c5, c1)
         except Exception as exc:
-            exception_counter[f"market:{type(exc).__name__}"] += 1
+            err = type(exc).__name__
+            exception_counter["market_" + err] += 1
             continue
 
         n_bsl = sum(1 for l in levels if l.get("type") == "BSL")
@@ -501,7 +509,8 @@ les       "] += 1
         if n_bsl == 0 and n_ssl == 0:
             market_stats["empty"] += 1
         elif n_bsl == 0:
-            market_stats["only_ssl"] += 1 == 0:
+            market_stats["only_ssl"] += 1
+        elif n_ssl == 0:
             market_stats["only_bsl"] += 1
         else:
             market_stats["both"] += 1
@@ -523,9 +532,11 @@ les       "] += 1
                              candles_1m=c1, d1_context=d1_context,
                              fvgs=[], symbol=symbol)
         except Exception as exc:
-            exception_counter[f"analyze:{type(exc).__name__}"] += 1
-            if exception_counter[f"analyze:{type(exc).__name__}"] == 1:
-                print(f"[BT] FIRST EXCEPTION {type(exc).__name__}: {exc}",
+            err = type(exc).__name__
+            key = "analyze_" + err
+            exception_counter[key] += 1
+            if exception_counter[key] == 1:
+                print("[BT] FIRST EXCEPTION " + err + ": " + str(exc),
                       flush=True)
                 traceback.print_exc()
             continue
@@ -539,15 +550,18 @@ les       "] += 1
         reason_counter[reason_key] += 1
 
         if score >= 50 and stage != "READY":
-            near_misses.append({
+            nm = {
                 "ts": ts_now,
                 "direction": result.get("direction", "?"),
-                "stage": stage, "score": score,
+                "stage": stage,
+                "score": score,
                 "reason_key": reason_key,
                 "reason": str(result.get("reason", ""))[:80],
                 "trend": result.get("trend_activity", 0),
-                "bsl": n_bsl, "ssl": n_ssl,
-            })
+                "bsl": n_bsl,
+                "ssl": n_ssl,
+            }
+            near_misses.append(nm)
 
         if stage != "READY":
             continue
@@ -559,9 +573,14 @@ les       "] += 1
             continue
 
         trade = {
-            "coin": symbol, "direction": result["direction"],
-            "entry": float(entry), "sl": float(sl), "tp": float(tp),
-            "rr": result.get("rr"), "score": score, "open_ts": ts_now,
+            "coin": symbol,
+            "direction": result["direction"],
+            "entry": float(entry),
+            "sl": float(sl),
+            "tp": float(tp),
+            "rr": result.get("rr"),
+            "score": score,
+            "open_ts": ts_now,
         }
 
         cfg = get_partial_config(symbol, score)
@@ -578,8 +597,10 @@ les       "] += 1
         if res_type == "NO_FILL":
             no_fill_count += 1
             no_fill_by_coin[symbol] += 1
-            log(f"[{i:4}] {trade['direction']:5} "
-                f"entry={entry:.4f} -> NO_FILL")
+            log("[" + str(i).rjust(4) + "] "
+                + trade["direction"].ljust(5)
+                + " entry=" + str(round(entry, 4))
+                + " -> NO_FILL")
             cooldown_mgr.on_result("NO_FILL", exit_ts)
             continue
 
@@ -595,15 +616,21 @@ les       "] += 1
         cooldown_mgr.on_result(res_type, exit_ts)
 
         partial_tag = "P" if partial_hit else " "
-        log(f"[{i:4}] {trade['direction']:5} "
-            f"entry={entry:.4f} sl={sl:.4f} tp={tp:.4f} "
-            f"rr={trade['rr']:.2f} score={score} "
-            f"{partial_tag} -> {res_type:7} pnl={trade['pnl']:+.2f}%")
+        log("[" + str(i).rjust(4) + "] "
+            + trade["direction"].ljust(5)
+            + " entry=" + str(round(entry, 4))
+            + " sl=" + str(round(sl, 4))
+            + " tp=" + str(round(tp, 4))
+            + " rr=" + str(round(trade["rr"], 2))
+            + " score=" + str(score)
+            + " " + partial_tag
+            + " -> " + res_type.ljust(7)
+            + " pnl=" + ("%+.2f%%" % trade["pnl"]))
 
     if cooldown_skips > 0:
-        log(f"Cooldown skips: {cooldown_skips}")
+        log("Cooldown skips: " + str(cooldown_skips))
     if no_fill_count > 0:
-        log(f"NO_FILL: {no_fill_count}")
+        log("NO_FILL: " + str(no_fill_count))
 
     near_misses.sort(key=lambda x: x["score"], reverse=True)
 
@@ -635,7 +662,7 @@ def print_report(symbol, trades, diag,
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v9.13 - {symbol} [{label}]")
+    print("ОТЧЁТ БЭКТЕСТА v9.13 - " + symbol + " [" + label + "]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -648,7 +675,7 @@ def print_report(symbol, trades, diag,
 
     if diag.get("banned"):
         print()
-        print(f"[SKIP] {symbol} в BANNED_SYMBOLS.")
+        print("[SKIP] " + symbol + " в BANNED_SYMBOLS.")
         print("=" * 70)
         return
 
@@ -656,38 +683,41 @@ def print_report(symbol, trades, diag,
     total_exc = sum(exception_counter.values())
 
     print()
-    print(f"Всего шагов проанализировано: {total}")
-    print(f"Пропущено через exception: {total_exc}")
+    print("Всего шагов проанализировано: " + str(total))
+    print("Пропущено через exception: " + str(total_exc))
     if cooldown_skips > 0:
-        print(f"Пропущено через cooldown: {cooldown_skips}")
+        print("Пропущено через cooldown: " + str(cooldown_skips))
     if no_fill_count > 0:
-        print(f"NO_FILL (лимитка не исполнилась): {no_fill_count}")
+        print("NO_FILL (лимитка не исполнилась): " + str(no_fill_count))
     print()
 
     if exception_counter:
         print("EXCEPTIONS:")
         for k, v in exception_counter.most_common(10):
-            print(f"  {k:40} {v}")
+            print("  " + k.ljust(40) + " " + str(v))
         print()
 
     print("MARKET:")
     for k in ["both", "only_ssl", "only_bsl", "empty"]:
         v = market_stats.get(k, 0)
         pct = v / total * 100 if total else 0
-        print(f"  {k:15} {v:4}  ({pct:.1f}%)")
+        print("  " + k.ljust(15) + " " + str(v).rjust(4)
+              + "  (" + ("%.1f%%" % pct) + ")")
     print()
 
     print("РАСПРЕДЕЛЕНИЕ ПО СТАДИЯМ:")
     for stage in ["READY", "15M_CONFIRMED", "SWEPT", "WAIT"]:
         cnt = stage_counter.get(stage, 0)
         pct = cnt / total * 100 if total else 0
-        print(f"  {stage:16} {cnt:4}  ({pct:.1f}%)")
+        print("  " + stage.ljust(16) + " " + str(cnt).rjust(4)
+              + "  (" + ("%.1f%%" % pct) + ")")
 
     print()
     print("ТОП ПРИЧИН ОСТАНОВКИ:")
     for reason, cnt in reason_counter.most_common(15):
         pct = cnt / total * 100 if total else 0
-        print(f"  {reason:26} {cnt:4}  ({pct:.1f}%)")
+        print("  " + reason.ljust(26) + " " + str(cnt).rjust(4)
+              + "  (" + ("%.1f%%" % pct) + ")")
 
     print()
     print("=" * 70)
@@ -696,17 +726,22 @@ def print_report(symbol, trades, diag,
     if not near_misses:
         print("Нет сетапов с score >= 50")
     else:
-        print(f"{'Дата':<17}{'Напр.':<6}{'Stage':<16}"
-              f"{'Score':<6}{'Trend':<7}{'BSL/SSL':<10}{'Reason'}")
+        hdr = ("Дата".ljust(17) + "Напр.".ljust(6)
+               + "Stage".ljust(16) + "Score".ljust(6)
+               + "Trend".ljust(7) + "BSL/SSL".ljust(10) + "Reason")
+        print(hdr)
         print("-" * 70)
         for nm in near_misses:
-            print(f"{ts_to_str(nm['ts']):<17}"
-                  f"{nm['direction']:<6}"
-                  f"{nm['stage']:<16}"
-                  f"{nm['score']:<6}"
-                  f"{nm['trend']:<7.2f}"
-                  f"{nm['bsl']}/{nm['ssl']:<7}"
-                  f"{nm['reason_key']}")
+            trend_s = "%.2f" % nm["trend"]
+            bs_s = str(nm["bsl"]) + "/" + str(nm["ssl"])
+            line = (ts_to_str(nm["ts"]).ljust(17)
+                    + nm["direction"].ljust(6)
+                    + nm["stage"].ljust(16)
+                    + str(nm["score"]).ljust(6)
+                    + trend_s.ljust(7)
+                    + bs_s.ljust(10)
+                    + nm["reason_key"])
+            print(line)
 
     print()
     print("=" * 70)
@@ -744,20 +779,21 @@ def print_report(symbol, trades, diag,
         if dd > max_dd:
             max_dd = dd
 
-    print(f"Всего сделок (filled): {len(trades)}")
-    print(f"  TP:      {tp}")
-    print(f"  SL:      {sl}")
-    print(f"  BE:      {be}")
-    print(f"  Timeout: {timeout}")
+    print("Всего сделок (filled): " + str(len(trades)))
+    print("  TP:      " + str(tp))
+    print("  SL:      " + str(sl))
+    print("  BE:      " + str(be))
+    print("  Timeout: " + str(timeout))
     if use_partial_tp:
-        print(f"  Partial hits: {partial_hits} "
-              f"({partial_hits / len(trades) * 100:.1f}%)")
-    print(f"Win rate: {win_rate:.1f}%")
-    print(f"Total PnL: {total_pnl:+.2f}%")
-    print(f"Avg PnL:   {avg_pnl:+.2f}%")
-    print(f"Avg win:   {avg_win:+.2f}%")
-    print(f"Avg loss:  {avg_loss:+.2f}%")
-    print(f"Max DD:    -{max_dd:.2f}%")
+        pct = partial_hits / len(trades) * 100
+        print("  Partial hits: " + str(partial_hits)
+              + " (" + ("%.1f%%" % pct) + ")")
+    print("Win rate: " + ("%.1f%%" % win_rate))
+    print("Total PnL: " + ("%+.2f%%" % total_pnl))
+    print("Avg PnL:   " + ("%+.2f%%" % avg_pnl))
+    print("Avg win:   " + ("%+.2f%%" % avg_win))
+    print("Avg loss:  " + ("%+.2f%%" % avg_loss))
+    print("Max DD:    " + ("%.2f%%" % (-max_dd)))
 
 
 def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
@@ -780,16 +816,16 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v9.13 - {label} - "
-          f"{len(symbols)} монет x 40 дней")
+    print("### MULTI BACKTEST v9.13 - " + label
+          + " - " + str(len(symbols)) + " монет x 40 дней")
     print("#" * 70)
-    print(f"### Banned: {sorted(BANNED_SYMBOLS)}")
+    print("### Banned: " + str(sorted(BANNED_SYMBOLS)))
     if exclude_unprofitable:
-        print(f"### +Excluded: {sorted(UNPROFITABLE_SYMBOLS)}")
-    print(f"### BE: в ENTRY (offset={BE_PROFIT_OFFSET_R}R)")
-    print(f"### be_at_r: strong=1.0, default=1.0, weak=0.8")
-    print(f"### Trailing: trigger {TRAILING_TRIGGER_R}R, "
-          f"dist {TRAILING_DISTANCE_R}R")
+        print("### +Excluded: " + str(sorted(UNPROFITABLE_SYMBOLS)))
+    print("### BE: в ENTRY (offset=" + str(BE_PROFIT_OFFSET_R) + "R)")
+    print("### be_at_r: strong=1.0, default=1.0, weak=0.8")
+    print("### Trailing: trigger " + str(TRAILING_TRIGGER_R)
+          + "R, dist " + str(TRAILING_DISTANCE_R) + "R")
     print("#" * 70)
 
     all_summary = []
@@ -811,32 +847,37 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
             banned = diag.get("banned", False)
 
             if banned:
-                all_summary.append((sym, 0, 0, 0, 0, 0, 0, 0.0, 0, True))
+                all_summary.append(
+                    (sym, 0, 0, 0, 0, 0, 0, 0.0, 0, True))
             elif trades:
                 tp = sum(1 for t in trades if t["result"] == "TP")
                 sl = sum(1 for t in trades if t["result"] == "SL")
                 be = sum(1 for t in trades if t["result"] == "BE")
-                timeout = sum(1 for t in trades
-                              if t["result"] == "TIMEOUT")
+                to = sum(1 for t in trades if t["result"] == "TIMEOUT")
                 resolved = tp + sl
                 wr = tp / resolved * 100 if resolved else 0
                 pnl = sum(t["pnl"] for t in trades)
-                all_summary.append((sym, len(trades), tp, sl, be,
-                                    timeout, wr, pnl, no_fill, False))
+                all_summary.append(
+                    (sym, len(trades), tp, sl, be, to, wr, pnl,
+                     no_fill, False))
             else:
-                all_summary.append((sym, 0, 0, 0, 0, 0, 0, 0.0,
-                                    no_fill, False))
+                all_summary.append(
+                    (sym, 0, 0, 0, 0, 0, 0, 0.0, no_fill, False))
         except Exception as exc:
-            print(f"[BT] {sym} FAILED: {exc}", flush=True)
+            print("[BT] " + sym + " FAILED: " + str(exc), flush=True)
             traceback.print_exc()
-            all_summary.append((sym, 0, 0, 0, 0, 0, 0, 0.0, 0, False))
+            all_summary.append(
+                (sym, 0, 0, 0, 0, 0, 0, 0.0, 0, False))
 
     print()
     print("=" * 78)
-    print(f"СВОДКА - {label} (max_hours={max_hours}, 40 дней)")
+    print("СВОДКА - " + label
+          + " (max_hours=" + str(max_hours) + ", 40 дней)")
     print("=" * 78)
-    print(f"{'Символ':<10}{'Filled':<8}{'NoFill':<8}{'TP':<5}{'SL':<5}"
-          f"{'BE':<5}{'TO':<5}{'WR':<7}{'PnL':<10}{'Stat':<8}")
+    hdr = ("Символ".ljust(10) + "Filled".ljust(8) + "NoFill".ljust(8)
+           + "TP".ljust(5) + "SL".ljust(5) + "BE".ljust(5) + "TO".ljust(5)
+           + "WR".ljust(7) + "PnL".ljust(10) + "Stat".ljust(8))
+    print(hdr)
     print("-" * 78)
 
     total_trades = 0
@@ -847,36 +888,55 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     total_pnl = 0.0
     total_no_fill = 0
 
-    for (sym, cnt, tp, sl, be, timeout, wr, pnl,
-         no_fill, banned) in all_summary:
+    for row in all_summary:
+        (sym, cnt, tp, sl, be, to, wr, pnl, no_fill, banned) = row
         stat = "BANNED" if banned else "OK"
-        print(f"{sym:<10}{cnt:<8}{no_fill:<8}{tp:<5}{sl:<5}"
-              f"{be:<5}{timeout:<5}{wr:<7.1f}{pnl:+.2f}%  {stat}")
+        line = (sym.ljust(10)
+                + str(cnt).ljust(8)
+                + str(no_fill).ljust(8)
+                + str(tp).ljust(5)
+                + str(sl).ljust(5)
+                + str(be).ljust(5)
+                + str(to).ljust(5)
+                + ("%.1f" % wr).ljust(7)
+                + ("%+.2f%%" % pnl).ljust(10)
+                + "  " + stat)
+        print(line)
         total_trades += cnt
         total_tp += tp
         total_sl += sl
         total_be += be
-        total_to += timeout
+        total_to += to
         total_pnl += pnl
         total_no_fill += no_fill
 
     print("-" * 78)
     resolved = total_tp + total_sl
     total_wr = total_tp / resolved * 100 if resolved else 0
-    print(f"{'ИТОГО':<10}{total_trades:<8}{total_no_fill:<8}"
-          f"{total_tp:<5}{total_sl:<5}{total_be:<5}{total_to:<5}"
-          f"{total_wr:<7.1f}{total_pnl:+.2f}%")
+    итого_line = ("ИТОГО".ljust(10)
+                  + str(total_trades).ljust(8)
+                  + str(total_no_fill).ljust(8)
+                  + str(total_tp).ljust(5)
+                  + str(total_sl).ljust(5)
+                  + str(total_be).ljust(5)
+                  + str(total_to).ljust(5)
+                  + ("%.1f" % total_wr).ljust(7)
+                  + ("%+.2f%%" % total_pnl))
+    print(итого_line)
     print()
-    print(f"Всего filled сделок: {total_trades}")
-    print(f"NO_FILL (лимитка не исполнилась): {total_no_fill}")
+    print("Всего filled сделок: " + str(total_trades))
+    print("NO_FILL (лимитка не исполнилась): " + str(total_no_fill))
     total_signals = total_trades + total_no_fill
     if total_signals > 0:
         fill_rate = total_trades / total_signals * 100
-        print(f"Fill rate: {fill_rate:.1f}%")
-    print(f"  TP: {total_tp}  SL: {total_sl}  BE: {total_be}  "
-          f"Timeout: {total_to}")
-    print(f"Win rate: {total_wr:.1f}% (от {resolved} закрытых)")
-    print(f"Sum PnL: {total_pnl:+.2f}%")
+        print("Fill rate: " + ("%.1f%%" % fill_rate))
+    print("  TP: " + str(total_tp)
+          + "  SL: " + str(total_sl)
+          + "  BE: " + str(total_be)
+          + "  Timeout: " + str(total_to))
+    print("Win rate: " + ("%.1f%%" % total_wr)
+          + " (от " + str(resolved) + " закрытых)")
+    print("Sum PnL: " + ("%+.2f%%" % total_pnl))
     print("=" * 78)
 
 
@@ -900,7 +960,8 @@ def main():
     parser.add_argument("--no-partial", action="store_true")
     parser.add_argument("--no-trailing", action="store_true")
     parser.add_argument("--symbols", default=None)
-    parser.add_argument("--include-unprofitable", action="store_true",
+    parser.add_argument("--include-unprofitable",
+                        action="store_true",
                         help="включить ETH/DOT/XRP")
     args = parser.parse_args()
 
@@ -924,7 +985,8 @@ def main():
     else:
         symbols = None
         if args.symbols:
-            symbols = [s.strip().upper() for s in args.symbols.split(",")
+            symbols = [s.strip().upper()
+                       for s in args.symbols.split(",")
                        if s.strip()]
         run_multi_backtest_with_hours(
             args.max_hours,
