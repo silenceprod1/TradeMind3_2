@@ -1,11 +1,5 @@
 """
 TradeMind 8.5.1 — strategy.py
-
-Откат от 8.5.2:
-- ATR_SL_MULT_SOFT: 1.2 -> 0.8
-- ENABLE_SESSION_FILTER: True -> False
-- STRATEGY_VERSION: 8.5.2 -> 8.5.1
-- Всё остальное как 8.5.2 (sweep invalidation, ILM age=4, confirmation)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,11 +9,9 @@ STRATEGY_VERSION = "8.5.1"
 
 ALLOW_SHORT = True
 
-# v8.5.1
 MAX_ILM_AGE_FOR_ENTRY = 4
 ATR_SL_MULT_SOFT = 0.8
 
-# v8.5.2 Session Filter — ОТКЛЮЧЁН
 ENABLE_SESSION_FILTER = False
 SESSION_BLOCK_START_HOUR = 2
 SESSION_BLOCK_END_HOUR = 7
@@ -28,7 +20,7 @@ SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
 SL_BUFFER_PCT = 0.20
-STRUCTURAL_SL_LOOKBACK_
+STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
 
@@ -988,22 +980,6 @@ def _score(direction, context_direction, sweep, confirmation_strength,
     return int(min(100, max(0, round(score))))
 
 
-def _is_session_blocked(symbol, ts_ms):
-    """v8.5.2 — сохранена для совместимости, но отключена."""
-    if not ENABLE_SESSION_FILTER:
-        return False
-    if symbol in SESSION_FILTER_EXEMPT:
-        return False
-    try:
-        if ts_ms is None:
-            return False
-        from datetime import datetime, timezone
-        hour = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).hour
-        return SESSION_BLOCK_START_HOUR <= hour < SESSION_BLOCK_END_HOUR
-    except Exception:
-        return False
-
-
 def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
                        major_levels, direction, context_direction,
                        d1_context=None, fvgs=None, symbol=None):
@@ -1044,13 +1020,6 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
     if price is None or not candles_1h or not candles_15m or not candles_5m:
         result["reason"] = "Недостаточно рыночных данных."
         return result
-
-    if ENABLE_SESSION_FILTER and symbol and candles_1h:
-        last_ts = _t(candles_1h[-1])
-        if _is_session_blocked(symbol, last_ts):
-            result["score"] = 30
-            result["reason"] = "Session filter: мёртвая зона UTC."
-            return result
 
     trend_activity = measure_trend_activity(candles_1h, direction)
     result["trend_activity"] = round(trend_activity, 3)
