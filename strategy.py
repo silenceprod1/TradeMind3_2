@@ -1,26 +1,26 @@
 """
-TradeMind 8.5.2 — strategy.py
+TradeMind 8.5.1 — strategy.py
 
-Изменения vs 8.5.1:
-- ATR_SL_MULT_SOFT: 0.8 -> 1.2 (вернули широкий структурный SL)
-- Session filter: не торгуем 02:00-07:00 UTC (кроме BTC/ETH)
-- analyze() принимает symbol для session-фильтра
-- STRATEGY_VERSION: 8.5.1 -> 8.5.2
+Откат от 8.5.2:
+- ATR_SL_MULT_SOFT: 1.2 -> 0.8
+- ENABLE_SESSION_FILTER: True -> False
+- STRATEGY_VERSION: 8.5.2 -> 8.5.1
+- Всё остальное как 8.5.2 (sweep invalidation, ILM age=4, confirmation)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "8.5.2"
+STRATEGY_VERSION = "8.5.1"
 
 ALLOW_SHORT = True
 
-# v8.5.2 fixes
+# v8.5.1
 MAX_ILM_AGE_FOR_ENTRY = 4
-ATR_SL_MULT_SOFT = 1.2
+ATR_SL_MULT_SOFT = 0.8
 
-# v8.5.2 Session Filter
-ENABLE_SESSION_FILTER = True
+# v8.5.2 Session Filter — ОТКЛЮЧЁН
+ENABLE_SESSION_FILTER = False
 SESSION_BLOCK_START_HOUR = 2
 SESSION_BLOCK_END_HOUR = 7
 SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
@@ -28,7 +28,7 @@ SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
 SL_BUFFER_PCT = 0.20
-STRUCTURAL_SL_LOOKBACK_15M = 50
+STRUCTURAL_SL_LOOKBACK_
 ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
 
@@ -989,6 +989,7 @@ def _score(direction, context_direction, sweep, confirmation_strength,
 
 
 def _is_session_blocked(symbol, ts_ms):
+    """v8.5.2 — сохранена для совместимости, но отключена."""
     if not ENABLE_SESSION_FILTER:
         return False
     if symbol in SESSION_FILTER_EXEMPT:
@@ -1044,8 +1045,7 @@ def _analyze_scenario(candles_1h, candles_15m, candles_5m, current_price,
         result["reason"] = "Недостаточно рыночных данных."
         return result
 
-    # v8.5.2 Session filter
-    if symbol and candles_1h:
+    if ENABLE_SESSION_FILTER and symbol and candles_1h:
         last_ts = _t(candles_1h[-1])
         if _is_session_blocked(symbol, last_ts):
             result["score"] = 30
