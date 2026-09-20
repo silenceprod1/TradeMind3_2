@@ -1,13 +1,10 @@
 """
-TradeMind backtest v9.18 — research mode (default ON).
-
-RESEARCH_MODE = True по умолчанию: все баны отключены, тестируются 10 монет.
-Чтобы вернуть prod-режим — поставь RESEARCH_MODE = False.
+TradeMind backtest v9.18 — research mode.
 
 ЗАПУСК:
-  python backtest.py                          (research, все 10 монет)
-  python backtest.py --min-score BTCUSDT=95   (override MIN_SCORE)
-  python backtest.py --single --symbol SOLUSDT
+  python backtest.py                                            (все 10 монет)
+  python backtest.py --symbols ETHUSDT,SOLUSDT --min-score ETHUSDT=94 --min-score SOLUSDT=94
+  python backtest.py --prod                                     (только 3 пары v9.17)
 """
 
 import argparse
@@ -26,10 +23,6 @@ from market import (
 from strategy import analyze, get_1h_direction
 
 
-# ============================================================
-# CONFIG v9.18 (40 дней)
-# ============================================================
-
 BT_LOOKBACK_D1 = 60
 BT_LOOKBACK_1H = 1200
 BT_LOOKBACK_15M = 4800
@@ -39,7 +32,6 @@ BT_LOOKBACK_1M = 500
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
 
-# per-symbol MIN_SCORE
 MIN_SCORE_BY_SYMBOL = {
     "default": 90,
     "INJUSDT": 88,
@@ -98,9 +90,6 @@ WEAK_SYMBOLS = {"SUIUSDT", "SOLUSDT", "APTUSDT", "BCHUSDT"}
 
 LIMIT_FILL_MAX_CANDLES = 12
 
-# ═══════════════════════════════════════════════════════════
-# RESEARCH MODE — TRUE по умолчанию
-# ═══════════════════════════════════════════════════════════
 RESEARCH_MODE = True
 
 
@@ -1022,11 +1011,9 @@ def main():
                         help="принудительно PROD (только 3 пары)")
     parser.add_argument("--min-score", action="append", default=[],
                         help="override MIN_SCORE (пример: "
-                             "--min-score BTCUSDT=95)")
+                             "--min-score ETHUSDT=94)")
     args = parser.parse_args()
 
-    # по умолчанию RESEARCH_MODE = True из CONFIG
-    # --prod переключает в PROD
     if args.prod:
         RESEARCH_MODE = False
     if args.research:
