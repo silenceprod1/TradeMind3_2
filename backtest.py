@@ -7,8 +7,16 @@ TradeMind backtest v9.10 — BE+PARTIAL×2+TRAIL+COOLDOWN v2.
 - Динамический partial по score и символу (strong/default/weak)
 - Два partial уровня (например 0.7R + 1.3R)
 - BE на 0.5R (было 1.0R)
-- Trailing: триггер 1.3R / дистанция 0.8R (плотнее)
+- Trailing: триггер 1.3R / дистанция 0.8R
 - NO_FILL окно 12×5M = 1 час
+
+ЗАПУСК:
+  python backtest.py                    → все 10 монет, BE+partial+trail ON
+  python backtest.py --no-be            → без BE
+  python backtest.py --no-partial       → без partial
+  python backtest.py --no-trailing      → без trailing
+  python backtest.py --single --symbol ETHUSDT  → только один символ
+  python backtest.py --max-hours 48     → окно удержания 48ч
 """
 
 import argparse
@@ -42,6 +50,14 @@ DEFAULT_MAX_HOURS = 24
 
 # ─── Banned: не торгуем, но показываем в отчёте ───
 BANNED_SYMBOLS = {"SOLUSDT", "SUIUSDT", "BTCUSDT"}
+
+# ─── Полный список символов (banned тоже прогоняются для отчёта) ───
+ALL_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT",
+    "XRPUSDT", "LINKUSDT", "DOTUSDT",
+    "BCHUSDT", "APTUSDT", "SUIUSDT",
+    "INJUSDT",
+]
 
 # ─── Per-symbol cooldown (часов после N-го подряд SL) ───
 COOLDOWN_V910 = {
@@ -773,13 +789,10 @@ def print_report(symbol, trades, diag,
 
 def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
                                   use_partial_tp=False,
-                                  use_trailing=False):
-    symbols = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT",
-        "XRPUSDT", "LINKUSDT", "DOTUSDT",
-        "BCHUSDT", "APTUSDT", "SUIUSDT",
-        "INJUSDT",
-    ]
+                                  use_trailing=False,
+                                  symbols=None):
+    if symbols is None:
+        symbols = ALL_SYMBOLS
 
     labels = []
     if use_breakeven:
@@ -883,45 +896,66 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
 
 def run_multi_backtest():
-    run_multi_backtest_with_hours(DEFAULT_MAX_HOURS)
+    run_multi_backtest_with_hours(
+        DEFAULT_MAX_HOURS,
+        use_breakeven=True,
+        use_partial_tp=True,
+        use_trailing=True,
+    )
 
 
 # ============================================================
-# MAIN
+# MAIN — multi по умолчанию
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--symbol", default="ETHUSDT")
+    parser = argparse.ArgumentParser(
+        description="TradeMind v9.10 backtest (multi по умолчанию)")
+    parser.add_argument("--symbol", default="ETHUSDT",
+                        help="только для --single")
     parser.add_argument("--max-hours", type=int,
                         default=DEFAULT_MAX_HOURS)
-    parser.add_argument("--multi", action="store_true")
-    parser.add_argument("--be", action="store_true",
-                        help="breakeven по R")
-    parser.add_argument("--partial", action="store_true",
-                        help="partial TP (два уровня)")
-    parser.add_argument("--trailing", action="store_true",
-                        help="trailing по R")
+    parser.add_argument("--single", action="store_true",
+                        help="одиночный символ (по умолчанию — все 10)")
+    parser.add_argument("--no-be", action="store_true",
+                        help="отключить BE")
+    parser.add_argument("--no-partial", action="store_true",
+                        help="отключить partial")
+    parser.add_argument("--no-trailing", action="store_true",
+                        help="отключить trailing")
+    parser.add_argument("--symbols", default=None,
+                        help="список через запятую (перебивает ALL_SYMBOLS)")
     args = parser.parse_args()
 
-    if args.multi:
-        run_multi_backtest_with_hours(
-            args.max_hours,
-            use_breakeven=args.be,
-            use_partial_tp=args.partial,
-            use_trailing=args.trailing,
-        )
-    else:
+    use_be = not args.no_be
+    use_partial = not args.no_partial
+    use_trailing = not args.no_trailing
+
+    if args.single:
+        # одиночный символ
         trades, diag = run_backtest(
             args.symbol, args.max_hours,
-            use_breakeven=args.be,
-            use_partial_tp=args.partial,
-            use_trailing=args.trailing,
+            use_breakeven=use_be,
+            use_partial_tp=use_partial,
+            use_trailing=use_trailing,
         )
         print_report(args.symbol, trades, diag,
-                     use_breakeven=args.be,
-                     use_partial_tp=args.partial,
-                     use_trailing=args.trailing)
+                     use_breakeven=use_be,
+                     use_partial_tp=use_partial,
+                     use_trailing=use_trailing)
+    else:
+        # ─── MULTI по умолчанию ───
+        symbols = None
+        if args.symbols:
+            symbols = [s.strip().upper() for s in args.symbols.split(",")
+                       if s.strip()]
+        run_multi_backtest_with_hours(
+            args.max_hours,
+            use_breakeven=use_be,
+            use_partial_tp=use_partial,
+            use_trailing=use_trailing,
+            symbols=symbols,
+        )
 
 
 if __name__ == "__main__":
