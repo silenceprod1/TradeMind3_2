@@ -1,11 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-TradeMind backtest v9.18 (компактная версия).
-
-ЗАПУСК:
-  python backtest.py
-  python backtest.py --symbols ETHUSDT,SOLUSDT --min-score ETHUSDT=94
-"""
 
 import argparse
 from collections import Counter
@@ -29,60 +22,71 @@ BT_5M = 14400
 BT_1M = 500
 WARMUP = 150
 
-MIN_SCORE_BY_SYMBOL = {
+MIN_SCORES = {
     "default": 90,
     "INJUSDT": 88,
     "BCHUSDT": 92,
     "APTUSDT": 90,
 }
 
-BANNED_SYMBOLS = set(["BTCUSDT", "SOLUSDT", "SUIUSDT"])
-UNPROFITABLE_SYMBOLS = set([
-    "ETHUSDT", "DOTUSDT", "XRPUSDT", "LINKUSDT",
-])
+BANNED = set()
+BANNED.add("BTCUSDT")
+BANNED.add("SOLUSDT")
+BANNED.add("SUIUSDT")
 
-ALL_SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT",
-    "XRPUSDT", "LINKUSDT", "DOTUSDT",
-    "BCHUSDT", "APTUSDT", "SUIUSDT",
+UNPROF = set()
+UNPROF.add("ETHUSDT")
+UNPROF.add("DOTUSDT")
+UNPROF.add("XRPUSDT")
+UNPROF.add("LINKUSDT")
+
+ALL_SYMS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "LINKUSDT",
+    "DOTUSDT",
+    "BCHUSDT",
+    "APTUSDT",
+    "SUIUSDT",
     "INJUSDT",
 ]
 
-COOLDOWN = {
-    "default": {2: 3, 3: 6},
-    "APTUSDT": {2: 6, 3: 12},
-    "INJUSDT": {2: 4, 3: 8},
-    "BCHUSDT": {2: 4, 3: 8},
-}
+COOLDOWN = {}
+COOLDOWN["default"] = {2: 3, 3: 6}
+COOLDOWN["APTUSDT"] = {2: 6, 3: 12}
+COOLDOWN["INJUSDT"] = {2: 4, 3: 8}
+COOLDOWN["BCHUSDT"] = {2: 4, 3: 8}
 
-TRAIL_ENABLED = True
-TRAIL_TRIG_R = 1.3
-TRAIL_DIST_R = 0.8
-BE_OFFSET_R = 0.0
+TRAIL_TRIG = 1.3
+TRAIL_DIST = 0.8
 
-PARTIALS = {
-    "strong": [0.8, 1.5, 1.0, 40, 30],
-    "default": [0.7, 1.3, 1.0, 50, 25],
-    "weak": [0.5, 1.1, 0.8, 50, 25],
-}
+CFG_STRONG = (0.8, 1.5, 1.0, 40, 30)
+CFG_DEF = (0.7, 1.3, 1.0, 50, 25)
+CFG_WEAK = (0.5, 1.1, 0.8, 50, 25)
 
-WEAK = set(["SUIUSDT", "SOLUSDT", "APTUSDT", "BCHUSDT"])
+WEAK_SYMS = set()
+WEAK_SYMS.add("SUIUSDT")
+WEAK_SYMS.add("SOLUSDT")
+WEAK_SYMS.add("APTUSDT")
+WEAK_SYMS.add("BCHUSDT")
 
 RESEARCH_MODE = True
 
 
 def get_ms(sym):
-    if sym in MIN_SCORE_BY_SYMBOL:
-        return MIN_SCORE_BY_SYMBOL[sym]
-    return MIN_SCORE_BY_SYMBOL["default"]
+    if sym in MIN_SCORES:
+        return MIN_SCORES[sym]
+    return MIN_SCORES["default"]
 
 
 def get_cfg(sym, score):
     if score >= 95:
-        return PARTIALS["strong"]
-    if sym in WEAK:
-        return PARTIALS["weak"]
-    return PARTIALS["default"]
+        return CFG_STRONG
+    if sym in WEAK_SYMS:
+        return CFG_WEAK
+    return CFG_DEF
 
 
 def log(m):
@@ -91,93 +95,103 @@ def log(m):
 
 def ts_str(ms):
     try:
-        dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        dt = datetime.fromtimestamp(ms / 1000.0)
         return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
         return "N/A"
 
 
-def c_until(candles, ts):
-    return [c for c in candles if c["close_time"] < ts]
+def c_until(cs, ts):
+    out = []
+    for c in cs:
+        if c["close_time"] < ts:
+            out.append(c)
+    return out
 
 
-def active(trades, ts):
+def is_active(trades, ts):
     if not trades:
         return False
-    return trades[-1]["exit (_ts"] > ts
+    return trades[-1]["exit_ts"] > ts
 
 
-def pnlts_p(entry_ms, exit_p, - direction):
-    if direction == "L selfONG":
-        return (exit.last_p - entry) / entry * 100
-    return (entry - exit_p) / entry * 100
+def pnl_p(e, x, d):
+    if d == "LONG":
+        return (x - e) / e * 100.0
+    return (e - x) / e * 100.0
 
 
-def blend_pnl(entry, final_exit, direction,
-              p1d, p1e, p1p, p2d, p2e, p2p):
+def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
     w1 = 0.0
-    w2 = 0.0
     if p1d and p1e is not None:
         w1 = p1p / 100.0
+    w2 = 0.0
     if p2d and p2e is not None:
         w2 = p2p / 100.0
-    rem = max(0.0, 1.0 - w1 - w2)
-    total = 0.0
-    if w1 > 0:
-        total += pnl_p(entry, p1e, direction) * w1
-    if w2 > 0:
-        total += pnl_p(entry, p2e, direction) * w2
-    if rem > 0:
-        total += pnl_p(entry, final_exit, direction) * rem
-    return total
+    rw = 1.0 - w1 - w2
+    if rw < 0.0:
+        rw = 0.0
+    t = 0.0
+    if w1 > 0.0:
+        t = t + pnl_p(e, p1e, d) * w1
+    if w2 > 0.0:
+        t = t + pnl_p(e, p2e, d) * w2
+    if rw > 0.0:
+        t = t + pnl_p(e, fx, d) * rw
+    return t
 
 
 class CD:
     def __init__(self, sym):
         self.sym = sym
         self.n = 0
-        self.last_sl = None
-        self.cfg = COOLDOWN.get(sym, COOLDOWN["default"])
+        self.last = None
+        cfg = COOLDOWN.get(sym)
+        if cfg is None:
+            cfg = COOLDOWN["default"]
+        self.cfg = cfg
 
-    def on(self, rtype, ts_ms):
-        if self.last_sl is not None:
-            gap =_sl) / 3600000.0
-            if gap > 24 and self.n > 0:
-                self.n = 0
-                self.last_sl = None
-        if rtype in ("TP", "BE"):
-            self.n = 0
-            self.last_sl = None
-        elif rtype == "SL":
-            self.n += 1
+    def reset(self):
+        self.n = 0
+        self.last = None
+
+    def on(self, rt, ts):
+        if self.last is not None:
+            gap = (ts - self.last) / 3600000.0
+            if gap > 24.0 and self.n > 0:
+                self.reset()
+        if rt == "TP" or rt == "BE":
+            self.reset()
+        elif rt == "SL":
+            self.n = self.n + 1
             if self.n > 5:
                 self.n = 5
-            self.last_sl = ts_ms
+            self.last = ts
 
-    def ok(self, ts_ms):
+    def ok(self, ts):
         if self.n < 2:
             return True
-        if self.last_sl is None:
+        if self.last is None:
             return True
         h = None
-        keys = sorted(self.cfg.keys())
-        for k in keys:
+        ks = sorted(self.cfg.keys())
+        for k in ks:
             if self.n >= k:
                 h = self.cfg[k]
         if h is None:
             h = max(self.cfg.values())
-        el = (ts_ms - self.last_sl) / 3600000.0
+        el = (ts - self.last) / 3600000.0
         return el >= h
 
 
-def sim(trade, c5, start_ts, max_h, cfg, use_be, use_pt, use_trail):
+def sim(trade, c5, start, max_h, cfg):
     d = trade["direction"]
-    entry = float(trade["entry"])
+    e = float(trade["entry"])
     sl0 = float(trade["sl"])
     tp = float(trade["tp"])
-    risk = abs(entry - sl0)
-    if risk <= 0:
-        return ("ERROR", entry, start_ts, 0, 0.0, False)
+    risk = abs(e - sl0)
+    if risk <= 0.0:
+        return ("ERROR", e, start, 0, 0.0, False)
 
     p1r = cfg[0]
     p2r = cfg[1]
@@ -185,45 +199,51 @@ def sim(trade, c5, start_ts, max_h, cfg, use_be, use_pt, use_trail):
     p1p = cfg[3]
     p2p = cfg[4]
 
-    fill_max = start_ts + 12 * 5 * 60 * 1000
+    fill_max = start
+    fill_max = fill_max + 12 * 5 * 60 * 1000
     filled = False
     fts = None
+
     for c in c5:
-        if c["open_time"] < start_ts:
+        ot = c["open_time"]
+        if ot < start:
             continue
-        if c["open_time"] > fill_max:
+        if ot > fill_max:
             break
         if d == "LONG":
-            if c["low"] <= entry:
+            if c["low"] <= e:
                 filled = True
-                fts = c["open_time"]
+                fts = ot
                 break
         else:
-            if c["high"] >= entry:
+            if c["high"] >= e:
                 filled = True
-                fts = c["open_time"]
+                fts = ot
                 break
+
     if not filled:
-        return ("NO_FILL", entry, fill_max, 0, 0.0, False)
+        return ("NO_FILL", e, fill_max, 0, 0.0, False)
 
     sl = sl0
-    best = entry
+    best = e
     p1d = False
     p1e = None
     p2d = False
     p2e = None
     bem = False
 
-    deadline = fts + max_h * 3600 * 1000
+    dl = fts + max_h * 3600 * 1000
     last = None
     held = 0
 
     for c in c5:
-        if c["open_time"] < fts:
+        ot = c["open_time"]
+        if ot < fts:
             continue
-        if c["open_time"] > deadline:
+        if ot > dl:
             break
-        held += 1
+
+        held = held + 1
         last = c
         hi = c["high"]
         lo = c["low"]
@@ -236,98 +256,94 @@ def sim(trade, c5, start_ts, max_h, cfg, use_be, use_pt, use_trail):
             hsl = hi >= sl
 
         et = "SL"
-        if bem and abs(sl - entry) < risk * 0.05:
+        if bem:
+            diff = abs(sl - e)
+            lim = risk * 0.05
+            if diff < lim:
+                et = "BE"
+        elif d == "LONG" and sl > e:
             et = "BE"
-        elif d == "LONG" and sl > entry:
-            et = "BE"
-        elif d == "SHORT" and sl < entry:
+        elif d == "SHORT" and sl < e:
             et = "BE"
 
         if hsl and htp:
-            f = blend_pnl(entry, sl, d, p1d, p1e, p1p,
-                          p2d, p2e, p2p)
-            return (et, sl, c["open_time"], held, f,
-                    p1d or p2d)
+            f = blend(e, sl, d, p1d, p1e, p1p,
+                      p2d, p2e, p2p)
+            return (et, sl, ot, held, f, p1d or p2d)
+
         if hsl:
-            f = blend_pnl(entry, sl, d, p1d, p1e, p1p,
-                          p2d, p2e, p2p)
-            return (et, sl, c["open_time"], held, f,
-                    p1d or p2d)
+            f = blend(e, sl, d, p1d, p1e, p1p,
+                      p2d, p2e, p2p)
+            return (et, sl, ot, held, f, p1d or p2d)
+
         if htp:
-            f = blend_pnl(entry, tp, d, p1d, p1e, p1p,
-                          p2d, p2e, p2p)
-            return ("TP", tp, c["open_time"], held, f,
-                    p1d or p2d)
+            f = blend(e, tp, d, p1d, p1e, p1p,
+                      p2d, p2e, p2p)
+            return ("TP", tp, ot, held, f, p1d or p2d)
 
         if d == "LONG":
             if hi > best:
                 best = hi
-            mr = (best - entry) / risk
+            mr = (best - e) / risk
         else:
             if lo < best:
                 best = lo
-            mr = (entry - best) / risk
+            mr = (e - best) / risk
 
-        if use_pt and not p1d and mr >= p1r:
+        if not p1d and mr >= p1r:
             if d == "LONG":
-                p1e = entry + risk * p1r
+                p1e = e + risk * p1r
             else:
-                p1e = entry - risk * p1r
+                p1e = e - risk * p1r
             p1d = True
 
-        if use_pt and p1d and not p2d and mr >= p2r:
+        if p1d and not p2d and mr >= p2r:
             if d == "LONG":
-                p2e = entry + risk * p2r
+                p2e = e + risk * p2r
             else:
-                p2e = entry - risk * p2r
+                p2e = e - risk * p2r
             p2d = True
 
-        br = (not use_pt) or p1d
-        if use_be and br and not bem and mr >= be_r:
-            if use_pt:
-                off = BE_OFFSET_R * risk
-            else:
-                off = 0.0
+        if not bem and mr >= be_r:
             if d == "LONG":
-                nb = entry + off
-                if nb > sl:
-                    sl = nb
+                if e > sl:
+                    sl = e
                     bem = True
             else:
-                nb = entry - off
-                if nb < sl:
-                    sl = nb
+                if e < sl:
+                    sl = e
                     bem = True
 
-        if use_trail and TRAIL_ENABLED and mr >= TRAIL_TRIG_R:
+        if mr >= TRAIL_TRIG:
             if d == "LONG":
-                ns = best - risk * TRAIL_DIST_R
+                ns = best - risk * TRAIL_DIST
                 if ns > sl:
                     sl = ns
             else:
-                ns = best + risk * TRAIL_DIST_R
+                ns = best + risk * TRAIL_DIST
                 if ns < sl:
                     sl = ns
 
     if last is not None:
-        ep = last["close"]
-        f = blend_pnl(entry, ep, d, p1d, p1e, p1p,
-                      p2d, p2e, p2p)
-        return ("TIMEOUT", ep, last["open_time"], held, f,
-                p1d or p2d)
+        xp = last["close"]
+        f = blend(e, xp, d, p1d, p1e, p1p,
+                  p2d, p2e, p2p)
+        return ("TIMEOUT", xp, last["open_time"],
+                held, f, p1d or p2d)
 
-    return ("TIMEOUT", entry, start_ts, 0, 0.0, False)
+    return ("TIMEOUT", e, start, 0, 0.0, False)
 
 
 def run_one(sym, max_h):
     sym = _normalize_symbol(sym)
     ms = get_ms(sym)
-    log("Символ: " + sym + " (min_score=" + str(ms) + ")")
+    log("Символ: " + sym)
+    log("min_score=" + str(ms))
 
     banned = set()
     if not RESEARCH_MODE:
-        banned = set(BANNED_SYMBOLS)
-        banned.update(UNPROFITABLE_SYMBOLS)
+        banned = set(BANNED)
+        banned.update(UNPROF)
 
     if sym in banned:
         log("SKIP banned: " + sym)
@@ -340,10 +356,11 @@ def run_one(sym, max_h):
     c1 = get_klines("1m", BT_1M, sym)
 
     if not c1h:
-        log("Нет данных 1H")
+        log("Нет данных")
         return []
 
-    log("1H=" + str(len(c1h)) + " 5M=" + str(len(c5)))
+    log("1H=" + str(len(c1h)))
+    log("5M=" + str(len(c5)))
 
     if len(c1h) <= WARMUP:
         return []
@@ -356,7 +373,7 @@ def run_one(sym, max_h):
     for i in range(WARMUP, len(c1h)):
         ts = c1h[i]["open_time"]
 
-        if active(trades, ts):
+        if is_active(trades, ts):
             continue
         if not cdm.ok(ts):
             continue
@@ -367,33 +384,38 @@ def run_one(sym, max_h):
         cc1 = c_until(c1, ts)
         ccd1 = c_until(c1d, ts)
 
-        if len(cc15) < 60 or len(cc5) < 60:
+        if len(cc15) < 60:
+            continue
+        if len(cc5) < 60:
             continue
 
-        price = cc1[-1]["close"] if cc1 else cc1h[-1]["close"]
+        if cc1:
+            price = cc1[-1]["close"]
+        else:
+            price = cc1h[-1]["close"]
 
         try:
-            levels = find_major_liquidity(
+            lv = find_major_liquidity(
                 cc1h, price, 12, cc15, cc5, cc1)
         except Exception:
             continue
 
         try:
             d = get_1h_direction(cc1h)
-            sweep = None
+            sw = None
             if d != "NEUTRAL":
-                sweep = detect_sweep(
-                    cc1h, price, d, levels)
+                sw = detect_sweep(
+                    cc1h, price, d, lv)
             d1c = None
             if len(ccd1) >= 20:
                 try:
                     d1c = _analyze_d1_context(ccd1, price)
                 except Exception:
                     d1c = None
-            r = analyze(cc1h, cc15, cc5, price,
-                        levels, sweep, candles_1m=cc1,
-                        d1_context=d1c, fvgs=[],
-                        symbol=sym)
+            r = analyze(
+                cc1h, cc15, cc5, price, lv, sw,
+                candles_1m=cc1, d1_context=d1c,
+                fvgs=[], symbol=sym)
         except Exception:
             continue
 
@@ -417,44 +439,51 @@ def run_one(sym, max_h):
             "entry": float(e),
             "sl": float(s),
             "tp": float(t),
-            "rr": r.get("rr"),
             "score": score,
         }
 
         cfg = get_cfg(sym, score)
-        res = sim(trade, c5, ts, max_h, cfg,
-                  True, True, True)
-        rtype, ep, ets, held, pnl, ph = res
+        res = sim(trade, c5, ts, max_h, cfg)
+        rtype = res[0]
+        xp = res[1]
+        xts = res[2]
+        held = res[3]
+        pnl = res[4]
+        ph = res[5]
 
         if rtype == "NO_FILL":
             log("[" + str(i) + "] NO_FILL")
-            cdm.on("NO_FILL", ets)
+            cdm.on("NO_FILL", xts)
             continue
 
         trade["result"] = rtype
-        trade["exit_price"] = ep
-        trade["exit_ts"] = ets
+        trade["exit_price"] = xp
+        trade["exit_ts"] = xts
         trade["pnl"] = pnl
         trade["partial_hit"] = ph
 
         trades.append(trade)
-        cdm.on(rtype, ets)
+        cdm.on(rtype, xts)
 
-        tg = "P" if ph else " "
-        log("[" + str(i) + "] "
-            + trade["direction"] + " score="
-            + str(score) + " " + tg + " -> "
-            + rtype + " pnl="
-            + ("%+.2f%%" % pnl))
+        pt = "P" if ph else " "
+        pl = "%+.2f%%" % pnl
+        line = "[" + str(i) + "] "
+        line = line + trade["direction"] + " "
+        line = line + "score=" + str(score) + " "
+        line = line + pt + " -> "
+        line = line + rtype + " "
+        line = line + pl
+        log(line)
 
     return trades
 
 
 def rep(sym, trades):
-    print()
+    print("")
     print("=" * 70)
     print("ОТЧЁТ - " + sym)
     print("=" * 70)
+
     if not trades:
         print("Нет сделок.")
         return
@@ -464,33 +493,35 @@ def rep(sym, trades):
     be = 0
     to = 0
     ph = 0
+
     for t in trades:
-        if t["result"] == "TP":
-            tp += 1
-        elif t["result"] == "SL":
-            sl += 1
-        elif t["result"] == "BE":
-            be += 1
-        elif t["result"] == "TIMEOUT":
-            to += 1
+        rt = t["result"]
+        if rt == "TP":
+            tp = tp + 1
+        elif rt == "SL":
+            sl = sl + 1
+        elif rt == "BE":
+            be = be + 1
+        elif rt == "TIMEOUT":
+            to = to + 1
         if t.get("partial_hit"):
-            ph += 1
+            ph = ph + 1
 
     r = tp + sl
     if r > 0:
-        wr = tp / r * 100
+        wr = tp / r * 100.0
     else:
         wr = 0.0
 
     total = 0.0
     for t in trades:
-        total += t["pnl"]
+        total = total + t["pnl"]
 
     eq = 0.0
     peak = 0.0
     dd_max = 0.0
     for t in trades:
-        eq += t["pnl"]
+        eq = eq + t["pnl"]
         if eq > peak:
             peak = eq
         dd = peak - eq
@@ -508,21 +539,21 @@ def rep(sym, trades):
     print("Max DD:    " + ("%.2f%%" % (-dd_max)))
 
 
-def run_multi(max_h, symbols=None):
-    if symbols is None:
-        symbols = ALL_SYMBOLS
+def run_multi(max_h, syms):
+    mode = "RESEARCH"
+    if not RESEARCH_MODE:
+        mode = "PROD"
 
-    mode = "RESEARCH" if RESEARCH_MODE else "PROD"
-
-    print()
+    print("")
     print("#" * 70)
     print("### MULTI v9.18 [" + mode + "]")
     print("#" * 70)
-    print("### MIN_SCORE: " + str(MIN_SCORE_BY_SYMBOL))
+    print("### MIN_SCORE: " + str(MIN_SCORES))
     print("#" * 70)
 
     summary = []
-    for sym in symbols:
+
+    for sym in syms:
         try:
             trades = run_one(sym, max_h)
             rep(sym, trades)
@@ -533,34 +564,34 @@ def run_multi(max_h, symbols=None):
                 be = 0
                 to = 0
                 for t in trades:
-                    if t["result"] == "TP":
-                        tp += 1
-                    elif t["result"] == "SL":
-                        sl += 1
-                    elif t["result"] == "BE":
-                        be += 1
-                    elif t["result"] == "TIMEOUT":
-                        to += 1
+                    rt = t["result"]
+                    if rt == "TP":
+                        tp = tp + 1
+                    elif rt == "SL":
+                        sl = sl + 1
+                    elif rt == "BE":
+                        be = be + 1
+                    elif rt == "TIMEOUT":
+                        to = to + 1
                 r = tp + sl
                 if r > 0:
-                    wr = tp / r * 100
+                    wr = tp / r * 100.0
                 else:
                     wr = 0.0
                 pnl = 0.0
                 for t in trades:
-                    pnl += t["pnl"]
-                summary.append(
-                    (sym, len(trades), tp, sl, be, to,
-                     wr, pnl))
+                    pnl = pnl + t["pnl"]
+                row = (sym, len(trades), tp, sl, be, to, wr, pnl)
+                summary.append(row)
             else:
-                summary.append(
-                    (sym, 0, 0, 0, 0, 0, 0.0, 0.0))
-        except Exception as e:
-            print("[BT] " + sym + " FAILED: " + str(e))
-            summary.append(
-                (sym, 0, 0, 0, 0, 0, 0.0, 0.0))
+                row = (sym, 0, 0, 0, 0, 0, 0.0, 0.0)
+                summary.append(row)
+        except Exception as ex:
+            print("[BT] " + sym + " FAILED: " + str(ex))
+            row = (sym, 0, 0, 0, 0, 0, 0.0, 0.0)
+            summary.append(row)
 
-    print()
+    print("")
     print("=" * 78)
     print("СВОДКА v9.18 [" + mode + "]")
     print("=" * 78)
@@ -573,36 +604,49 @@ def run_multi(max_h, symbols=None):
     tpnl = 0.0
 
     for row in summary:
-        sym, cnt, tp, sl, be, to, wr, pnl = row
+        sym = row[0]
+        cnt = row[1]
+        tp = row[2]
+        sl = row[3]
+        be = row[4]
+        to = row[5]
+        wr = row[6]
+        pnl = row[7]
+
         ms = get_ms(sym)
-        line = (sym.ljust(10)
-                + " " + str(ms).ljust(3)
-                + " " + str(cnt).ljust(5)
-                + " " + str(tp).ljust(3)
-                + " " + str(sl).ljust(3)
-                + " " + str(be).ljust(3)
-                + " " + str(to).ljust(3)
-                + " " + ("%.1f" % wr).ljust(7)
-                + " " + ("%+.2f%%" % pnl))
+
+        line = sym.ljust(10)
+        line = line + " " + str(ms).ljust(3)
+        line = line + " " + str(cnt).ljust(5)
+        line = line + " " + str(tp).ljust(3)
+        line = line + " " + str(sl).ljust(3)
+        line = line + " " + str(be).ljust(3)
+        line = line + " " + str(to).ljust(3)
+        line = line + " " + ("%.1f" % wr).ljust(7)
+        line = line + " " + ("%+.2f%%" % pnl)
         print(line)
-        tt += cnt
-        ttp += tp
-        tsl += sl
-        tpnl += pnl
+
+        tt = tt + cnt
+        ttp = ttp + tp
+        tsl = tsl + sl
+        tpnl = tpnl + pnl
 
     print("-" * 78)
+
     r = ttp + tsl
     if r > 0:
-        twr = ttp / r * 100
+        twr = ttp / r * 100.0
     else:
         twr = 0.0
-    print("ИТОГО".ljust(15)
-          + str(tt).ljust(6)
-          + str(ttp).ljust(4)
-          + str(tsl).ljust(4)
-          + " " * 12
-          + ("%.1f" % twr).ljust(7)
-          + " " + ("%+.2f%%" % tpnl))
+
+    line = "ИТОГО".ljust(15)
+    line = line + str(tt).ljust(6)
+    line = line + str(ttp).ljust(4)
+    line = line + str(tsl).ljust(4)
+    line = line + " " * 12
+    line = line + ("%.1f" % twr).ljust(7)
+    line = line + " " + ("%+.2f%%" % tpnl)
+    print(line)
     print("=" * 78)
 
 
@@ -616,8 +660,7 @@ def main():
     p.add_argument("--symbols", default=None)
     p.add_argument("--research", action="store_true")
     p.add_argument("--prod", action="store_true")
-    p.add_argument("--min-score", action="append",
-                   default=[])
+    p.add_argument("--min-score", action="append", default=[])
     a = p.parse_args()
 
     if a.prod:
@@ -630,7 +673,7 @@ def main():
             parts = ov.split("=")
             sy = parts[0].strip().upper()
             va = int(parts[1])
-            MIN_SCORE_BY_SYMBOL[sy] = va
+            MIN_SCORES[sy] = va
         except Exception:
             print("[WARN] bad --min-score: " + ov)
 
@@ -641,10 +684,13 @@ def main():
         syms = None
         if a.symbols:
             syms = []
-            for s in a.symbols.split(","):
+            parts = a.symbols.split(",")
+            for s in parts:
                 s = s.strip().upper()
                 if s:
                     syms.append(s)
+        if syms is None:
+            syms = ALL_SYMS
         run_multi(a.max_hours, syms)
 
 
