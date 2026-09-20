@@ -1,5 +1,10 @@
 """
-Диагностический бэктест v9.8 — 40 дней, 10 монет, с session filter.
+TradeMind backtest v9.9 — NO_FILL simulation + 90 дней.
+
+Изменения vs v9.8:
+- NO_FILL: ждём исполнения лимитки до 1 часа
+- BT_LOOKBACK увеличен до 90 дней
+- Счётчик NO_FILL в сводке
 """
 
 import argparse
@@ -18,11 +23,11 @@ from market import (
 from strategy import analyze, get_1h_direction
 
 
-BT_LOOKBACK_D1 = 90
-BT_LOOKBACK_1H = 1000
-BT_LOOKBACK_15M = 4000
-BT_LOOKBACK_5M = 12000
-BT_LOOKBACK_1M = 200
+BT_LOOKBACK_D1 = 180
+BT_LOOKBACK_1H = 2160
+BT_LOOKBACK_15M = 8640
+BT_LOOKBACK_5M = 25920
+BT_LOOKBACK_1M = 500
 
 WARMUP_1H = 150
 DEFAULT_MAX_HOURS = 24
@@ -35,6 +40,9 @@ TRAILING_TRIGGER_R = 1.5
 TRAILING_DISTANCE_R = 1.0
 
 COOLDOWN_AFTER_SL_HOURS = 0
+
+# v8.6 NO_FILL: сколько свечей 5M ждём исполнения лимитки
+LIMIT_FILL_MAX_CANDLES = 12  # 1 час
 
 
 def log(msg):
@@ -133,6 +141,11 @@ def classify_reason(result, market_info):
 def simulate_trade(trade, candles_5m, start_ts, max_hours,
                    use_breakeven=False, use_partial_tp=False,
                    use_trailing=False):
+    """
+    v9.9: симуляция с NO_FILL.
+    Сначала ждём исполнения лимитки до LIMIT_FILL_MAX_CANDLES свечей 5M.
+    Если не исполнилась — возвращаем ("NO_FILL", ...).
+    """
     direction = trade["direction"]
     entry = float(trade["entry"])
     sl_initial = float(trade["sl"])
@@ -142,17 +155,43 @@ def simulate_trade(trade, candles_5m, start_ts, max_hours,
     if risk <= 0:
         return ("ERROR", entry, start_ts, 0, 0.0, False)
 
+    # === NO_FILL: ждём исполнения лимитки ===
+    fill_check_until_ts = start_ts + LIMIT_FILL_MAX_CANDLES * 5 * 60 * 1000
+    limit_filled = False
+    fill_ts = None
+
+    for c in candles_5m:
+        if c["open_time"] < start_ts:
+            continue
+        if c["open_time"] > fill_check_until_ts:
+            break
+
+        if direction == "LONG":
+            if c["low"] <= entry:
+                limit_filled = True
+                fill_ts = c["open_time"]
+                break
+        else:
+            if c["high"] >= entry:
+                limit_filled = True
+                fill_ts = c["open_time"]
+                break
+
+    if not limit_filled:
+        return ("NO_FILL", entry, fill_check_until_ts, 0, 0.0, False)
+
+    # === Лимитка исполнена — начинаем торговать с fill_ts ===
     current_sl = sl_initial
     best_price = entry
     partial_done = False
     partial_exit = None
 
-    deadline = start_ts + max_hours * 3600 * 1000
+    deadline = fill_ts + max_hours * 3600 * 1000
     last_seen = None
     held = 0
 
     for c in candles_5m:
-        if c["open_time"] < start_ts:
+        if c["open_time"] < fill_ts:
             continue
         if c["open_time"] > deadline:
             break
@@ -265,6 +304,8 @@ def run_backtest(symbol, max_hours,
     market_stats = Counter()
     near_misses = []
     cooldown_skips = 0
+    no_fill_count = 0
+    no_fill_by_coin = Counter()
 
     total = len(candles_1h) - WARMUP_1H
     log(f"Шагов: {total}")
@@ -381,6 +422,14 @@ def run_backtest(symbol, max_hours,
             use_trailing=use_trailing,
         )
 
+        # === NO_FILL: сделка не открылась ===
+        if res_type == "NO_FILL":
+            no_fill_count += 1
+            no_fill_by_coin[symbol] += 1
+            log(f"[{i:4}] {trade['direction']:5} "
+                f"entry={entry:.4f} -> NO_FILL (лимитка не исполнилась)")
+            continue
+
         trade["result"] = res_type
         trade["exit_price"] = exit_price
         trade["exit_ts"] = exit_ts
@@ -398,6 +447,8 @@ def run_backtest(symbol, max_hours,
 
     if cooldown_hours > 0:
         log(f"Cooldown skips: {cooldown_skips}")
+    if no_fill_count > 0:
+        log(f"NO_FILL: {no_fill_count}")
 
     near_misses.sort(key=lambda x: x["score"], reverse=True)
     diag = {
@@ -405,6 +456,8 @@ def run_backtest(symbol, max_hours,
         "exception_counter": exception_counter, "market_stats": market_stats,
         "near_misses": near_misses[:15],
         "cooldown_skips": cooldown_skips,
+        "no_fill_count": no_fill_count,
+        "no_fill_by_coin": dict(no_fill_by_coin),
     }
     return trades, diag
 
@@ -425,7 +478,7 @@ def print_report(symbol, trades, diag, use_breakeven=False,
 
     print()
     print("=" * 70)
-    print(f"ОТЧЁТ БЭКТЕСТА v9.8 - {symbol} [{label}]")
+    print(f"ОТЧЁТ БЭКТЕСТА v9.9 - {symbol} [{label}]")
     print("=" * 70)
 
     stage_counter = diag.get("stage_counter", Counter())
@@ -434,6 +487,7 @@ def print_report(symbol, trades, diag, use_breakeven=False,
     market_stats = diag.get("market_stats", Counter())
     near_misses = diag.get("near_misses", [])
     cooldown_skips = diag.get("cooldown_skips", 0)
+    no_fill_count = diag.get("no_fill_count", 0)
 
     total = sum(stage_counter.values())
     total_exc = sum(exception_counter.values())
@@ -443,6 +497,8 @@ def print_report(symbol, trades, diag, use_breakeven=False,
     print(f"Пропущено через exception: {total_exc}")
     if cooldown_hours > 0:
         print(f"Пропущено через cooldown: {cooldown_skips}")
+    if no_fill_count > 0:
+        print(f"NO_FILL (лимитка не исполнилась): {no_fill_count}")
     print()
 
     if exception_counter:
@@ -491,11 +547,11 @@ def print_report(symbol, trades, diag, use_breakeven=False,
 
     print()
     print("=" * 70)
-    print("СДЕЛКИ (READY)")
+    print("СДЕЛКИ (READY + filled)")
     print("=" * 70)
 
     if not trades:
-        print("Нет READY-сигналов.")
+        print("Нет исполненных сделок.")
         return
 
     tp = sum(1 for t in trades if t["result"] == "TP")
@@ -524,7 +580,7 @@ def print_report(symbol, trades, diag, use_breakeven=False,
         if dd > max_dd:
             max_dd = dd
 
-    print(f"Всего сделок: {len(trades)}")
+    print(f"Всего сделок (filled): {len(trades)}")
     print(f"  TP:      {tp}")
     print(f"  SL:      {sl}")
     print(f"  Timeout: {timeout}")
@@ -562,8 +618,8 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
 
     print()
     print("#" * 70)
-    print(f"### MULTI BACKTEST v9.8 - {label} - "
-          f"{len(symbols)} монет x 40 дней")
+    print(f"### MULTI BACKTEST v9.9 - {label} - "
+          f"{len(symbols)} монет x 90 дней")
     print("#" * 70)
 
     all_summary = []
@@ -582,6 +638,8 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
                          use_trailing=use_trailing,
                          cooldown_hours=cooldown_hours)
 
+            no_fill = diag.get("no_fill_count", 0)
+
             if trades:
                 tp = sum(1 for t in trades if t["result"] == "TP")
                 sl = sum(1 for t in trades if t["result"] == "SL")
@@ -589,19 +647,20 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
                 resolved = tp + sl
                 wr = tp / resolved * 100 if resolved else 0
                 pnl = sum(t["pnl"] for t in trades)
-                all_summary.append((sym, len(trades), tp, sl, timeout, wr, pnl))
+                all_summary.append((sym, len(trades), tp, sl, timeout, wr,
+                                    pnl, no_fill))
             else:
-                all_summary.append((sym, 0, 0, 0, 0, 0, 0.0))
+                all_summary.append((sym, 0, 0, 0, 0, 0, 0.0, no_fill))
         except Exception as exc:
             print(f"[BT] {sym} FAILED: {exc}", flush=True)
-            all_summary.append((sym, 0, 0, 0, 0, 0, 0.0))
+            all_summary.append((sym, 0, 0, 0, 0, 0, 0.0, 0))
 
     print()
     print("=" * 70)
-    print(f"СВОДКА - {label} (max_hours={max_hours}, 40 дней)")
+    print(f"СВОДКА - {label} (max_hours={max_hours}, 90 дней)")
     print("=" * 70)
-    print(f"{'Символ':<10}{'Сделок':<8}{'TP':<5}{'SL':<5}"
-          f"{'TO':<5}{'WinRate':<10}{'PnL':<10}")
+    print(f"{'Символ':<10}{'Filled':<8}{'NoFill':<8}{'TP':<5}{'SL':<5}"
+          f"{'TO':<5}{'WR':<8}{'PnL':<10}")
     print("-" * 70)
 
     total_trades = 0
@@ -609,23 +668,31 @@ def run_multi_backtest_with_hours(max_hours, use_breakeven=False,
     total_sl = 0
     total_to = 0
     total_pnl = 0.0
+    total_no_fill = 0
 
-    for sym, cnt, tp, sl, timeout, wr, pnl in all_summary:
-        print(f"{sym:<10}{cnt:<8}{tp:<5}{sl:<5}"
-              f"{timeout:<5}{wr:<10.1f}{pnl:+.2f}%")
+    for sym, cnt, tp, sl, timeout, wr, pnl, no_fill in all_summary:
+        print(f"{sym:<10}{cnt:<8}{no_fill:<8}{tp:<5}{sl:<5}"
+              f"{timeout:<5}{wr:<8.1f}{pnl:+.2f}%")
         total_trades += cnt
         total_tp += tp
         total_sl += sl
         total_to += timeout
         total_pnl += pnl
+        total_no_fill += no_fill
 
     print("-" * 70)
     resolved = total_tp + total_sl
     total_wr = total_tp / resolved * 100 if resolved else 0
-    print(f"{'ИТОГО':<10}{total_trades:<8}{total_tp:<5}{total_sl:<5}"
-          f"{total_to:<5}{total_wr:<10.1f}{total_pnl:+.2f}%")
+    print(f"{'ИТОГО':<10}{total_trades:<8}{total_no_fill:<8}"
+          f"{total_tp:<5}{total_sl:<5}{total_to:<5}"
+          f"{total_wr:<8.1f}{total_pnl:+.2f}%")
     print()
-    print(f"Всего сделок: {total_trades}")
+    print(f"Всего filled сделок: {total_trades}")
+    print(f"NO_FILL (лимитка не исполнилась): {total_no_fill}")
+    total_signals = total_trades + total_no_fill
+    if total_signals > 0:
+        fill_rate = total_trades / total_signals * 100
+        print(f"Fill rate: {fill_rate:.1f}%")
     print(f"  TP: {total_tp}  SL: {total_sl}  Timeout: {total_to}")
     print(f"Win rate: {total_wr:.1f}% (от {resolved} закрытых)")
     print(f"Sum PnL: {total_pnl:+.2f}%")
