@@ -1,11 +1,15 @@
 # ============================================================
-# TradeMind 7.8
+# TradeMind 7.9
 # market.py
 #
-# Изменения vs 7.7:
-# - MARKET_VERSION: 7.7 -> 7.8
-# - Добавлены _volume_strength и _impulse_strength
-# - calculate_strength учитывает объём и импульс свечи-свинга
+# Изменения vs 7.8:
+# - MARKET_VERSION: 7.8 -> 7.9
+# - Добавлен BACKTEST_LOOKBACK_DAYS
+# - Добавлена get_klines_days(interval, days, symbol) — пагинированная
+#   загрузка N дней истории через Binance klines (limit<=1000 за раз)
+# - Добавлена get_market_data_history(symbol, days) — снапшот рынка
+#   на N дней (для бэктеста)
+# - get_klines_history: ускорена загрузка, корректный endTime
 # ============================================================
 
 from __future__ import annotations
@@ -19,11 +23,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
-MARKET_VERSION = "7.8"
+MARKET_VERSION = "7.9"
 
 BASE_URL = "https://api.binance.com/api/v3"
 REQUEST_TIMEOUT = 10
 HTTP_RETRIES = 3
+
+# Дней истории для бэктеста (по умолчанию 40)
+BACKTEST_LOOKBACK_DAYS = 40
 
 
 COINS = {
@@ -117,7 +124,7 @@ def _get_session():
     if session is None:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "TradeMind/7.8",
+            "User-Agent": "TradeMind/7.9",
             "Accept": "application/json",
         })
         adapter = requests.adapters.HTTPAdapter(
@@ -218,6 +225,10 @@ def get_klines(interval, limit, symbol="SOLUSDT"):
 # ============================================================
 
 def get_klines_history(interval, limit, symbol="SOLUSDT"):
+    """
+    Пагинированная загрузка N свечей истории через Binance klines.
+    Ходит назад от текущего момента батчами по 1000 свечей.
+    """
     symbol = _normalize_symbol(symbol)
 
     if limit <= 1000:
@@ -262,9 +273,82 @@ def get_klines_history(interval, limit, symbol="SOLUSDT"):
         if len(batch) < batch_limit:
             break
 
-        time.sleep(0.1)
+        time.sleep(0.12)  # rate-limit friendly
 
     return all_candles[-limit:]
+
+
+# Сколько 1m-свечей в одном дне на каждом ТФ
+_TF_PER_DAY = {
+    "1d": 1,
+    "1h": 24,
+    "15m": 96,
+    "5m": 288,
+    "1m": 1440,
+}
+
+
+def get_klines_days(interval, days, symbol="SOLUSDT"):
+    """
+    Возвращает ~days*N свечей interval за последние N дней.
+    Пример: get_klines_days('1h', 40, 'BTCUSDT').
+    """
+    symbol = _normalize_symbol(symbol)
+    per_day = _TF_PER_DAY.get(interval, 24)
+    limit = int(days * per_day) + 20
+    return get_klines_history(interval, limit, symbol)
+
+
+def get_klines_range(interval, start_ms, end_ms, symbol="SOLUSDT"):
+    """
+    Возвращает свечи в диапазоне [start_ms, end_ms] (ms, UTC).
+    Полезно, если бэктест хочет точное окно.
+    """
+    symbol = _normalize_symbol(symbol)
+    all_candles = []
+    end_time = int(end_ms)
+
+    while True:
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": 1000,
+            "endTime": end_time,
+        }
+        try:
+            raw = _get("klines", params)
+        except Exception:
+            break
+
+        if not raw:
+            break
+
+        batch = []
+        for item in raw:
+            batch.append({
+                "open_time": int(item[0]),
+                "open": float(item[1]),
+                "high": float(item[2]),
+                "low": float(item[3]),
+                "close": float(item[4]),
+                "volume": float(item[5]),
+                "close_time": int(item[6]),
+            })
+
+        all_candles = batch + all_candles
+
+        first_time = batch[0]["open_time"]
+        if first_time <= int(start_ms):
+            break
+
+        end_time = first_time - 1
+        time.sleep(0.12)
+
+    all_candles = [
+        c for c in all_candles
+        if int(start_ms) <= c["open_time"] <= int(end_ms)
+    ]
+    return all_candles
 
 
 # ============================================================
@@ -565,9 +649,6 @@ def level_has_been_swept(level_price, level_type, candles, lookback):
 # ============================================================
 
 def _volume_strength(candles, index, lookback=20):
-    """
-    0..1 — насколько объём свечи выше среднего за lookback.
-    """
     if index < 0 or index >= len(candles):
         return 0.0
 
@@ -599,9 +680,6 @@ def _volume_strength(candles, index, lookback=20):
 
 
 def _impulse_strength(candles, index):
-    """
-    0..1 — насколько свеча шире соседних.
-    """
     if index < 0 or index >= len(candles):
         return 0.0
 
@@ -1100,6 +1178,63 @@ def get_market_data(symbol="SOLUSDT"):
                     "15m": candles_15m, "5m": candles_5m, "1m": candles_1m},
         "major_liquidity": major_liquidity, "d1_context": d1_context,
         "fvgs": fvgs, "updated_at": time.time(),
+        "market_version": MARKET_VERSION,
+    }
+
+
+# ============================================================
+# HISTORICAL SNAPSHOT (для бэктеста)
+# ============================================================
+
+def get_market_data_history(symbol="SOLUSDT", days=None):
+    """
+    Снапшот рынка за N дней (по умолчанию BACKTEST_LOOKBACK_DAYS).
+    Возвращает свечи 1h/15m/5m в одном формате с get_market_data.
+    Используется бэктестом для прогона стратегии по истории.
+    """
+    symbol = _normalize_symbol(symbol)
+    if days is None:
+        days = BACKTEST_LOOKBACK_DAYS
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_1h = ex.submit(get_klines_days, "1h", days + 5, symbol)
+        f_15m = ex.submit(get_klines_days, "15m", days + 5, symbol)
+        f_5m = ex.submit(get_klines_days, "5m", days + 5, symbol)
+        candles_1h = f_1h.result()
+        candles_15m = f_15m.result()
+        candles_5m = f_5m.result()
+
+    if not candles_5m:
+        return {
+            "symbol": symbol, "price": None, "days": days,
+            "candles_1h": candles_1h,
+            "candles_15m": candles_15m,
+            "candles_5m": candles_5m,
+            "candles_d1": [],
+            "candles_1m": [],
+            "major_liquidity": {"BSL": [], "SSL": []},
+            "d1_context": _analyze_d1_context([], 0),
+            "fvgs": [],
+            "market_version": MARKET_VERSION,
+        }
+
+    price = float(candles_5m[-1]["close"])
+    major_liquidity = _build_major_liquidity(candles_1h, candles_15m, price)
+    d1_context = _analyze_d1_context([], price)
+    fvgs = collect_fvgs(candles_5m, candles_15m, price)
+
+    return {
+        "symbol": symbol,
+        "price": price,
+        "days": days,
+        "candles_1h": candles_1h,
+        "candles_15m": candles_15m,
+        "candles_5m": candles_5m,
+        "candles_d1": [],
+        "candles_1m": [],
+        "major_liquidity": major_liquidity,
+        "d1_context": d1_context,
+        "fvgs": fvgs,
         "market_version": MARKET_VERSION,
     }
 
