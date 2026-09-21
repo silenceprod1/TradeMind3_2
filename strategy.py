@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.20.
-MIN_SCORE_READY = 85 (per-symbol фильтр в bot.py).
-v9.20: добавлен Anti-FOMO / Pullback Entry Filter.
+TradeMind strategy v9.21.
+v9.20: Anti-FOMO / Pullback Entry Filter.
+v9.21: D1 EMA Trend Filter (фильтр направления по дневной EMA).
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.20"
+STRATEGY_VERSION = "9.21"
 
 ALLOW_SHORT = True
 
@@ -103,6 +103,27 @@ ATR_PULLBACK_TOL_MULT = 0.30
 
 ANTI_FOMO_HARD_BLOCK = True
 
+# ---- v9.21: D1 EMA Trend Filter ----
+# Включает блокировку входов против тренда D1.
+#  NEUTRAL (цена в ±D1_TREND_BAND_PCT от EMA) — торгуем обе стороны.
+#  LONG  (цена > EMA + band) — блокируем SHORT.
+#  SHORT (цена < EMA - band) — блокируем LONG.
+ENABLE_D1_TREND_FILTER = True
+
+# Период EMA на D1.
+#  50  — работает с текущим LOOKBACK_D1=60 в market.py.
+#  200 — классический трендовый фильтр, но требует LOOKBACK_D1 >= 250.
+D1_EMA_PERIOD = 50
+
+# Ширина нейтральной зоны вокруг EMA в процентах.
+#  Слишком узкая → флэт будет уходить в LONG/SHORT и резать сделки.
+#  Слишком широкая → фильтр не работает.
+D1_TREND_BAND_PCT = 1.0
+
+
+# ============================================================
+# CANDLE HELPERS
+# ============================================================
 
 def _f(x):
     try:
@@ -202,6 +223,10 @@ def _dist_pct(a, b):
         return None
     return abs(a - b) / abs(b) * 100
 
+
+# ============================================================
+# INDICATORS
+# ============================================================
 
 def calculate_atr(candles, period=14):
     if not candles:
@@ -307,6 +332,53 @@ def _avg_atr(candles, fast=14, slow=50):
     return fv, sv
 
 
+# ============================================================
+# D1 EMA TREND FILTER (v9.21)
+# ============================================================
+
+def get_d1_trend_ema(candles_d1, price,
+                     period=None, band_pct=None):
+    """
+    Определяет тренд D1 по EMA.
+
+    Возвращает (trend, ema_value):
+      trend ∈ {"LONG", "SHORT", "NEUTRAL"}
+      ema_value — значение EMA или None
+
+    NEUTRAL — цена в пределах ±band_pct% от EMA (флэт).
+    Использует только закрытые свечи (без последней формирующейся).
+    """
+    if period is None:
+        period = D1_EMA_PERIOD
+    if band_pct is None:
+        band_pct = D1_TREND_BAND_PCT
+
+    if not candles_d1:
+        return "NEUTRAL", None
+    if len(candles_d1) < period + 2:
+        return "NEUTRAL", None
+
+    confirmed = candles_d1[:-1]
+    if len(confirmed) < period:
+        return "NEUTRAL", None
+
+    ema = calculate_ema(confirmed, period)
+    p = _f(price)
+    if ema is None or ema <= 0 or p is None:
+        return "NEUTRAL", None
+
+    d = (p - ema) / ema * 100.0
+    if d > band_pct:
+        return "LONG", ema
+    if d < -band_pct:
+        return "SHORT", ema
+    return "NEUTRAL", ema
+
+
+# ============================================================
+# SWINGS
+# ============================================================
+
 def _swing_high(c, i):
     if i < 2 or i >= len(c) - 2:
         return False
@@ -396,6 +468,10 @@ def get_higher_tf_direction(c1h, c1d=None, c1w=None):
     return get_1h_direction(c1h)
 
 
+# ============================================================
+# LEVELS
+# ============================================================
+
 def _level_price(l):
     if isinstance(l, dict):
         return _f(l.get("price"))
@@ -452,6 +528,10 @@ def _levels_for_dir(levels, direction):
     return res
 
 
+# ============================================================
+# FVG
+# ============================================================
+
 def is_inside_fvg(price, fvgs, direction,
                   tol=FVG_TOLERANCE_PCT):
     p = _f(price)
@@ -489,6 +569,10 @@ def compute_fvg_bonus(sweep, entry, fvgs, direction):
         b += FVG_ENTRY_BONUS
     return min(b, FVG_MAX_BONUS), si, ei
 
+
+# ============================================================
+# SWEEP
+# ============================================================
 
 def _sweep_cand_score(candle, level, depth):
     strength = _level_strength(level)
@@ -668,6 +752,10 @@ def find_sweep(candles_1h, major_levels, direction):
     return best
 
 
+# ============================================================
+# TREND ACTIVITY
+# ============================================================
+
 def measure_trend_activity(candles_1h, direction):
     if not candles_1h:
         return 0.0
@@ -687,6 +775,10 @@ def measure_trend_activity(candles_1h, direction):
         return direc / total
     return 0.0
 
+
+# ============================================================
+# 15M CONFIRMATION
+# ============================================================
 
 def _is_local_high_15m(c, i):
     if i < 1 or i >= len(c) - 1:
@@ -792,6 +884,10 @@ def confirmation_15m(candles_15m, sweep, direction):
         return fallback
     return False, None, None, False
 
+
+# ============================================================
+# 5M ILM
+# ============================================================
 
 def _is_local_high(c, i):
     if i < 1 or i >= len(c) - 1:
@@ -1007,6 +1103,10 @@ def detect_5m_ilm(candles_5m, sweep, direction,
     return True, best
 
 
+# ============================================================
+# ENTRY / SL / TP
+# ============================================================
+
 def calculate_entry(ilm, price, direction):
     if not ilm:
         return None
@@ -1156,13 +1256,11 @@ def validate_geometry(entry, sl, tp, direction):
     return False
 
 
+# ============================================================
+# ANTI-FOMO
+# ============================================================
+
 def check_anti_fomo(candles_15m, direction, price):
-    """
-    Anti-FOMO / Pullback Entry Filter.
-    Возвращает (allowed, reason, meta).
-    allowed=False — не входим здесь, ждём отката к EMA21 /
-    остывания осцилляторов.
-    """
     if not ENABLE_ANTI_FOMO:
         return True, "anti_fomo disabled", {}
 
@@ -1278,6 +1376,10 @@ def check_anti_fomo(candles_15m, direction, price):
     return True, "anti_fomo: no direction", meta
 
 
+# ============================================================
+# SCORE
+# ============================================================
+
 def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
            rr, maj_str, fvg_bonus):
     score = 0
@@ -1349,13 +1451,17 @@ def _apply_ready_promote(result):
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.20 promote: score={score} "
+            f"v9.21 promote: score={score} "
             f"trend={trend:.2f} bos={bos}"
         )
         result["_v910_promoted"] = True
         return result
     return result
 
+
+# ============================================================
+# SCENARIO
+# ============================================================
 
 def _analyze_scenario(c1h, c15, c5, price,
                       levels, direction, ctx_dir,
@@ -1391,6 +1497,8 @@ def _analyze_scenario(c1h, c15, c5, price,
         "anti_fomo": {},
         "anti_fomo_reason": "",
         "anti_fomo_ok": True,
+        "d1_trend_ema": "NEUTRAL",
+        "d1_ema_value": None,
     }
 
     if direction == "SHORT" and not ALLOW_SHORT:
@@ -1401,6 +1509,26 @@ def _analyze_scenario(c1h, c15, c5, price,
     if price is None or not c1h or not c15 or not c5:
         result["reason"] = "Недостаточно данных."
         return result
+
+    # ---- v9.21: D1 EMA Trend Filter ----
+    if ENABLE_D1_TREND_FILTER:
+        candles_d1 = None
+        if isinstance(d1_context, dict):
+            candles_d1 = d1_context.get("candles_d1")
+        d1_trend, d1_ema = get_d1_trend_ema(
+            candles_d1 or [], price)
+        result["d1_trend_ema"] = d1_trend
+        if d1_ema is not None:
+            result["d1_ema_value"] = round(d1_ema, 8)
+
+        if d1_trend != "NEUTRAL" and d1_trend != direction:
+            result["stage"] = "WAIT"
+            result["score"] = 5
+            result["reason"] = (
+                f"D1 EMA{D1_EMA_PERIOD}: {d1_trend} "
+                f"vs {direction} — contra"
+            )
+            return result
 
     trend = measure_trend_activity(c1h, direction)
     result["trend_activity"] = round(trend, 3)
@@ -1515,7 +1643,6 @@ def _analyze_scenario(c1h, c15, c5, price,
 
     result["geometry_valid"] = True
 
-    # ---- Anti-FOMO / Pullback Entry Filter ----
     fomo_ok, fomo_reason, fomo_meta = check_anti_fomo(
         c15, direction, price)
     result["anti_fomo_ok"] = fomo_ok
@@ -1604,6 +1731,10 @@ def _analyze_scenario(c1h, c15, c5, price,
     return result
 
 
+# ============================================================
+# MAIN ANALYZE
+# ============================================================
+
 def analyze(candles_1h, candles_15m, candles_5m,
             current_price, major_levels=None,
             sweep=None, order_flow=None,
@@ -1646,6 +1777,8 @@ def analyze(candles_1h, candles_15m, candles_5m,
         "anti_fomo": {},
         "anti_fomo_reason": "",
         "anti_fomo_ok": True,
+        "d1_trend_ema": "NEUTRAL",
+        "d1_ema_value": None,
     }
 
     if price is None:
@@ -1669,6 +1802,14 @@ def analyze(candles_1h, candles_15m, candles_5m,
 
     base["long"] = lr
     base["short"] = sr
+
+    # Прокидываем D1 EMA-инфо с лучшего сценария
+    if lr.get("d1_trend_ema") != "NEUTRAL":
+        base["d1_trend_ema"] = lr.get("d1_trend_ema")
+        base["d1_ema_value"] = lr.get("d1_ema_value")
+    elif sr.get("d1_trend_ema") != "NEUTRAL":
+        base["d1_trend_ema"] = sr.get("d1_trend_ema")
+        base["d1_ema_value"] = sr.get("d1_ema_value")
 
     if ctx_dir == "NEUTRAL":
         if lr.get("score", 0) >= sr.get("score", 0):
@@ -1708,6 +1849,8 @@ def analyze(candles_1h, candles_15m, candles_5m,
             "anti_fomo": best.get("anti_fomo", {}),
             "anti_fomo_reason": best.get("anti_fomo_reason", ""),
             "anti_fomo_ok": best.get("anti_fomo_ok", True),
+            "d1_trend_ema": best.get("d1_trend_ema", "NEUTRAL"),
+            "d1_ema_value": best.get("d1_ema_value"),
         })
         return base
 
@@ -1817,6 +1960,8 @@ def analyze(candles_1h, candles_15m, candles_5m,
             "anti_fomo": chosen.get("anti_fomo", {}),
             "anti_fomo_reason": chosen.get("anti_fomo_reason", ""),
             "anti_fomo_ok": chosen.get("anti_fomo_ok", True),
+            "d1_trend_ema": chosen.get("d1_trend_ema", "NEUTRAL"),
+            "d1_ema_value": chosen.get("d1_ema_value"),
         })
     base["context_direction"] = ctx_dir
     return base
@@ -1847,12 +1992,16 @@ __all__ = [
     "ATR_EXTENSION_MULT",
     "ATR_PULLBACK_TOL_MULT",
     "ANTI_FOMO_HARD_BLOCK",
+    "ENABLE_D1_TREND_FILTER",
+    "D1_EMA_PERIOD",
+    "D1_TREND_BAND_PCT",
     "calculate_atr",
     "calculate_ema",
     "calculate_rsi",
     "calculate_stochastic",
     "get_1h_direction",
     "get_higher_tf_direction",
+    "get_d1_trend_ema",
     "measure_trend_activity",
     "find_sweep",
     "confirmation_15m",
