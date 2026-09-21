@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.20.7.
+TradeMind bot v9.20.8.
 v9.20.6: ручной getUpdates вместо updater.start_polling().
 v9.20.7: команда /backtest — запуск бэктеста из Telegram.
+v9.20.8: /backtest пишет прогресс в логи BotHost (tee stdout) 
+         и отправляет отчёт .txt-файлом.
 """
 
 import asyncio
@@ -12,6 +14,7 @@ import json
 import os
 import signal
 import struct
+import sys
 import threading
 import time
 import uuid
@@ -63,9 +66,8 @@ BACKTEST_SYMBOL = "INJUSDT"
 BACKTEST_MULTI = True
 BACKTEST_MAX_HOURS = 24
 
-# v9.20.7: команда /backtest из Telegram
 BACKTEST_COMMAND_ENABLED = True
-BACKTEST_DAYS = 40
+BACKTEST_DAYS = 14
 
 TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
@@ -99,6 +101,14 @@ COINS = {
     "APT": "APTUSDT",
     "SUI": "SUIUSDT",
     "INJ": "INJUSDT",
+}
+
+# v9.20.8: сокращённый список для бэктеста,
+# чтобы не убить контейнер BotHost по памяти.
+BACKTEST_COINS = {
+    "BTC": "BTCUSDT",
+    "INJ": "INJUSDT",
+    "SUI": "SUIUSDT",
 }
 
 MIN_SCORE_MAP = {
@@ -663,7 +673,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.20.7</b>",
+        "🧠 <b>TRADEMIND v9.20.8</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -714,7 +724,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.20.7</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.20.8</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -1874,7 +1884,7 @@ async def broadcast_pullback(app, coin, result):
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
-# --- BACKTEST RUNNER (v9.20.7) ---
+# --- BACKTEST RUNNER (v9.20.8) ---
 
 async def backtest_cmd(update, context):
     if not BACKTEST_COMMAND_ENABLED:
@@ -1892,23 +1902,51 @@ async def backtest_cmd(update, context):
     await update.message.reply_text(
         f"⏳ <b>ЗАПУСК БЭКТЕСТА</b>\n\n"
         f"📅 Период: <b>{BACKTEST_DAYS} дней</b>\n"
-        f"💠 Монет: <b>{len(COINS)}</b>\n\n"
-        f"Загрузка истории с Binance + прогон.\n"
-        f"Обычно занимает <b>5–10 минут</b>.\n\n"
-        f"Результат придёт отдельным сообщением.",
+        f"💠 Монет: <b>{len(BACKTEST_COINS)}</b>\n\n"
+        f"Ход прогона — в логах BotHost.\n"
+        f"Отчёт придёт <b>.txt-файлом</b>.",
         parse_mode="HTML")
 
     def _run_sync():
+        class Tee:
+            def __init__(self, *streams):
+                self.streams = streams
+
+            def write(self, s):
+                for st in self.streams:
+                    try:
+                        st.write(s)
+                        st.flush()
+                    except Exception:
+                        pass
+
+            def flush(self):
+                for st in self.streams:
+                    try:
+                        st.flush()
+                    except Exception:
+                        pass
+
         buf = io.StringIO()
         try:
+            real_stdout = sys.__stdout__
+        except Exception:
+            real_stdout = sys.stdout
+        tee = Tee(real_stdout, buf)
+
+        try:
             import backtest as bt_module
-            # даём модулю наш DAYS, если он читает из константы
             try:
                 bt_module.DAYS = BACKTEST_DAYS
             except Exception:
                 pass
+            try:
+                # если в backtest.py есть COINS — подменяем
+                bt_module.COINS = dict(BACKTEST_COINS)
+            except Exception:
+                pass
 
-            with contextlib.redirect_stdout(buf):
+            with contextlib.redirect_stdout(tee):
                 if hasattr(bt_module, "main"):
                     bt_module.main()
                 elif hasattr(bt_module, "run_multi"):
@@ -1917,11 +1955,15 @@ async def backtest_cmd(update, context):
                     bt_module.run_all()
                 else:
                     raise RuntimeError(
-                        "backtest.py: нет функции main/run_multi/run_all")
+                        "backtest.py: нет main/run_multi/run_all")
         except Exception as e:
             import traceback
-            buf.write(f"\n\n❌ ОШИБКА БЭКТЕСТА: {e}\n")
-            buf.write(traceback.format_exc())
+            tb = traceback.format_exc()
+            try:
+                tee.write(
+                    f"\n\n❌ ОШИБКА БЭКТЕСТА: {e}\n{tb}\n")
+            except Exception:
+                pass
         return buf.getvalue()
 
     try:
@@ -1932,7 +1974,6 @@ async def backtest_cmd(update, context):
     if not report:
         report = "(пусто)"
 
-    # сохраним в файл — на случай обрезки в Telegram
     try:
         with open("backtest_report.txt", "w",
                   encoding="utf-8") as f:
@@ -1943,31 +1984,30 @@ async def backtest_cmd(update, context):
     header = (
         f"✅ <b>БЭКТЕСТ ЗАВЕРШЁН</b>\n"
         f"📅 {BACKTEST_DAYS} дней\n"
-        f"💠 {len(COINS)} монет\n"
+        f"💠 {len(BACKTEST_COINS)} монет\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
     )
-    await update.message.reply_text(
-        header, parse_mode="HTML")
 
-    # Отправляем отчёт кусками (лимит TG 4096)
-    CHUNK = 3500
-    total = len(report)
-    sent = 0
-    while sent < total:
-        piece = report[sent:sent + CHUNK]
-        sent += CHUNK
+    try:
+        fbytes = io.BytesIO(report.encode("utf-8"))
+        fbytes.seek(0)
+        await update.message.reply_document(
+            document=InputFile(
+                fbytes,
+                filename="backtest_report.txt"),
+            caption=header,
+            parse_mode="HTML")
+    except Exception as e:
+        print("BACKTEST SEND FILE ERR:", e, flush=True)
         try:
+            preview = report[:3500]
             await update.message.reply_text(
-                f"<pre>{escape(piece)}</pre>",
+                header + f"<pre>{escape(preview)}</pre>"
+                + ("\n\n(см. backtest_report.txt на сервере)"
+                   if len(report) > 3500 else ""),
                 parse_mode="HTML")
-        except Exception as e:
-            print("BACKTEST SEND ERR:", e)
-            break
-        await asyncio.sleep(0.5)
-
-    await update.message.reply_text(
-        "📎 Полный отчёт: <code>backtest_report.txt</code>",
-        parse_mode="HTML")
+        except Exception as e2:
+            print("BACKTEST SEND TEXT ERR:", e2, flush=True)
 
 
 # --- PNG ---
@@ -2369,7 +2409,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.20.7</b>\n\n"
+        f"🎯 <b>MODEL 9.20.8</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2383,7 +2423,8 @@ async def status_cmd(update, context):
         f"💰 Partial: <b>{pt}</b>\n"
         f"❄️ Cooldown: <b>{cd}</b>\n"
         f"📈 SHORT: <b>{sh}</b>\n\n"
-        f"🧪 Бэктест: /backtest\n\n"
+        f"🧪 Бэктест: /backtest\n"
+        f"   ({BACKTEST_DAYS}d × {len(BACKTEST_COINS)} монет)\n\n"
         f"🕐 Работаем 24/7"
     )
     await update.message.reply_text(
@@ -2840,7 +2881,8 @@ async def callbacks(update, context):
             f"Partial: <b>{pt}</b>\n"
             f"Cooldown: <b>{cd}</b>\n"
             f"SHORT: <b>{sh}</b>\n\n"
-            f"🧪 Бэктест: /backtest"
+            f"🧪 Бэктест: /backtest\n"
+            f"   ({BACKTEST_DAYS}d × {len(BACKTEST_COINS)} монет)"
         )
         await edit_query(query, text,
                          dashboard_keyboard())
@@ -2875,7 +2917,7 @@ async def post_init(application):
         ("active", "Активные сделки"),
         ("journal", "Журнал"),
         ("status", "Статус"),
-        ("backtest", "Запустить бэктест 40 дней"),
+        ("backtest", "Запустить бэктест"),
         ("subscribe", "Вкл увед"),
         ("unsubscribe", "Выкл увед"),
     ]
