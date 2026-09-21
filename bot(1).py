@@ -1,18 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.20.6.
-Fix: BE после P1 + Telegram-уведомления о P1/P2/BE.
-v9.20: обработка WAIT_PULLBACK (Anti-FOMO / Pullback Entry Filter).
-v9.20.1: Telegram-уведомления о WAIT_PULLBACK.
-v9.20.2: чистое завершение monitor-таска, рестарт-обёртка.
-v9.20.3: логирование SIGTERM/SIGINT.
-v9.20.4: webhook-режим для BotHost.
-v9.20.5: устойчивый polling — Conflict НЕ убивает процесс.
-v9.20.6: ручной getUpdates вместо updater.start_polling()
-         (PTB внутри себя ре-раизит Conflict и убивает процесс).
+TradeMind bot v9.20.7.
+v9.20.6: ручной getUpdates вместо updater.start_polling().
+v9.20.7: команда /backtest — запуск бэктеста из Telegram.
 """
 
 import asyncio
+import contextlib
 import io
 import json
 import os
@@ -68,6 +62,10 @@ RUN_BACKTEST_ON_START = False
 BACKTEST_SYMBOL = "INJUSDT"
 BACKTEST_MULTI = True
 BACKTEST_MAX_HOURS = 24
+
+# v9.20.7: команда /backtest из Telegram
+BACKTEST_COMMAND_ENABLED = True
+BACKTEST_DAYS = 40
 
 TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
@@ -665,7 +663,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.20.6</b>",
+        "🧠 <b>TRADEMIND v9.20.7</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -716,7 +714,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.20.6</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.20.7</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -1876,6 +1874,102 @@ async def broadcast_pullback(app, coin, result):
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+# --- BACKTEST RUNNER (v9.20.7) ---
+
+async def backtest_cmd(update, context):
+    if not BACKTEST_COMMAND_ENABLED:
+        await update.message.reply_text(
+            "❌ Бэктест отключён в настройках.")
+        return
+
+    if context.application.bot_data.get("backtest_running"):
+        await update.message.reply_text(
+            "⏳ Бэктест уже выполняется. Подожди.")
+        return
+
+    context.application.bot_data["backtest_running"] = True
+
+    await update.message.reply_text(
+        f"⏳ <b>ЗАПУСК БЭКТЕСТА</b>\n\n"
+        f"📅 Период: <b>{BACKTEST_DAYS} дней</b>\n"
+        f"💠 Монет: <b>{len(COINS)}</b>\n\n"
+        f"Загрузка истории с Binance + прогон.\n"
+        f"Обычно занимает <b>5–10 минут</b>.\n\n"
+        f"Результат придёт отдельным сообщением.",
+        parse_mode="HTML")
+
+    def _run_sync():
+        buf = io.StringIO()
+        try:
+            import backtest as bt_module
+            # даём модулю наш DAYS, если он читает из константы
+            try:
+                bt_module.DAYS = BACKTEST_DAYS
+            except Exception:
+                pass
+
+            with contextlib.redirect_stdout(buf):
+                if hasattr(bt_module, "main"):
+                    bt_module.main()
+                elif hasattr(bt_module, "run_multi"):
+                    bt_module.run_multi()
+                elif hasattr(bt_module, "run_all"):
+                    bt_module.run_all()
+                else:
+                    raise RuntimeError(
+                        "backtest.py: нет функции main/run_multi/run_all")
+        except Exception as e:
+            import traceback
+            buf.write(f"\n\n❌ ОШИБКА БЭКТЕСТА: {e}\n")
+            buf.write(traceback.format_exc())
+        return buf.getvalue()
+
+    try:
+        report = await asyncio.to_thread(_run_sync)
+    finally:
+        context.application.bot_data["backtest_running"] = False
+
+    if not report:
+        report = "(пусто)"
+
+    # сохраним в файл — на случай обрезки в Telegram
+    try:
+        with open("backtest_report.txt", "w",
+                  encoding="utf-8") as f:
+            f.write(report)
+    except Exception:
+        pass
+
+    header = (
+        f"✅ <b>БЭКТЕСТ ЗАВЕРШЁН</b>\n"
+        f"📅 {BACKTEST_DAYS} дней\n"
+        f"💠 {len(COINS)} монет\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    await update.message.reply_text(
+        header, parse_mode="HTML")
+
+    # Отправляем отчёт кусками (лимит TG 4096)
+    CHUNK = 3500
+    total = len(report)
+    sent = 0
+    while sent < total:
+        piece = report[sent:sent + CHUNK]
+        sent += CHUNK
+        try:
+            await update.message.reply_text(
+                f"<pre>{escape(piece)}</pre>",
+                parse_mode="HTML")
+        except Exception as e:
+            print("BACKTEST SEND ERR:", e)
+            break
+        await asyncio.sleep(0.5)
+
+    await update.message.reply_text(
+        "📎 Полный отчёт: <code>backtest_report.txt</code>",
+        parse_mode="HTML")
+
+
 # --- PNG ---
 
 def png_chunk(ctype, data):
@@ -2275,7 +2369,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.20.6</b>\n\n"
+        f"🎯 <b>MODEL 9.20.7</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2289,6 +2383,7 @@ async def status_cmd(update, context):
         f"💰 Partial: <b>{pt}</b>\n"
         f"❄️ Cooldown: <b>{cd}</b>\n"
         f"📈 SHORT: <b>{sh}</b>\n\n"
+        f"🧪 Бэктест: /backtest\n\n"
         f"🕐 Работаем 24/7"
     )
     await update.message.reply_text(
@@ -2744,7 +2839,8 @@ async def callbacks(update, context):
             f"Trail: <b>{tr}</b>\n"
             f"Partial: <b>{pt}</b>\n"
             f"Cooldown: <b>{cd}</b>\n"
-            f"SHORT: <b>{sh}</b>"
+            f"SHORT: <b>{sh}</b>\n\n"
+            f"🧪 Бэктест: /backtest"
         )
         await edit_query(query, text,
                          dashboard_keyboard())
@@ -2779,6 +2875,7 @@ async def post_init(application):
         ("active", "Активные сделки"),
         ("journal", "Журнал"),
         ("status", "Статус"),
+        ("backtest", "Запустить бэктест 40 дней"),
         ("subscribe", "Вкл увед"),
         ("unsubscribe", "Выкл увед"),
     ]
@@ -2826,14 +2923,9 @@ async def post_shutdown(application):
         print("[SHUTDOWN] no monitor task to stop", flush=True)
 
 
-# --- STURDY POLLING (v9.20.6) ---
+# --- STURDY POLLING ---
 
 async def _run_polling_forever(app):
-    """
-    v9.20.6: ручной polling через bot.get_updates().
-    Любой Conflict (второй инстанс) ловится здесь,
-    процесс НЕ падает, PTB-внутренний ретрай-луп не задействован.
-    """
     print("[POLLING] initialize...", flush=True)
     try:
         await app.initialize()
@@ -2854,9 +2946,6 @@ async def _run_polling_forever(app):
         await app.start()
     print("[POLLING] app started", flush=True)
 
-    # Помечаем updater как running, чтобы app.process_update
-    # корректно прогонял апдейты через хендлеры, но
-    # НЕ вызываем updater.start_polling() — он ре-раизит Conflict.
     try:
         if app.updater and not app.updater.running:
             app.updater._running = True
@@ -2907,7 +2996,6 @@ async def _run_polling_forever(app):
             raise
 
         except telegram.error.TimedOut:
-            # нормально для long polling
             continue
 
         except telegram.error.NetworkError as e:
@@ -2963,6 +3051,7 @@ def main():
         ("active", active_cmd),
         ("journal", journal_cmd),
         ("status", status_cmd),
+        ("backtest", backtest_cmd),
         ("subscribe", sub_cmd),
         ("unsubscribe", unsub_cmd),
     ]
