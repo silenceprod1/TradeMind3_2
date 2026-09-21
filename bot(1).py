@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.19.3.
+TradeMind bot v9.20.1.
 Fix: BE после P1 + Telegram-уведомления о P1/P2/BE.
+v9.20: обработка WAIT_PULLBACK (Anti-FOMO / Pullback Entry Filter).
+v9.20.1: Telegram-уведомления о WAIT_PULLBACK ("ждём откат").
 """
 
 import asyncio
@@ -63,7 +65,7 @@ TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
 TRAILING_DISTANCE_R = 0.8
 
-# v9.19.3: BE срабатывает только после partial_1
+# v9.20.1: BE срабатывает только после partial_1
 BREAKEVEN_TRIGGER_R = 0.7
 PARTIAL_TP_ENABLED = True
 PARTIAL_TP_TRIGGER_R = 0.7
@@ -80,6 +82,10 @@ COOLDOWN_AFTER_TP_HOURS = 0
 
 NOTIFICATION_DEDUP_HOURS = 3
 NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
+
+# v9.20.1: уведомления о "сигнал готов, но ждём откат"
+PULLBACK_NOTIF_ENABLED = True
+PULLBACK_NOTIF_DEDUP_HOURS = 1
 
 COINS = {
     "BTC": "BTCUSDT",
@@ -301,13 +307,16 @@ def dir_icon(d):
 
 STAGE_ICONS = {
     "READY": "🟢", "SWEPT": "🟠",
-    "15M_CONFIRMED": "🟡", "WAIT": "⏳",
+    "15M_CONFIRMED": "🟡",
+    "WAIT_PULLBACK": "🧲",
+    "WAIT": "⏳",
 }
 
 STAGE_TEXTS = {
     "READY": "🟢 МОЖНО ВХОДИТЬ",
     "SWEPT": "🟠 SWEEP",
     "15M_CONFIRMED": "🟡 15M CONFIRMED",
+    "WAIT_PULLBACK": "🧲 ANTI-FOMO: ЖДЁМ ОТКАТ",
     "WAIT": "⏳ ОЖИДАНИЕ",
 }
 
@@ -395,6 +404,32 @@ def fvgs_text(fvgs, cur, limit=4):
     return "— нет незакрытых зон"
 
 
+def anti_fomo_text(result):
+    """v9.20: строка про Anti-FOMO для карточки монеты."""
+    ok = result.get("anti_fomo_ok", True)
+    meta = result.get("anti_fomo") or {}
+    reason = result.get("anti_fomo_reason") or ""
+
+    if ok:
+        return ""
+
+    rsi = meta.get("rsi_15m")
+    stoch = meta.get("stoch_k_15m")
+    ema = meta.get("ema21_15m")
+
+    lines = ["", "🧲 <b>ANTI-FOMO</b>"]
+    if rsi is not None:
+        lines.append(f"RSI 15M: <b>{rsi:.1f}</b>")
+    if stoch is not None:
+        lines.append(f"Stoch 15M: <b>{stoch:.1f}</b>")
+    if ema is not None:
+        lines.append(
+            f"EMA21 15M: <b>{format_price(ema)}</b>")
+    if reason:
+        lines.append(f"ℹ️ {escape(str(reason))}")
+    return "\n".join(lines)
+
+
 # --- NOTIFICATION DEDUP ---
 
 def _entry_bucket(entry, tol=None):
@@ -431,6 +466,28 @@ def _notif_mark(state, coin, d, entry, sid):
         "entry_bucket": _entry_bucket(entry),
         "setup_id": sid,
         "entry": float(entry) if entry else None,
+        "ts": time.time(),
+    }
+
+
+def _pb_is_dup(state, coin, direction):
+    key = f"{coin}|PB"
+    prev = state.get(key)
+    if not isinstance(prev, dict):
+        return False
+    if prev.get("direction") != direction:
+        return False
+    ts = prev.get("ts", 0)
+    if (time.time() - ts) / 3600.0 >= PULLBACK_NOTIF_DEDUP_HOURS:
+        return False
+    return True
+
+
+def _pb_mark(state, coin, direction, reason):
+    key = f"{coin}|PB"
+    state[key] = {
+        "direction": direction,
+        "reason": reason or "",
         "ts": time.time(),
     }
 
@@ -560,6 +617,7 @@ def dashboard_message(results, chat_id=None):
     ready = 0
     swept = 0
     confirmed = 0
+    pullback = 0
     waiting = 0
     active = 0
     if chat_id is not None:
@@ -573,6 +631,8 @@ def dashboard_message(results, chat_id=None):
             swept += 1
         elif s == "15M_CONFIRMED":
             confirmed += 1
+        elif s == "WAIT_PULLBACK":
+            pullback += 1
         else:
             waiting += 1
 
@@ -581,7 +641,7 @@ def dashboard_message(results, chat_id=None):
         cd_label = "OFF"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.19.3</b>",
+        "🧠 <b>TRADEMIND v9.20.1</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         "",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -589,6 +649,7 @@ def dashboard_message(results, chat_id=None):
         f"🟢 READY: <b>{ready}</b>",
         f"🟠 SWEEP: <b>{swept}</b>",
         f"🟡 15M: <b>{confirmed}</b>",
+        f"🧲 PULLBACK: <b>{pullback}</b>",
         f"⏳ WAIT: <b>{waiting}</b>",
         f"📌 ACTIVE: <b>{active}</b>",
         "",
@@ -630,7 +691,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.19.3</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.20.1</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -641,6 +702,9 @@ def dashboard_message(results, chat_id=None):
         f"💰 P2: {PARTIAL_TP_2_TRIGGER_R}R"
         f"/{PARTIAL_TP_2_PERCENT}%",
         f"🛡 BE: {BREAKEVEN_TRIGGER_R}R (после P1)",
+        "",
+        f"🧲 Anti-FOMO: <b>ON</b>",
+        f"⚡ Pullback-увед: <b>ON</b>",
         "",
         f"🎯 Trail: <b>{tr_label}</b>",
         f"📈 SHORT: <b>{sh_label}</b>",
@@ -708,6 +772,7 @@ def checklist_text(result):
 
     stage_rank = {"WAIT": 0, "SWEPT": 1,
                   "15M_CONFIRMED": 2,
+                  "WAIT_PULLBACK": 2,
                   "READY": 3}.get(stage, 0)
 
     bos_tag = " + BOS" if bos else ""
@@ -758,6 +823,12 @@ def checklist_text(result):
         else:
             lines.append("")
             lines.append("🎯 Ждём 5M ILM")
+    elif stage == "WAIT_PULLBACK":
+        lines.extend([
+            "",
+            "🧲 Сетап валиден, но рынок перегрет",
+            "🎯 Ждём откат к EMA21 / остывание RSI/Stoch",
+        ])
     elif stage == "READY":
         lines.append("")
         lines.append("🎯 <b>READY</b>")
@@ -803,6 +874,13 @@ def coin_message(coin, result):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         checklist_text(result),
+    ])
+
+    fomo_block = anti_fomo_text(result)
+    if fomo_block:
+        lines.append(fomo_block)
+
+    lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "💧 <b>MAJOR LIQUIDITY</b>",
@@ -861,7 +939,7 @@ def coin_message(coin, result):
             ])
 
     reason = result.get("reason")
-    if reason:
+    if reason and stage != "WAIT_PULLBACK":
         lines.extend(["", f"ℹ️ {escape(str(reason))}"])
 
     return "\n".join(lines)
@@ -1058,7 +1136,7 @@ def close_trade(trade, exit_price, rtype):
 def apply_trailing(trade, cur_price):
     """
     Возвращает список событий: [("P1", price), ("P2", price), ("BE", price)]
-    v9.19.3: BE срабатывает ТОЛЬКО после P1.
+    v9.20.1: BE срабатывает ТОЛЬКО после P1.
     """
     events = []
 
@@ -1221,6 +1299,55 @@ def event_notify_message(trade, event_type, price):
             f"📊 PnL сейчас: <b>{pnl_text}</b>"
         )
     return ""
+
+
+def pullback_message(coin, result):
+    d = result.get("direction")
+    score = result.get("score", 0)
+    price = result.get("price")
+    entry = result.get("entry")
+    sl = result.get("sl")
+    tp = result.get("tp")
+    rr = result.get("rr")
+    meta = result.get("anti_fomo") or {}
+    reason = result.get("anti_fomo_reason") or ""
+
+    rsi = meta.get("rsi_15m")
+    stoch = meta.get("stoch_k_15m")
+    ema = meta.get("ema21_15m")
+
+    lines = [
+        "⚡ <b>СИГНАЛ ГОТОВ — ЖДЁМ ОТКАТ</b>", "",
+        f"💠 <b>{escape(str(coin))}</b>",
+        f"📐 {dir_icon(d)} <b>{d}</b>",
+        f"⭐ Score: <b>{score}/100</b>",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "🧲 <b>ANTI-FOMO</b>",
+    ]
+    if rsi is not None:
+        lines.append(f"RSI 15M: <b>{rsi:.1f}</b>")
+    if stoch is not None:
+        lines.append(f"Stoch 15M: <b>{stoch:.1f}</b>")
+    if ema is not None:
+        lines.append(f"EMA21 15M: <b>{format_price(ema)}</b>")
+    if reason:
+        lines.append("")
+        lines.append(f"ℹ️ {escape(str(reason))}")
+
+    lines.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"💰 Цена: <b>{format_price(price)}</b>",
+        f"🎯 Entry: <b>{format_price(entry)}</b>",
+        f"🛑 SL: <b>{format_price(sl)}</b>",
+        f"🎯 TP: <b>{format_price(tp)}</b>",
+        f"📊 RR: <b>{format_rr(rr)}</b>",
+        "",
+        "⏳ <b>НЕ ВХОДИМ СЕЙЧАС</b>",
+        "Ждём откат к EMA21 / остывание RSI/Stoch",
+    ])
+    return "\n".join(lines)
 
 
 def trade_close_message(trade):
@@ -1728,6 +1855,20 @@ async def broadcast_ready(app, coin, result, setup):
                          return_exceptions=True)
 
 
+async def broadcast_pullback(app, coin, result):
+    ids = subscribers()
+    if not ids:
+        return
+    text = pullback_message(coin, result)
+    tasks = []
+    for cid in ids:
+        tasks.append(safe_send_message(
+            app, cid, text,
+            parse_mode="HTML",
+            reply_markup=dashboard_keyboard()))
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 # --- PNG ---
 
 def png_chunk(ctype, data):
@@ -1872,6 +2013,7 @@ def chart_png(result, trade=None):
         "READY": (60, 220, 140),
         "SWEPT": (255, 165, 45),
         "15M_CONFIRMED": (245, 205, 60),
+        "WAIT_PULLBACK": (200, 140, 240),
         "WAIT": (90, 100, 115),
     }
     fill_rect(pix, 0, 0, W, 10,
@@ -2123,7 +2265,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.19.3</b>\n\n"
+        f"🎯 <b>MODEL 9.20.1</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2131,6 +2273,8 @@ async def status_cmd(update, context):
         f" ({PARTIAL_TP_2_PERCENT}%)\n"
         f"🛡 BE: <b>{BREAKEVEN_TRIGGER_R}R</b>"
         f" (после P1)\n\n"
+        f"🧲 Anti-FOMO: <b>ON</b>\n"
+        f"⚡ Pullback-увед: <b>ON</b>\n"
         f"🎯 Trailing: <b>{tr}</b>\n"
         f"💰 Partial: <b>{pt}</b>\n"
         f"❄️ Cooldown: <b>{cd}</b>\n"
@@ -2173,8 +2317,33 @@ async def monitor(app):
             for coin, result in results.items():
                 if result.get("error"):
                     continue
-                if result.get("stage") != "READY":
+
+                stage = result.get("stage")
+
+                # v9.20.1: PULLBACK-уведомление
+                if (stage == "WAIT_PULLBACK"
+                        and PULLBACK_NOTIF_ENABLED):
+                    sym = result.get("symbol")
+                    sc = int(result.get("score", 0))
+                    if sc < get_min_score(sym):
+                        continue
+                    d = result.get("direction")
+                    if _pb_is_dup(notif, coin, d):
+                        continue
+                    _pb_mark(
+                        notif, coin, d,
+                        result.get("anti_fomo_reason", ""))
+                    state_changed = True
+                    print(
+                        f"[PULLBACK] {coin} {d} "
+                        f"score={sc}",
+                        flush=True)
+                    await broadcast_pullback(app, coin, result)
                     continue
+
+                if stage != "READY":
+                    continue
+
                 sym = result.get("symbol")
                 score = int(result.get("score", 0))
                 if score < get_min_score(sym):
@@ -2550,6 +2719,8 @@ async def callbacks(update, context):
             f"P2: <b>{PARTIAL_TP_2_TRIGGER_R}R</b>\n"
             f"BE: <b>{BREAKEVEN_TRIGGER_R}R</b>\n"
             f"BE после P1\n"
+            f"Anti-FOMO: <b>ON</b>\n"
+            f"Pullback-увед: <b>ON</b>\n"
             f"Trail: <b>{tr}</b>\n"
             f"Partial: <b>{pt}</b>\n"
             f"Cooldown: <b>{cd}</b>\n"
