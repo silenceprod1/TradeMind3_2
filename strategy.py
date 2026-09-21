@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.19.
+TradeMind strategy v9.20.
 MIN_SCORE_READY = 85 (per-symbol фильтр в bot.py).
+v9.20: добавлен Anti-FOMO / Pullback Entry Filter.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.19"
+STRATEGY_VERSION = "9.20"
 
 ALLOW_SHORT = True
 
@@ -77,6 +78,30 @@ READY_PROMOTE_TIERS = (
     (90, 0.25, True),
     (88, 0.30, True),
 )
+
+# ---- Anti-FOMO / Pullback Entry Filter ----
+ENABLE_ANTI_FOMO = True
+
+RSI_PERIOD = 14
+STOCH_PERIOD = 14
+STOCH_SMOOTH_K = 3
+STOCH_SMOOTH_D = 3
+
+RSI_OVERBOUGHT_LONG = 70.0
+RSI_OVERSOLD_SHORT = 30.0
+STOCH_OVERBOUGHT_LONG = 80.0
+STOCH_OVERSOLD_SHORT = 20.0
+
+ANTI_FOMO_RSI_COOL_LONG = 65.0
+ANTI_FOMO_RSI_COOL_SHORT = 35.0
+ANTI_FOMO_STOCH_COOL_LONG = 80.0
+ANTI_FOMO_STOCH_COOL_SHORT = 20.0
+
+EMA_PULLBACK_PERIOD = 21
+ATR_EXTENSION_MULT = 1.0
+ATR_PULLBACK_TOL_MULT = 0.30
+
+ANTI_FOMO_HARD_BLOCK = True
 
 
 def _f(x):
@@ -195,6 +220,81 @@ def calculate_atr(candles, period=14):
     if len(trs) < period:
         return None
     return sum(trs[-period:]) / period
+
+
+def calculate_ema(candles, period=21):
+    if not candles or period <= 0:
+        return None
+    closes = [_c(c) for c in candles]
+    closes = [x for x in closes if x is not None]
+    if len(closes) < period:
+        return None
+    k = 2.0 / (period + 1.0)
+    ema = sum(closes[:period]) / period
+    for i in range(period, len(closes)):
+        ema = closes[i] * k + ema * (1.0 - k)
+    return ema
+
+
+def calculate_rsi(candles, period=14):
+    if not candles or period <= 0:
+        return None
+    closes = [_c(c) for c in candles]
+    closes = [x for x in closes if x is not None]
+    if len(closes) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        if d >= 0:
+            gains.append(d)
+            losses.append(0.0)
+        else:
+            gains.append(0.0)
+            losses.append(-d)
+    avg_g = sum(gains[:period]) / period
+    avg_l = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_g = (avg_g * (period - 1) + gains[i]) / period
+        avg_l = (avg_l * (period - 1) + losses[i]) / period
+    if avg_l == 0:
+        return 100.0
+    rs = avg_g / avg_l
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def calculate_stochastic(candles, k_period=14,
+                         smooth_k=3, smooth_d=3):
+    if not candles or len(candles) < k_period + smooth_k:
+        return None, None
+    raw_k = []
+    for i in range(k_period - 1, len(candles)):
+        window = candles[i - k_period + 1:i + 1]
+        highs = [_h(c) for c in window if _h(c) is not None]
+        lows = [_l(c) for c in window if _l(c) is not None]
+        if not highs or not lows:
+            continue
+        hh = max(highs)
+        ll = min(lows)
+        cl = _c(candles[i])
+        if cl is None:
+            continue
+        if hh == ll:
+            raw_k.append(50.0)
+        else:
+            raw_k.append((cl - ll) / (hh - ll) * 100.0)
+    if len(raw_k) < smooth_k:
+        return None, None
+    ks = []
+    for i in range(smooth_k - 1, len(raw_k)):
+        ks.append(sum(raw_k[i - smooth_k + 1:i + 1]) / smooth_k)
+    if not ks:
+        return None, None
+    k_val = ks[-1]
+    d_val = None
+    if len(ks) >= smooth_d:
+        d_val = sum(ks[-smooth_d:]) / smooth_d
+    return k_val, d_val
 
 
 def _avg_atr(candles, fast=14, slow=50):
@@ -1056,6 +1156,128 @@ def validate_geometry(entry, sl, tp, direction):
     return False
 
 
+def check_anti_fomo(candles_15m, direction, price):
+    """
+    Anti-FOMO / Pullback Entry Filter.
+    Возвращает (allowed, reason, meta).
+    allowed=False — не входим здесь, ждём отката к EMA21 /
+    остывания осцилляторов.
+    """
+    if not ENABLE_ANTI_FOMO:
+        return True, "anti_fomo disabled", {}
+
+    if not candles_15m or len(candles_15m) < max(
+            RSI_PERIOD, STOCH_PERIOD + 10,
+            EMA_PULLBACK_PERIOD) + 5:
+        return True, "anti_fomo: not enough data", {}
+
+    rsi = calculate_rsi(candles_15m, RSI_PERIOD)
+    k_val, d_val = calculate_stochastic(
+        candles_15m, STOCH_PERIOD,
+        STOCH_SMOOTH_K, STOCH_SMOOTH_D)
+    ema = calculate_ema(candles_15m, EMA_PULLBACK_PERIOD)
+    atr = calculate_atr(candles_15m, 14)
+    p = _f(price)
+
+    meta = {
+        "rsi_15m": round(rsi, 2) if rsi is not None else None,
+        "stoch_k_15m": round(k_val, 2) if k_val is not None else None,
+        "stoch_d_15m": round(d_val, 2) if d_val is not None else None,
+        "ema21_15m": round(ema, 8) if ema is not None else None,
+        "atr_15m_fomo": round(atr, 8) if atr is not None else None,
+    }
+
+    if (rsi is None or k_val is None or ema is None
+            or atr is None or atr <= 0 or p is None):
+        return True, "anti_fomo: insufficient indicators", meta
+
+    if direction == "LONG":
+        ob = (rsi >= RSI_OVERBOUGHT_LONG
+              and k_val >= STOCH_OVERBOUGHT_LONG)
+        extended = p > ema + ATR_EXTENSION_MULT * atr
+        pulled = p <= ema + ATR_PULLBACK_TOL_MULT * atr
+        cooled = (rsi < ANTI_FOMO_RSI_COOL_LONG
+                  or k_val < ANTI_FOMO_STOCH_COOL_LONG)
+
+        meta.update({"ob": ob, "extended": extended,
+                     "pulled_back": pulled, "cooled": cooled})
+
+        if ob and extended:
+            if pulled or cooled:
+                return True, (
+                    "anti_fomo LONG ok (ob+ext, pullback/cool)"
+                ), meta
+            return False, (
+                f"Anti-FOMO LONG: RSI {rsi:.1f} >= "
+                f"{RSI_OVERBOUGHT_LONG} и Stoch {k_val:.1f} >= "
+                f"{STOCH_OVERBOUGHT_LONG}, цена >EMA21+"
+                f"{ATR_EXTENSION_MULT}*ATR — ждём откат."
+            ), meta
+        if ob:
+            if pulled or cooled:
+                return True, (
+                    "anti_fomo LONG ok (ob, pullback/cool)"
+                ), meta
+            return False, (
+                f"Anti-FOMO LONG: перекупленность RSI "
+                f"{rsi:.1f}/Stoch {k_val:.1f} без остывания/отката."
+            ), meta
+        if extended:
+            if pulled or cooled:
+                return True, (
+                    "anti_fomo LONG ok (ext, cool)"
+                ), meta
+            return False, (
+                f"Anti-FOMO LONG: цена растянута от EMA21 > "
+                f"{ATR_EXTENSION_MULT}*ATR без остывания."
+            ), meta
+        return True, "anti_fomo LONG passed", meta
+
+    if direction == "SHORT":
+        os_ = (rsi <= RSI_OVERSOLD_SHORT
+               and k_val <= STOCH_OVERSOLD_SHORT)
+        extended = p < ema - ATR_EXTENSION_MULT * atr
+        pulled = p >= ema - ATR_PULLBACK_TOL_MULT * atr
+        cooled = (rsi > ANTI_FOMO_RSI_COOL_SHORT
+                  or k_val > ANTI_FOMO_STOCH_COOL_SHORT)
+
+        meta.update({"os": os_, "extended": extended,
+                     "pulled_back": pulled, "cooled": cooled})
+
+        if os_ and extended:
+            if pulled or cooled:
+                return True, (
+                    "anti_fomo SHORT ok (os+ext, pullback/cool)"
+                ), meta
+            return False, (
+                f"Anti-FOMO SHORT: RSI {rsi:.1f} <= "
+                f"{RSI_OVERSOLD_SHORT} и Stoch {k_val:.1f} <= "
+                f"{STOCH_OVERSOLD_SHORT}, цена <EMA21-"
+                f"{ATR_EXTENSION_MULT}*ATR — ждём откат."
+            ), meta
+        if os_:
+            if pulled or cooled:
+                return True, (
+                    "anti_fomo SHORT ok (os, pullback/cool)"
+                ), meta
+            return False, (
+                f"Anti-FOMO SHORT: перепроданность RSI "
+                f"{rsi:.1f}/Stoch {k_val:.1f} без остывания/отката."
+            ), meta
+        if extended:
+            if pulled or cooled:
+                return True, (
+                    "anti_fomo SHORT ok (ext, cool)"
+                ), meta
+            return False, (
+                f"Anti-FOMO SHORT: цена растянута от EMA21 > "
+                f"{ATR_EXTENSION_MULT}*ATR без остывания."
+            ), meta
+        return True, "anti_fomo SHORT passed", meta
+
+    return True, "anti_fomo: no direction", meta
+
+
 def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
            rr, maj_str, fvg_bonus):
     score = 0
@@ -1127,7 +1349,7 @@ def _apply_ready_promote(result):
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.19 promote: score={score} "
+            f"v9.20 promote: score={score} "
             f"trend={trend:.2f} bos={bos}"
         )
         result["_v910_promoted"] = True
@@ -1166,6 +1388,9 @@ def _analyze_scenario(c1h, c15, c5, price,
         "sl_distance_pct": None,
         "atr_15m": None,
         "sl_source": None,
+        "anti_fomo": {},
+        "anti_fomo_reason": "",
+        "anti_fomo_ok": True,
     }
 
     if direction == "SHORT" and not ALLOW_SHORT:
@@ -1290,19 +1515,27 @@ def _analyze_scenario(c1h, c15, c5, price,
 
     result["geometry_valid"] = True
 
-    rr = calculate_rr(entry, sl, tp)
-    if rr is None:
-        result["score"] = 68
-        result["reason"] = "Нет RR."
+    # ---- Anti-FOMO / Pullback Entry Filter ----
+    fomo_ok, fomo_reason, fomo_meta = check_anti_fomo(
+        c15, direction, price)
+    result["anti_fomo_ok"] = fomo_ok
+    result["anti_fomo_reason"] = fomo_reason
+    result["anti_fomo"] = fomo_meta
+
+    if not fomo_ok and ANTI_FOMO_HARD_BLOCK:
+        result["stage"] = "WAIT_PULLBACK"
+        result["reason"] = fomo_reason
         return result
 
     result.update({
         "entry": round(entry, 8),
         "sl": round(sl, 8),
         "tp": round(tp, 8),
-        "rr": round(rr, 3),
+        "rr": round(calculate_rr(entry, sl, tp) or 0.0, 3),
         "tp_reason": f"Fixed RR 1:{FIXED_RR}",
     })
+
+    rr = _f(result.get("rr"))
 
     try:
         sdp = abs(entry - sl) / entry * 100
@@ -1410,6 +1643,9 @@ def analyze(candles_1h, candles_15m, candles_5m,
         "fvg_entry": False,
         "long": None,
         "short": None,
+        "anti_fomo": {},
+        "anti_fomo_reason": "",
+        "anti_fomo_ok": True,
     }
 
     if price is None:
@@ -1469,6 +1705,9 @@ def analyze(candles_1h, candles_15m, candles_5m,
             "fvg_bonus": best.get("fvg_bonus", 0),
             "fvg_sweep": best.get("fvg_sweep", False),
             "fvg_entry": best.get("fvg_entry", False),
+            "anti_fomo": best.get("anti_fomo", {}),
+            "anti_fomo_reason": best.get("anti_fomo_reason", ""),
+            "anti_fomo_ok": best.get("anti_fomo_ok", True),
         })
         return base
 
@@ -1524,6 +1763,7 @@ def analyze(candles_1h, candles_15m, candles_5m,
     def stage_wt(r):
         m = {
             "READY": 5, "15M_CONFIRMED": 4,
+            "WAIT_PULLBACK": 4,
             "SWEPT": 3, "WAIT": 1,
         }
         return m.get(r.get("stage"), 0)
@@ -1574,6 +1814,9 @@ def analyze(candles_1h, candles_15m, candles_5m,
             "fvg_bonus": chosen.get("fvg_bonus", 0),
             "fvg_sweep": chosen.get("fvg_sweep", False),
             "fvg_entry": chosen.get("fvg_entry", False),
+            "anti_fomo": chosen.get("anti_fomo", {}),
+            "anti_fomo_reason": chosen.get("anti_fomo_reason", ""),
+            "anti_fomo_ok": chosen.get("anti_fomo_ok", True),
         })
     base["context_direction"] = ctx_dir
     return base
@@ -1595,7 +1838,19 @@ __all__ = [
     "MAX_ILM_AGE_FOR_ENTRY",
     "ATR_SL_MULT_SOFT",
     "RETEST_OFFSET_PCT",
+    "ENABLE_ANTI_FOMO",
+    "RSI_OVERBOUGHT_LONG",
+    "RSI_OVERSOLD_SHORT",
+    "STOCH_OVERBOUGHT_LONG",
+    "STOCH_OVERSOLD_SHORT",
+    "EMA_PULLBACK_PERIOD",
+    "ATR_EXTENSION_MULT",
+    "ATR_PULLBACK_TOL_MULT",
+    "ANTI_FOMO_HARD_BLOCK",
     "calculate_atr",
+    "calculate_ema",
+    "calculate_rsi",
+    "calculate_stochastic",
     "get_1h_direction",
     "get_higher_tf_direction",
     "measure_trend_activity",
@@ -1608,6 +1863,7 @@ __all__ = [
     "calculate_rr",
     "find_structural_sl",
     "validate_geometry",
+    "check_anti_fomo",
     "analyze",
     "analyze_sol",
 ]
