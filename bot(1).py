@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.20.3.
+TradeMind bot v9.20.4.
 Fix: BE после P1 + Telegram-уведомления о P1/P2/BE.
 v9.20: обработка WAIT_PULLBACK (Anti-FOMO / Pullback Entry Filter).
 v9.20.1: Telegram-уведомления о WAIT_PULLBACK ("ждём откат").
 v9.20.2: чистое завершение monitor-таска, рестарт-обёртка, boot-логи с pid.
 v9.20.3: логирование SIGTERM/SIGINT для диагностики внешних рестартов.
+v9.20.4: webhook-режим для BotHost (устраняет рестарт-луп каждые ~4 мин).
 """
 
 import asyncio
@@ -68,7 +69,7 @@ TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
 TRAILING_DISTANCE_R = 0.8
 
-# v9.20.3: BE срабатывает только после partial_1
+# v9.20.4: BE срабатывает только после partial_1
 BREAKEVEN_TRIGGER_R = 0.7
 PARTIAL_TP_ENABLED = True
 PARTIAL_TP_TRIGGER_R = 0.7
@@ -116,6 +117,23 @@ PENDING_SETUPS_FILE = "pending_setups.json"
 NOTIFICATION_STATE_FILE = "notification_state.json"
 
 _storage_lock = threading.RLock()
+
+
+# --- WEBHOOK (BotHost) ---
+
+PORT = int(os.getenv("PORT", "8080"))
+
+WEBHOOK_DOMAIN = (
+    os.getenv("WEBHOOK_DOMAIN")
+    or os.getenv("BOTHOST_DOMAIN")
+    or os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    or os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    or ""
+).strip()
+
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "webhook")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "trademind_secret_v1")
+USE_WEBHOOK = bool(WEBHOOK_DOMAIN)
 
 
 def get_min_score(sym):
@@ -642,9 +660,12 @@ def dashboard_message(results, chat_id=None):
     if not COOLDOWN_AFTER_SL_ENABLED:
         cd_label = "OFF"
 
+    mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
+
     lines = [
-        "🧠 <b>TRADEMIND v9.20.3</b>",
+        "🧠 <b>TRADEMIND v9.20.4</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
+        f"<code>mode: {mode_label}</code>",
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
@@ -693,7 +714,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.20.3</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.20.4</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -2240,16 +2261,19 @@ async def status_cmd(update, context):
     else:
         cd = "OFF"
 
+    mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
+
     text = (
         f"⚙️ <b>TRADEMIND STATUS</b>\n\n"
         f"Version: "
         f"<b>{escape(str(STRATEGY_VERSION))}</b>\n"
+        f"Mode: <b>{mode_label}</b>\n"
         f"Scanner: <b>{CHECK_INTERVAL}s</b>\n"
         f"Coins: <b>{len(COINS)}</b>\n"
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.20.3</b>\n\n"
+        f"🎯 <b>MODEL 9.20.4</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2701,9 +2725,11 @@ async def callbacks(update, context):
             cd = f"{COOLDOWN_AFTER_SL_HOURS}h"
         else:
             cd = "OFF"
+        mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
         text = (
             f"⚙️ <b>STATUS</b>\n\n"
             f"v{escape(str(STRATEGY_VERSION))}\n"
+            f"Mode: <b>{mode_label}</b>\n"
             f"Coins: <b>{len(COINS)}</b>\n"
             f"Active: <b>{n_active}</b>\n"
             f"Journal: <b>{len(journal)}</b>\n\n"
@@ -2783,7 +2809,6 @@ async def post_init(application):
 
 
 async def post_shutdown(application):
-    """v9.20.3: аккуратно гасим monitor-таск."""
     task = application.bot_data.get("monitor_task")
     if task and not task.done():
         print("[SHUTDOWN] cancelling monitor task...",
@@ -2805,7 +2830,6 @@ def main():
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN не найден")
 
-    # v9.20.3: логируем сигналы, чтобы видеть, кто убивает процесс
     def _sig_handler(signum, frame):
         try:
             name = signal.Signals(signum).name
@@ -2856,7 +2880,36 @@ def main():
         f"[BOOT] Cooldown: {COOLDOWN_AFTER_SL_HOURS}h",
         flush=True)
 
-    app.run_polling()
+    if USE_WEBHOOK:
+        print(
+            f"[BOOT] MODE: WEBHOOK domain={WEBHOOK_DOMAIN} "
+            f"port={PORT} path=/{WEBHOOK_PATH}",
+            flush=True)
+        try:
+            app.run_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                url_path=WEBHOOK_PATH,
+                webhook_url=(
+                    f"https://{WEBHOOK_DOMAIN}/{WEBHOOK_PATH}"),
+                secret_token=WEBHOOK_SECRET,
+                drop_pending_updates=True,
+                allowed_updates=None,
+            )
+        except Exception as e:
+            import traceback
+            print("WEBHOOK FAILED:", e, flush=True)
+            traceback.print_exc()
+            print(
+                "[BOOT] Fallback to POLLING due to webhook error",
+                flush=True)
+            app.run_polling(drop_pending_updates=True)
+    else:
+        print(
+            "[BOOT] MODE: POLLING "
+            "(WEBHOOK_DOMAIN не задан)",
+            flush=True)
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
