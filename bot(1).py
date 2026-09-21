@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.20.2.
+TradeMind bot v9.20.3.
 Fix: BE после P1 + Telegram-уведомления о P1/P2/BE.
 v9.20: обработка WAIT_PULLBACK (Anti-FOMO / Pullback Entry Filter).
 v9.20.1: Telegram-уведомления о WAIT_PULLBACK ("ждём откат").
 v9.20.2: чистое завершение monitor-таска, рестарт-обёртка, boot-логи с pid.
+v9.20.3: логирование SIGTERM/SIGINT для диагностики внешних рестартов.
 """
 
 import asyncio
 import io
 import json
 import os
+import signal
 import struct
 import threading
 import time
@@ -66,7 +68,7 @@ TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
 TRAILING_DISTANCE_R = 0.8
 
-# v9.20.2: BE срабатывает только после partial_1
+# v9.20.3: BE срабатывает только после partial_1
 BREAKEVEN_TRIGGER_R = 0.7
 PARTIAL_TP_ENABLED = True
 PARTIAL_TP_TRIGGER_R = 0.7
@@ -641,7 +643,7 @@ def dashboard_message(results, chat_id=None):
         cd_label = "OFF"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.20.2</b>",
+        "🧠 <b>TRADEMIND v9.20.3</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         "",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -691,7 +693,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.20.2</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.20.3</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -2247,7 +2249,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.20.2</b>\n\n"
+        f"🎯 <b>MODEL 9.20.3</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2271,15 +2273,9 @@ async def status_cmd(update, context):
 # --- MONITOR ---
 
 async def _safe_monitor(app):
-    """
-    v9.20.2: бесконечный рестарт-цикл вокруг monitor().
-    Если monitor() вылетает с исключением — ждём 10 секунд
-    и поднимаем его заново. CancelledError (при shutdown) пробрасываем.
-    """
     while True:
         try:
             await monitor(app)
-            # если monitor() когда-то вернётся штатно — тоже поднимаем
             await asyncio.sleep(5)
         except asyncio.CancelledError:
             print("[MONITOR] cancelled", flush=True)
@@ -2761,7 +2757,6 @@ async def post_init(application):
     await application.bot.set_my_commands(
         [BotCommand(c, d) for c, d in cmds])
 
-    # v9.20.2: boot-логи с pid
     print(
         f"[BOOT] pid={os.getpid()} "
         f"time={time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -2788,7 +2783,7 @@ async def post_init(application):
 
 
 async def post_shutdown(application):
-    """v9.20.2: аккуратно гасим monitor-таск."""
+    """v9.20.3: аккуратно гасим monitor-таск."""
     task = application.bot_data.get("monitor_task")
     if task and not task.done():
         print("[SHUTDOWN] cancelling monitor task...",
@@ -2809,6 +2804,25 @@ async def post_shutdown(application):
 def main():
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN не найден")
+
+    # v9.20.3: логируем сигналы, чтобы видеть, кто убивает процесс
+    def _sig_handler(signum, frame):
+        try:
+            name = signal.Signals(signum).name
+        except Exception:
+            name = str(signum)
+        print(
+            f"[SIGNAL] received {signum} ({name}) "
+            f"at {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            flush=True)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _sig_handler)
+        except Exception as e:
+            print(
+                f"[SIGNAL] can't set handler for {sig}: {e}",
+                flush=True)
 
     app = (Application.builder()
            .token(TOKEN)
