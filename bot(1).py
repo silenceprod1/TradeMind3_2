@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.20.4.
+TradeMind bot v9.20.5.
 Fix: BE после P1 + Telegram-уведомления о P1/P2/BE.
 v9.20: обработка WAIT_PULLBACK (Anti-FOMO / Pullback Entry Filter).
-v9.20.1: Telegram-уведомления о WAIT_PULLBACK ("ждём откат").
-v9.20.2: чистое завершение monitor-таска, рестарт-обёртка, boot-логи с pid.
-v9.20.3: логирование SIGTERM/SIGINT для диагностики внешних рестартов.
-v9.20.4: webhook-режим для BotHost (устраняет рестарт-луп каждые ~4 мин).
+v9.20.1: Telegram-уведомления о WAIT_PULLBACK.
+v9.20.2: чистое завершение monitor-таска, рестарт-обёртка.
+v9.20.3: логирование SIGTERM/SIGINT.
+v9.20.4: webhook-режим для BotHost.
+v9.20.5: устойчивый polling — Conflict НЕ убивает процесс.
 """
 
 import asyncio
@@ -24,6 +25,7 @@ from concurrent.futures import (
 )
 from html import escape
 
+import telegram
 from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -69,7 +71,6 @@ TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
 TRAILING_DISTANCE_R = 0.8
 
-# v9.20.4: BE срабатывает только после partial_1
 BREAKEVEN_TRIGGER_R = 0.7
 PARTIAL_TP_ENABLED = True
 PARTIAL_TP_TRIGGER_R = 0.7
@@ -87,7 +88,6 @@ COOLDOWN_AFTER_TP_HOURS = 0
 NOTIFICATION_DEDUP_HOURS = 3
 NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
 
-# v9.20.1: уведомления о "сигнал готов, но ждём откат"
 PULLBACK_NOTIF_ENABLED = True
 PULLBACK_NOTIF_DEDUP_HOURS = 1
 
@@ -663,7 +663,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.20.4</b>",
+        "🧠 <b>TRADEMIND v9.20.5</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -714,7 +714,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.20.4</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.20.5</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -2273,7 +2273,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.20.4</b>\n\n"
+        f"🎯 <b>MODEL 9.20.5</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2824,6 +2824,85 @@ async def post_shutdown(application):
         print("[SHUTDOWN] no monitor task to stop", flush=True)
 
 
+# --- STURDY POLLING (v9.20.5) ---
+
+async def _run_polling_forever(app):
+    """
+    Устойчивый polling: Conflict (второй инстанс) НЕ убивает процесс.
+    Пробуем каждые 30 секунд пока Telegram не разрешит.
+    """
+    print("[POLLING] initialize...", flush=True)
+    try:
+        await app.initialize()
+    except Exception as e:
+        print(f"[POLLING] initialize failed: {e}", flush=True)
+        raise
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            try:
+                await app.bot.delete_webhook(
+                    drop_pending_updates=True)
+            except Exception as e:
+                print(
+                    f"[POLLING] delete_webhook warn: {e}",
+                    flush=True)
+
+            if not app.running:
+                await app.start()
+
+            await app.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=None,
+            )
+            print(
+                f"[POLLING] started (attempt {attempt})",
+                flush=True)
+            break
+
+        except telegram.error.Conflict as e:
+            print(
+                f"[POLLING] CONFLICT: {e}",
+                flush=True)
+            print(
+                "[POLLING] Второй инстанс бота с тем же "
+                "токеном. Retry in 30s...",
+                flush=True)
+            await asyncio.sleep(30)
+
+        except Exception as e:
+            print(
+                f"[POLLING] start err: {e}. "
+                f"Retry in 10s...",
+                flush=True)
+            await asyncio.sleep(10)
+
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        print("[POLLING] cancelled", flush=True)
+    finally:
+        print("[POLLING] stopping...", flush=True)
+        try:
+            if app.updater and app.updater.running:
+                await app.updater.stop()
+        except Exception:
+            pass
+        try:
+            if app.running:
+                await app.stop()
+        except Exception:
+            pass
+        try:
+            await app.shutdown()
+        except Exception:
+            pass
+        print("[POLLING] stopped", flush=True)
+
+
 # --- MAIN ---
 
 def main():
@@ -2896,6 +2975,7 @@ def main():
                 drop_pending_updates=True,
                 allowed_updates=None,
             )
+            return
         except Exception as e:
             import traceback
             print("WEBHOOK FAILED:", e, flush=True)
@@ -2903,13 +2983,15 @@ def main():
             print(
                 "[BOOT] Fallback to POLLING due to webhook error",
                 flush=True)
-            app.run_polling(drop_pending_updates=True)
-    else:
-        print(
-            "[BOOT] MODE: POLLING "
-            "(WEBHOOK_DOMAIN не задан)",
-            flush=True)
-        app.run_polling(drop_pending_updates=True)
+
+    print(
+        "[BOOT] MODE: POLLING (sturdy, retry on Conflict)",
+        flush=True)
+
+    try:
+        asyncio.run(_run_polling_forever(app))
+    except KeyboardInterrupt:
+        print("[MAIN] KeyboardInterrupt", flush=True)
 
 
 if __name__ == "__main__":
