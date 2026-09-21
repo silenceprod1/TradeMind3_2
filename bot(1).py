@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.19 FINAL + fees/slippage.
+TradeMind backtest v9.21 FINAL + fees/slippage + D1 EMA filter.
 7 пар: BTC, XRP, LINK, BCH, APT, SUI, INJ.
 Отсеяны: ETH, SOL, DOT (по research).
 
-v9.19-c:
-  - учтены FEE (0.08% round-trip) и SLIPPAGE (0.05% entry)
-  - main() вызывается из bot.py без argparse
-  - совместим с прямым запуском: python backtest.py [--max-hours=24]
+v9.19-c:  fees/slippage + main() без argparse
+v9.21:    D1 EMA Trend Filter — передаём candles_d1 в strategy
 """
 
 from market import (
@@ -23,7 +21,7 @@ from strategy import analyze, get_1h_direction
 
 # --- CONFIG ---
 
-BT_D1 = 60
+BT_D1 = 250      # хватает для EMA200
 BT_1H = 1200     # ~50 дней на 1h
 BT_15M = 4800
 BT_5M = 14400
@@ -403,6 +401,9 @@ def run_one(sym, max_h):
             if len(ccd1) >= 20:
                 try:
                     d1c = _analyze_d1_context(ccd1, price)
+                    # v9.21: пробрасываем сырые D1-свечи для EMA-фильтра
+                    if isinstance(d1c, dict):
+                        d1c["candles_d1"] = ccd1
                 except Exception:
                     d1c = None
             r = analyze(
@@ -535,7 +536,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.19-c [" + mode + "]")
+    print("### MULTI v9.21 [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
@@ -560,7 +561,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("=" * 82)
-    print("СВОДКА v9.19-c [" + mode + "]")
+    print("СВОДКА v9.21 [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
