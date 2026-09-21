@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.20.1.
+TradeMind bot v9.20.2.
 Fix: BE после P1 + Telegram-уведомления о P1/P2/BE.
 v9.20: обработка WAIT_PULLBACK (Anti-FOMO / Pullback Entry Filter).
 v9.20.1: Telegram-уведомления о WAIT_PULLBACK ("ждём откат").
+v9.20.2: чистое завершение monitor-таска, рестарт-обёртка, boot-логи с pid.
 """
 
 import asyncio
@@ -65,7 +66,7 @@ TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.3
 TRAILING_DISTANCE_R = 0.8
 
-# v9.20.1: BE срабатывает только после partial_1
+# v9.20.2: BE срабатывает только после partial_1
 BREAKEVEN_TRIGGER_R = 0.7
 PARTIAL_TP_ENABLED = True
 PARTIAL_TP_TRIGGER_R = 0.7
@@ -405,7 +406,6 @@ def fvgs_text(fvgs, cur, limit=4):
 
 
 def anti_fomo_text(result):
-    """v9.20: строка про Anti-FOMO для карточки монеты."""
     ok = result.get("anti_fomo_ok", True)
     meta = result.get("anti_fomo") or {}
     reason = result.get("anti_fomo_reason") or ""
@@ -641,7 +641,7 @@ def dashboard_message(results, chat_id=None):
         cd_label = "OFF"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.20.1</b>",
+        "🧠 <b>TRADEMIND v9.20.2</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         "",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -691,7 +691,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.20.1</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.20.2</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -1134,10 +1134,6 @@ def close_trade(trade, exit_price, rtype):
 
 
 def apply_trailing(trade, cur_price):
-    """
-    Возвращает список событий: [("P1", price), ("P2", price), ("BE", price)]
-    v9.20.1: BE срабатывает ТОЛЬКО после P1.
-    """
     events = []
 
     try:
@@ -1153,13 +1149,11 @@ def apply_trailing(trade, cur_price):
     if risk <= 0:
         return events
 
-    # --- LONG ---
     if d == "LONG":
         if cur_price > best:
             best = cur_price
         mr = (best - entry) / risk
 
-        # P1
         if (PARTIAL_TP_ENABLED
                 and not trade.get("partial_tp_done")
                 and mr >= PARTIAL_TP_TRIGGER_R):
@@ -1167,7 +1161,6 @@ def apply_trailing(trade, cur_price):
             trade["partial_tp_price"] = round(cur_price, 8)
             events.append(("P1", cur_price))
 
-        # P2
         if (PARTIAL_TP_2_ENABLED
                 and not trade.get("partial_tp_2_done")
                 and trade.get("partial_tp_done")
@@ -1176,7 +1169,6 @@ def apply_trailing(trade, cur_price):
             trade["partial_tp_2_price"] = round(cur_price, 8)
             events.append(("P2", cur_price))
 
-        # BE — только после P1
         be_ready = (not PARTIAL_TP_ENABLED) or trade.get(
             "partial_tp_done")
         if (be_ready
@@ -1188,20 +1180,17 @@ def apply_trailing(trade, cur_price):
                 trade["be_moved"] = True
                 events.append(("BE", entry))
 
-        # Trailing
         if mr >= TRAILING_TRIGGER_R:
             ns = best - risk * TRAILING_DISTANCE_R
             if ns > cur_sl:
                 trade["sl"] = round(ns, 8)
                 trade["trailing_active"] = True
 
-    # --- SHORT ---
     elif d == "SHORT":
         if cur_price < best:
             best = cur_price
         mr = (entry - best) / risk
 
-        # P1
         if (PARTIAL_TP_ENABLED
                 and not trade.get("partial_tp_done")
                 and mr >= PARTIAL_TP_TRIGGER_R):
@@ -1209,7 +1198,6 @@ def apply_trailing(trade, cur_price):
             trade["partial_tp_price"] = round(cur_price, 8)
             events.append(("P1", cur_price))
 
-        # P2
         if (PARTIAL_TP_2_ENABLED
                 and not trade.get("partial_tp_2_done")
                 and trade.get("partial_tp_done")
@@ -1218,7 +1206,6 @@ def apply_trailing(trade, cur_price):
             trade["partial_tp_2_price"] = round(cur_price, 8)
             events.append(("P2", cur_price))
 
-        # BE — только после P1
         be_ready = (not PARTIAL_TP_ENABLED) or trade.get(
             "partial_tp_done")
         if (be_ready
@@ -1230,7 +1217,6 @@ def apply_trailing(trade, cur_price):
                 trade["be_moved"] = True
                 events.append(("BE", entry))
 
-        # Trailing
         if mr >= TRAILING_TRIGGER_R:
             ns = best + risk * TRAILING_DISTANCE_R
             if ns < cur_sl:
@@ -1431,7 +1417,7 @@ async def monitor_active_trades(app, results):
         snap.append(dict(t))
 
     to_close = []
-    to_notify = []   # [(chat_id, event_type, price, trade_snapshot)]
+    to_notify = []
 
     for trade in snap:
         if trade.get("status") != "OPEN":
@@ -1451,7 +1437,6 @@ async def monitor_active_trades(app, results):
 
         cms = now_ms()
 
-        # Проверка SL/TP
         try:
             sl = float(trade["sl"])
             tp = float(trade["tp"])
@@ -1476,7 +1461,6 @@ async def monitor_active_trades(app, results):
             to_close.append((trade, rtype, exp))
             continue
 
-        # Trailing + partials + BE
         if TRAILING_ENABLED:
             events = apply_trailing(trade, cur)
             if events:
@@ -1494,7 +1478,6 @@ async def monitor_active_trades(app, results):
             still_open.append(t)
     save_active_trades(still_open)
 
-    # Отправляем уведомления о P1/P2/BE
     for chat_id, ev_type, ev_price, tr_snap in to_notify:
         if not chat_id:
             continue
@@ -1511,7 +1494,6 @@ async def monitor_active_trades(app, results):
         except Exception as exc:
             print("EVENT NOTIFY ERR:", exc)
 
-    # Закрываем TP/SL
     for trade, rtype, exp in to_close:
         closed = close_trade(trade, exp, rtype)
         if closed is None:
@@ -2265,7 +2247,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.20.1</b>\n\n"
+        f"🎯 <b>MODEL 9.20.2</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2289,13 +2271,26 @@ async def status_cmd(update, context):
 # --- MONITOR ---
 
 async def _safe_monitor(app):
-    try:
-        await monitor(app)
-    except Exception as exc:
-        import traceback
-        print("MONITOR CRASH:", exc, flush=True)
-        traceback.print_exc()
-        raise
+    """
+    v9.20.2: бесконечный рестарт-цикл вокруг monitor().
+    Если monitor() вылетает с исключением — ждём 10 секунд
+    и поднимаем его заново. CancelledError (при shutdown) пробрасываем.
+    """
+    while True:
+        try:
+            await monitor(app)
+            # если monitor() когда-то вернётся штатно — тоже поднимаем
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            print("[MONITOR] cancelled", flush=True)
+            raise
+        except Exception as exc:
+            import traceback
+            print(
+                f"[MONITOR] CRASH, restart in 10s: {exc}",
+                flush=True)
+            traceback.print_exc()
+            await asyncio.sleep(10)
 
 
 async def monitor(app):
@@ -2320,7 +2315,6 @@ async def monitor(app):
 
                 stage = result.get("stage")
 
-                # v9.20.1: PULLBACK-уведомление
                 if (stage == "WAIT_PULLBACK"
                         and PULLBACK_NOTIF_ENABLED):
                     sym = result.get("symbol")
@@ -2407,6 +2401,8 @@ async def monitor(app):
             if state_changed:
                 save_notification_state(notif)
 
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             print("MONITOR ERR:", exc, flush=True)
 
@@ -2731,7 +2727,7 @@ async def callbacks(update, context):
         return
 
 
-# --- POST INIT ---
+# --- POST INIT / POST SHUTDOWN ---
 
 async def post_init(application):
     if RUN_BACKTEST_ON_START:
@@ -2765,16 +2761,47 @@ async def post_init(application):
     await application.bot.set_my_commands(
         [BotCommand(c, d) for c, d in cmds])
 
+    # v9.20.2: boot-логи с pid
+    print(
+        f"[BOOT] pid={os.getpid()} "
+        f"time={time.strftime('%Y-%m-%d %H:%M:%S')}",
+        flush=True)
+
     async def _starter():
         await asyncio.sleep(1)
         try:
             await _safe_monitor(application)
+        except asyncio.CancelledError:
+            print("[MONITOR] starter cancelled", flush=True)
+            raise
         except Exception as e:
             import traceback
             print("MONITOR DIE:", e, flush=True)
             traceback.print_exc()
 
-    asyncio.create_task(_starter())
+    task = asyncio.create_task(
+        _starter(), name="trademind-monitor")
+    application.bot_data["monitor_task"] = task
+    print(
+        f"[BOOT] monitor task created: "
+        f"{task.get_name()}", flush=True)
+
+
+async def post_shutdown(application):
+    """v9.20.2: аккуратно гасим monitor-таск."""
+    task = application.bot_data.get("monitor_task")
+    if task and not task.done():
+        print("[SHUTDOWN] cancelling monitor task...",
+              flush=True)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            print("[SHUTDOWN] monitor stopped", flush=True)
+        except Exception as e:
+            print("[SHUTDOWN] monitor error:", e, flush=True)
+    else:
+        print("[SHUTDOWN] no monitor task to stop", flush=True)
 
 
 # --- MAIN ---
@@ -2786,6 +2813,7 @@ def main():
     app = (Application.builder()
            .token(TOKEN)
            .post_init(post_init)
+           .post_shutdown(post_shutdown)
            .build())
 
     handlers = [
@@ -2804,11 +2832,15 @@ def main():
 
     app.add_handler(CallbackQueryHandler(callbacks))
 
-    print(f"TradeMind {STRATEGY_VERSION} started",
-          flush=True)
-    print(f"Monitoring {len(COINS)} coins", flush=True)
-    print(f"Cooldown: {COOLDOWN_AFTER_SL_HOURS}h",
-          flush=True)
+    print(
+        f"[BOOT] TradeMind {STRATEGY_VERSION} started "
+        f"pid={os.getpid()}", flush=True)
+    print(
+        f"[BOOT] Monitoring {len(COINS)} coins",
+        flush=True)
+    print(
+        f"[BOOT] Cooldown: {COOLDOWN_AFTER_SL_HOURS}h",
+        flush=True)
 
     app.run_polling()
 
