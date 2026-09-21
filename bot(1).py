@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.20.5.
+TradeMind bot v9.20.6.
 Fix: BE после P1 + Telegram-уведомления о P1/P2/BE.
 v9.20: обработка WAIT_PULLBACK (Anti-FOMO / Pullback Entry Filter).
 v9.20.1: Telegram-уведомления о WAIT_PULLBACK.
@@ -8,6 +8,8 @@ v9.20.2: чистое завершение monitor-таска, рестарт-о
 v9.20.3: логирование SIGTERM/SIGINT.
 v9.20.4: webhook-режим для BotHost.
 v9.20.5: устойчивый polling — Conflict НЕ убивает процесс.
+v9.20.6: ручной getUpdates вместо updater.start_polling()
+         (PTB внутри себя ре-раизит Conflict и убивает процесс).
 """
 
 import asyncio
@@ -663,7 +665,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.20.5</b>",
+        "🧠 <b>TRADEMIND v9.20.6</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -714,7 +716,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.20.5</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.20.6</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -2273,7 +2275,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.20.5</b>\n\n"
+        f"🎯 <b>MODEL 9.20.6</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2824,12 +2826,13 @@ async def post_shutdown(application):
         print("[SHUTDOWN] no monitor task to stop", flush=True)
 
 
-# --- STURDY POLLING (v9.20.5) ---
+# --- STURDY POLLING (v9.20.6) ---
 
 async def _run_polling_forever(app):
     """
-    Устойчивый polling: Conflict (второй инстанс) НЕ убивает процесс.
-    Пробуем каждые 30 секунд пока Telegram не разрешит.
+    v9.20.6: ручной polling через bot.get_updates().
+    Любой Conflict (второй инстанс) ловится здесь,
+    процесс НЕ падает, PTB-внутренний ретрай-луп не задействован.
     """
     print("[POLLING] initialize...", flush=True)
     try:
@@ -2838,69 +2841,88 @@ async def _run_polling_forever(app):
         print(f"[POLLING] initialize failed: {e}", flush=True)
         raise
 
-    attempt = 0
+    try:
+        await app.bot.delete_webhook(
+            drop_pending_updates=True)
+        print("[POLLING] webhook cleared", flush=True)
+    except Exception as e:
+        print(
+            f"[POLLING] delete_webhook warn: {e}",
+            flush=True)
+
+    if not app.running:
+        await app.start()
+    print("[POLLING] app started", flush=True)
+
+    # Помечаем updater как running, чтобы app.process_update
+    # корректно прогонял апдейты через хендлеры, но
+    # НЕ вызываем updater.start_polling() — он ре-раизит Conflict.
+    try:
+        if app.updater and not app.updater.running:
+            app.updater._running = True
+    except Exception as e:
+        print(f"[POLLING] updater patch warn: {e}",
+              flush=True)
+
+    offset = None
+    conflict_count = 0
+    print("[POLLING] manual getUpdates loop started",
+          flush=True)
+
     while True:
-        attempt += 1
         try:
-            try:
-                await app.bot.delete_webhook(
-                    drop_pending_updates=True)
-            except Exception as e:
-                print(
-                    f"[POLLING] delete_webhook warn: {e}",
-                    flush=True)
-
-            if not app.running:
-                await app.start()
-
-            await app.updater.start_polling(
-                drop_pending_updates=True,
+            updates = await app.bot.get_updates(
+                offset=offset,
+                timeout=25,
                 allowed_updates=None,
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=15,
             )
-            print(
-                f"[POLLING] started (attempt {attempt})",
-                flush=True)
-            break
+
+            if updates:
+                conflict_count = 0
+                for upd in updates:
+                    try:
+                        await app.process_update(upd)
+                    except Exception as exc:
+                        print(
+                            f"[POLLING] process_update err: "
+                            f"{exc}", flush=True)
+                offset = updates[-1].update_id + 1
 
         except telegram.error.Conflict as e:
+            conflict_count += 1
             print(
-                f"[POLLING] CONFLICT: {e}",
+                f"[POLLING] CONFLICT #{conflict_count}: {e}",
                 flush=True)
             print(
                 "[POLLING] Второй инстанс бота с тем же "
-                "токеном. Retry in 30s...",
+                "токеном активен. Ждём 30с...",
                 flush=True)
             await asyncio.sleep(30)
 
-        except Exception as e:
-            print(
-                f"[POLLING] start err: {e}. "
-                f"Retry in 10s...",
-                flush=True)
-            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            print("[POLLING] cancelled", flush=True)
+            raise
 
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        print("[POLLING] cancelled", flush=True)
-    finally:
-        print("[POLLING] stopping...", flush=True)
-        try:
-            if app.updater and app.updater.running:
-                await app.updater.stop()
-        except Exception:
-            pass
-        try:
-            if app.running:
-                await app.stop()
-        except Exception:
-            pass
-        try:
-            await app.shutdown()
-        except Exception:
-            pass
-        print("[POLLING] stopped", flush=True)
+        except telegram.error.TimedOut:
+            # нормально для long polling
+            continue
+
+        except telegram.error.NetworkError as e:
+            print(
+                f"[POLLING] network err: {e}. 5s...",
+                flush=True)
+            await asyncio.sleep(5)
+
+        except Exception as e:
+            import traceback
+            print(
+                f"[POLLING] unexpected err: {e}. 5s...",
+                flush=True)
+            traceback.print_exc()
+            await asyncio.sleep(5)
 
 
 # --- MAIN ---
@@ -2985,7 +3007,7 @@ def main():
                 flush=True)
 
     print(
-        "[BOOT] MODE: POLLING (sturdy, retry on Conflict)",
+        "[BOOT] MODE: POLLING (sturdy, manual getUpdates)",
         flush=True)
 
     try:
