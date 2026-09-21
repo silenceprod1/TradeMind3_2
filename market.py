@@ -1,15 +1,12 @@
 # ============================================================
-# TradeMind 7.9
+# TradeMind 7.10
 # market.py
 #
-# Изменения vs 7.8:
-# - MARKET_VERSION: 7.8 -> 7.9
-# - Добавлен BACKTEST_LOOKBACK_DAYS
-# - Добавлена get_klines_days(interval, days, symbol) — пагинированная
-#   загрузка N дней истории через Binance klines (limit<=1000 за раз)
-# - Добавлена get_market_data_history(symbol, days) — снапшот рынка
-#   на N дней (для бэктеста)
-# - get_klines_history: ускорена загрузка, корректный endTime
+# Изменения vs 7.9:
+# - MARKET_VERSION: 7.9 -> 7.10
+# - LOOKBACK_D1: 60 -> 250 (для D1 EMA200 в strategy v9.21)
+# - get_market_data_history: тянет D1-свечи и кладёт их в d1_context
+# - в снапшот истории добавлены candles_d1
 # ============================================================
 
 from __future__ import annotations
@@ -23,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
-MARKET_VERSION = "7.9"
+MARKET_VERSION = "7.10"
 
 BASE_URL = "https://api.binance.com/api/v3"
 REQUEST_TIMEOUT = 10
@@ -44,7 +41,7 @@ COINS = {
 }
 
 
-LOOKBACK_D1 = 60
+LOOKBACK_D1 = 250
 LOOKBACK_1H = 500
 LOOKBACK_15M = 500
 LOOKBACK_5M = 500
@@ -124,7 +121,7 @@ def _get_session():
     if session is None:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "TradeMind/7.9",
+            "User-Agent": "TradeMind/7.10",
             "Accept": "application/json",
         })
         adapter = requests.adapters.HTTPAdapter(
@@ -434,6 +431,7 @@ def _analyze_d1_context(candles_d1, price):
     empty = {
         "trend": "NEUTRAL", "point_a": None, "point_b": None,
         "last_swing_high": None, "last_swing_low": None,
+        "candles_d1": list(candles_d1 or []),
     }
     if not candles_d1 or len(candles_d1) < 20:
         return empty
@@ -496,6 +494,7 @@ def _analyze_d1_context(candles_d1, price):
         "point_b": point_b,
         "last_swing_high": swing_highs[-1]["price"] if swing_highs else None,
         "last_swing_low": swing_lows[-1]["price"] if swing_lows else None,
+        "candles_d1": list(candles_d1),
     }
 
 
@@ -1189,17 +1188,22 @@ def get_market_data(symbol="SOLUSDT"):
 def get_market_data_history(symbol="SOLUSDT", days=None):
     """
     Снапшот рынка за N дней (по умолчанию BACKTEST_LOOKBACK_DAYS).
-    Возвращает свечи 1h/15m/5m в одном формате с get_market_data.
-    Используется бэктестом для прогона стратегии по истории.
+    Возвращает свечи 1d/1h/15m/5m в одном формате с get_market_data.
+    v7.10: тянет D1-свечи, чтобы стратегия v9.21 могла считать EMA-фильтр.
     """
     symbol = _normalize_symbol(symbol)
     if days is None:
         days = BACKTEST_LOOKBACK_DAYS
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    # D1: минимум 250 свечей (для EMA200) + запас
+    d1_days = max(days + 5, 260)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_d1 = ex.submit(get_klines_days, "1d", d1_days, symbol)
         f_1h = ex.submit(get_klines_days, "1h", days + 5, symbol)
         f_15m = ex.submit(get_klines_days, "15m", days + 5, symbol)
         f_5m = ex.submit(get_klines_days, "5m", days + 5, symbol)
+        candles_d1 = f_d1.result()
         candles_1h = f_1h.result()
         candles_15m = f_15m.result()
         candles_5m = f_5m.result()
@@ -1207,30 +1211,30 @@ def get_market_data_history(symbol="SOLUSDT", days=None):
     if not candles_5m:
         return {
             "symbol": symbol, "price": None, "days": days,
+            "candles_d1": candles_d1,
             "candles_1h": candles_1h,
             "candles_15m": candles_15m,
             "candles_5m": candles_5m,
-            "candles_d1": [],
             "candles_1m": [],
             "major_liquidity": {"BSL": [], "SSL": []},
-            "d1_context": _analyze_d1_context([], 0),
+            "d1_context": _analyze_d1_context(candles_d1, 0),
             "fvgs": [],
             "market_version": MARKET_VERSION,
         }
 
     price = float(candles_5m[-1]["close"])
     major_liquidity = _build_major_liquidity(candles_1h, candles_15m, price)
-    d1_context = _analyze_d1_context([], price)
+    d1_context = _analyze_d1_context(candles_d1, price)
     fvgs = collect_fvgs(candles_5m, candles_15m, price)
 
     return {
         "symbol": symbol,
         "price": price,
         "days": days,
+        "candles_d1": candles_d1,
         "candles_1h": candles_1h,
         "candles_15m": candles_15m,
         "candles_5m": candles_5m,
-        "candles_d1": [],
         "candles_1m": [],
         "major_liquidity": major_liquidity,
         "d1_context": d1_context,
@@ -1310,7 +1314,7 @@ def debug_symbol(symbol):
     print("=" * 60)
     print(f"TradeMind Market {MARKET_VERSION}")
     print(f"Symbol: {symbol}")
-    print(f"LOOKBACK: 1h={LOOKBACK_1H} 15m={LOOKBACK_15M} 5m={LOOKBACK_5M} 1m={LOOKBACK_1M}")
+    print(f"LOOKBACK: D1={LOOKBACK_D1} 1h={LOOKBACK_1H} 15m={LOOKBACK_15M} 5m={LOOKBACK_5M} 1m={LOOKBACK_1M}")
     print("=" * 60)
     try:
         data = get_market_data(symbol)
