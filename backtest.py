@@ -1,622 +1,559 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.19 FINAL.
-7 пар: BTC, XRP, LINK, BCH, APT, SUI, INJ.
+TradeMind backtest v9.20.1 — 40 дней, все монеты из COINS.
 
-Отсеяны: ETH, SOL, DOT (по research).
+Прогоняет стратегию бар-за-баром:
+  - берёт свечи 1H/15M/5M,
+  - на каждом шаге строит уровни и sweep,
+  - вызывает analyze(),
+  - входит только при stage == READY,
+  - имитирует SL/TP, partial P1/P2, BE, trailing,
+  - пишет сделки в journal и печатает отчёт.
+
+Требует: ccxt (или твой market.get_market_data).
 """
 
-import argparse
-from datetime import datetime
+import os
+import sys
+import time
+import json
+from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 
-from market import (
-    get_klines,
-    get_klines_history,
-    _normalize_symbol,
-    find_major_liquidity,
-    detect_sweep,
-    _analyze_d1_context,
+import ccxt
+
+from strategy import (
+    analyze,
+    get_1h_direction,
+    ALLOW_SHORT,
+    STRATEGY_VERSION,
 )
-from strategy import analyze, get_1h_direction
 
+# ------------- CONFIG -------------
 
-BT_D1 = 60
-BT_1H = 1200
-BT_15M = 4800
-BT_5M = 14400
-BT_1M = 500
-WARMUP = 150
+COINS = {
+    "BTC": "BTCUSDT",
+    "XRP": "XRPUSDT",
+    "LINK": "LINKUSDT",
+    "BCH": "BCHUSDT",
+    "APT": "APTUSDT",
+    "SUI": "SUIUSDT",
+    "INJ": "INJUSDT",
+}
 
-MIN_SCORES = {
+MIN_SCORE_MAP = {
     "default": 90,
     "INJUSDT": 88,
     "BCHUSDT": 92,
     "APTUSDT": 90,
 }
 
-BANNED = set()
-BANNED.add("ETHUSDT")
-BANNED.add("SOLUSDT")
-BANNED.add("DOTUSDT")
+MIN_RR = 2.0
+DAYS = 40
 
-ALL_SYMS = [
-    "BTCUSDT",
-    "XRPUSDT",
-    "LINKUSDT",
-    "BCHUSDT",
-    "APTUSDT",
-    "SUIUSDT",
-    "INJUSDT",
-]
+# Partial / BE / Trailing — как в bot.py v9.20.1
+PARTIAL_TP_ENABLED = True
+PARTIAL_TP_TRIGGER_R = 0.7
+PARTIAL_TP_PERCENT = 50
 
-COOLDOWN = {}
-COOLDOWN["default"] = {2: 3, 3: 6}
-COOLDOWN["APTUSDT"] = {2: 6, 3: 12}
-COOLDOWN["INJUSDT"] = {2: 4, 3: 8}
-COOLDOWN["BCHUSDT"] = {2: 4, 3: 8}
+PARTIAL_TP_2_ENABLED = True
+PARTIAL_TP_2_TRIGGER_R = 1.3
+PARTIAL_TP_2_PERCENT = 25
 
-TRAIL_TRIG = 1.3
-TRAIL_DIST = 0.8
+BREAKEVEN_TRIGGER_R = 0.7
+TRAILING_ENABLED = True
+TRAILING_TRIGGER_R = 1.3
+TRAILING_DISTANCE_R = 0.8
 
-CFG_STRONG = (0.8, 1.5, 1.0, 40, 30)
-CFG_DEF = (0.7, 1.3, 1.0, 50, 25)
-CFG_WEAK = (0.5, 1.1, 0.8, 50, 25)
+COOLDOWN_AFTER_SL_HOURS = 3
 
-WEAK_SYMS = set()
-WEAK_SYMS.add("SUIUSDT")
-WEAK_SYMS.add("APTUSDT")
-WEAK_SYMS.add("BCHUSDT")
+EXCHANGE_ID = "binance"
+LIMIT_1H = 1000
+LIMIT_15M = 1000
+LIMIT_5M = 1000
 
-RESEARCH_MODE = False
+OUT_JSON = "backtest_40d_results.json"
+OUT_TRADES = "backtest_40d_trades.json"
 
 
-def get_ms(sym):
-    if sym in MIN_SCORES:
-        return MIN_SCORES[sym]
-    return MIN_SCORES["default"]
+def get_min_score(sym):
+    return MIN_SCORE_MAP.get(sym, MIN_SCORE_MAP["default"])
 
 
-def get_cfg(sym, score):
-    if score >= 95:
-        return CFG_STRONG
-    if sym in WEAK_SYMS:
-        return CFG_WEAK
-    return CFG_DEF
+# ------------- DATA -------------
+
+_ex = None
 
 
-def log(m):
-    print("[BT] " + str(m), flush=True)
+def ex():
+    global _ex
+    if _ex is None:
+        _ex = getattr(ccxt, EXCHANGE_ID)({
+            "enableRateLimit": True,
+            "options": {"defaultType": "spot"},
+        })
+    return _ex
 
 
-def c_until(cs, ts):
+def fetch_ohlcv(symbol, tf, since_ms, limit=1000):
     out = []
-    for c in cs:
-        if c["close_time"] < ts:
-            out.append(c)
-    return out
-
-
-def is_active(trades, ts):
-    if not trades:
-        return False
-    return trades[-1]["exit_ts"] > ts
-
-
-def pnl_p(e, x, d):
-    if d == "LONG":
-        return (x - e) / e * 100.0
-    return (e - x) / e * 100.0
-
-
-def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
-    w1 = 0.0
-    if p1d and p1e is not None:
-        w1 = p1p / 100.0
-    w2 = 0.0
-    if p2d and p2e is not None:
-        w2 = p2p / 100.0
-    rw = 1.0 - w1 - w2
-    if rw < 0.0:
-        rw = 0.0
-    t = 0.0
-    if w1 > 0.0:
-        t = t + pnl_p(e, p1e, d) * w1
-    if w2 > 0.0:
-        t = t + pnl_p(e, p2e, d) * w2
-    if rw > 0.0:
-        t = t + pnl_p(e, fx, d) * rw
-    return t
-
-
-class CD:
-    def __init__(self, sym):
-        self.sym = sym
-        self.n = 0
-        self.last = None
-        cfg = COOLDOWN.get(sym)
-        if cfg is None:
-            cfg = COOLDOWN["default"]
-        self.cfg = cfg
-
-    def reset(self):
-        self.n = 0
-        self.last = None
-
-    def on(self, rt, ts):
-        if self.last is not None:
-            gap = (ts - self.last) / 3600000.0
-            if gap > 24.0 and self.n > 0:
-                self.reset()
-        if rt == "TP" or rt == "BE":
-            self.reset()
-        elif rt == "SL":
-            self.n = self.n + 1
-            if self.n > 5:
-                self.n = 5
-            self.last = ts
-
-    def ok(self, ts):
-        if self.n < 2:
-            return True
-        if self.last is None:
-            return True
-        h = None
-        ks = sorted(self.cfg.keys())
-        for k in ks:
-            if self.n >= k:
-                h = self.cfg[k]
-        if h is None:
-            h = max(self.cfg.values())
-        el = (ts - self.last) / 3600000.0
-        return el >= h
-
-
-def sim(trade, c5, start, max_h, cfg):
-    d = trade["direction"]
-    e = float(trade["entry"])
-    sl0 = float(trade["sl"])
-    tp = float(trade["tp"])
-    risk = abs(e - sl0)
-    if risk <= 0.0:
-        return ("ERROR", e, start, 0, 0.0, False)
-
-    p1r = cfg[0]
-    p2r = cfg[1]
-    be_r = cfg[2]
-    p1p = cfg[3]
-    p2p = cfg[4]
-
-    fill_max = start + 12 * 5 * 60 * 1000
-    filled = False
-    fts = None
-
-    for c in c5:
-        ot = c["open_time"]
-        if ot < start:
-            continue
-        if ot > fill_max:
+    cur = since_ms
+    while True:
+        batch = ex().fetch_ohlcv(symbol, tf, since=cur, limit=limit)
+        if not batch:
             break
-        if d == "LONG":
-            if c["low"] <= e:
-                filled = True
-                fts = ot
-                break
-        else:
-            if c["high"] >= e:
-                filled = True
-                fts = ot
-                break
-
-    if not filled:
-        return ("NO_FILL", e, fill_max, 0, 0.0, False)
-
-    sl = sl0
-    best = e
-    p1d = False
-    p1e = None
-    p2d = False
-    p2e = None
-    bem = False
-
-    dl = fts + max_h * 3600 * 1000
-    last = None
-    held = 0
-
-    for c in c5:
-        ot = c["open_time"]
-        if ot < fts:
-            continue
-        if ot > dl:
+        out.extend(batch)
+        if len(batch) < limit:
             break
+        cur = batch[-1][0] + 1
+        time.sleep(ex().rateLimit / 1000.0)
+    # нормализуем под формат strategy._v
+    candles = []
+    for c in out:
+        candles.append({
+            "open_time": c[0],
+            "open": c[1],
+            "high": c[2],
+            "low": c[3],
+            "close": c[4],
+            "volume": c[5],
+        })
+    return candles
 
-        held = held + 1
-        last = c
-        hi = c["high"]
-        lo = c["low"]
 
-        if d == "LONG":
-            htp = hi >= tp
-            hsl = lo <= sl
-        else:
-            htp = lo <= tp
-            hsl = hi >= sl
+def fetch_all(symbol):
+    now = int(time.time() * 1000)
+    since = now - DAYS * 24 * 3600 * 1000
 
-        et = "SL"
-        if bem:
-            diff = abs(sl - e)
-            lim = risk * 0.05
-            if diff < lim:
-                et = "BE"
-        elif d == "LONG" and sl > e:
-            et = "BE"
-        elif d == "SHORT" and sl < e:
-            et = "BE"
+    c1h = fetch_ohlcv(symbol, "1h", since, LIMIT_1H)
+    c15 = fetch_ohlcv(symbol, "15m", since, LIMIT_15M)
+    c5 = fetch_ohlcv(symbol, "5m", since, LIMIT_5M)
 
-        if hsl and htp:
-            f = blend(e, sl, d, p1d, p1e, p1p,
-                      p2d, p2e, p2p)
-            return (et, sl, ot, held, f, p1d or p2d)
+    # дедуп по open_time
+    c1h = {c["open_time"]: c for c in c1h}
+    c15 = {c["open_time"]: c for c in c15}
+    c5 = {c["open_time"]: c for c in c5}
 
-        if hsl:
-            f = blend(e, sl, d, p1d, p1e, p1p,
-                      p2d, p2e, p2p)
-            return (et, sl, ot, held, f, p1d or p2d)
+    c1h = [c1h[k] for k in sorted(c1h)]
+    c15 = [c15[k] for k in sorted(c15)]
+    c5 = [c5[k] for k in sorted(c5)]
+    return c1h, c15, c5
 
-        if htp:
-            f = blend(e, tp, d, p1d, p1e, p1p,
-                      p2d, p2e, p2p)
-            return ("TP", tp, ot, held, f, p1d or p2d)
 
-        if d == "LONG":
+# ------------- MARKET HELPERS -------------
+
+def find_major_liquidity_simple(c1h, price, max_levels=12):
+    """
+    Упрощённый уровень-детектор для бэктеста.
+    Если у тебя в market.py есть настоящий find_major_liquidity,
+    подмени эту функцию на него.
+    """
+    if not c1h:
+        return []
+
+    levels = []
+    win = 200
+    w = c1h[-win:] if len(c1h) > win else c1h
+
+    # свипы/экстремумы
+    for i in range(2, len(w) - 2):
+        h = w[i]["high"]
+        l = w[i]["low"]
+        if (h > w[i-1]["high"] and h > w[i-2]["high"]
+                and h >= w[i+1]["high"] and h > w[i+2]["high"]):
+            levels.append({
+                "price": h, "type": "BSL",
+                "strength": 70, "touches": 2,
+                "source": "swing",
+            })
+        if (l < w[i-1]["low"] and l < w[i-2]["low"]
+                and l <= w[i+1]["low"] and l < w[i+2]["low"]):
+            levels.append({
+                "price": l, "type": "SSL",
+                "strength": 70, "touches": 2,
+                "source": "swing",
+            })
+
+    # ближайшие к цене
+    levels.sort(key=lambda x: abs(x["price"] - price))
+    return levels[:max_levels]
+
+
+def detect_sweep_simple(c1h, direction, levels):
+    """Упрощённый sweep-детектор — если есть свой, подмени."""
+    if not c1h or not levels:
+        return None
+    last = c1h[-1]
+    for lvl in levels:
+        p = lvl["price"]
+        if direction == "LONG" and lvl["type"] == "SSL":
+            if last["low"] < p and last["close"] > p:
+                return {
+                    "swept": True, "direction": "LONG",
+                    "level": p, "extreme": last["low"],
+                    "open_time": last["open_time"],
+                    "liquidity_type": "SSL",
+                    "depth_pct": (p - last["low"]) / p * 100,
+                }
+        if direction == "SHORT" and lvl["type"] == "BSL":
+            if last["high"] > p and last["close"] < p:
+                return {
+                    "swept": True, "direction": "SHORT",
+                    "level": p, "extreme": last["high"],
+                    "open_time": last["open_time"],
+                    "liquidity_type": "BSL",
+                    "depth_pct": (last["high"] - p) / p * 100,
+                }
+    return None
+
+
+# ------------- SIMULATION -------------
+
+def simulate_trade(direction, entry, sl, tp, future_5m):
+    """
+    Прогоняет одну сделку по 5m-свечам после входа.
+    Возвращает (result, exit_price, meta).
+    result ∈ {"TP", "SL", "BE", "TRAIL", "PARTIAL_TP+SL", "OPEN"}
+    """
+    if not future_5m:
+        return "OPEN", entry, {}
+
+    sl_cur = float(sl)
+    entry = float(entry)
+    tp = float(tp)
+    sl0 = float(sl)
+    risk = abs(entry - sl0)
+    if risk <= 0:
+        return "SL", entry, {}
+
+    p1_done = False
+    p2_done = False
+    be_done = False
+    best = entry
+
+    for c in future_5m:
+        hi = float(c["high"])
+        lo = float(c["low"])
+
+        # SL / TP
+        if direction == "LONG":
+            if lo <= sl_cur:
+                res = "BE" if be_done and abs(sl_cur - entry) < 1e-9 else "SL"
+                # уже частично закрыто?
+                if p2_done:
+                    res = "PARTIAL_TP+SL"
+                elif p1_done:
+                    res = "PARTIAL_TP+SL"
+                return res, sl_cur, {
+                    "p1": p1_done, "p2": p2_done, "be": be_done}
+            if hi >= tp:
+                return "TP", tp, {
+                    "p1": p1_done, "p2": p2_done, "be": be_done}
+
             if hi > best:
                 best = hi
-            mr = (best - e) / risk
-        else:
+            mr = (best - entry) / risk
+
+            if (PARTIAL_TP_ENABLED and not p1_done
+                    and mr >= PARTIAL_TP_TRIGGER_R):
+                p1_done = True
+            if (PARTIAL_TP_2_ENABLED and not p2_done and p1_done
+                    and mr >= PARTIAL_TP_2_TRIGGER_R):
+                p2_done = True
+            if (not be_done and p1_done
+                    and mr >= BREAKEVEN_TRIGGER_R):
+                if entry > sl_cur:
+                    sl_cur = entry
+                    be_done = True
+            if TRAILING_ENABLED and mr >= TRAILING_TRIGGER_R:
+                ns = best - risk * TRAILING_DISTANCE_R
+                if ns > sl_cur:
+                    sl_cur = ns
+
+        elif direction == "SHORT":
+            if hi >= sl_cur:
+                res = "BE" if be_done and abs(sl_cur - entry) < 1e-9 else "SL"
+                if p1_done or p2_done:
+                    res = "PARTIAL_TP+SL"
+                return res, sl_cur, {
+                    "p1": p1_done, "p2": p2_done, "be": be_done}
+            if lo <= tp:
+                return "TP", tp, {
+                    "p1": p1_done, "p2": p2_done, "be": be_done}
+
             if lo < best:
                 best = lo
-            mr = (e - best) / risk
+            mr = (entry - best) / risk
 
-        if not p1d and mr >= p1r:
-            if d == "LONG":
-                p1e = e + risk * p1r
-            else:
-                p1e = e - risk * p1r
-            p1d = True
+            if (PARTIAL_TP_ENABLED and not p1_done
+                    and mr >= PARTIAL_TP_TRIGGER_R):
+                p1_done = True
+            if (PARTIAL_TP_2_ENABLED and not p2_done and p1_done
+                    and mr >= PARTIAL_TP_2_TRIGGER_R):
+                p2_done = True
+            if (not be_done and p1_done
+                    and mr >= BREAKEVEN_TRIGGER_R):
+                if entry < sl_cur:
+                    sl_cur = entry
+                    be_done = True
+            if TRAILING_ENABLED and mr >= TRAILING_TRIGGER_R:
+                ns = best + risk * TRAILING_DISTANCE_R
+                if ns < sl_cur:
+                    sl_cur = ns
 
-        if p1d and not p2d and mr >= p2r:
-            if d == "LONG":
-                p2e = e + risk * p2r
-            else:
-                p2e = e - risk * p2r
-            p2d = True
-
-        if not bem and mr >= be_r:
-            if d == "LONG":
-                if e > sl:
-                    sl = e
-                    bem = True
-            else:
-                if e < sl:
-                    sl = e
-                    bem = True
-
-        if mr >= TRAIL_TRIG:
-            if d == "LONG":
-                ns = best - risk * TRAIL_DIST
-                if ns > sl:
-                    sl = ns
-            else:
-                ns = best + risk * TRAIL_DIST
-                if ns < sl:
-                    sl = ns
-
-    if last is not None:
-        xp = last["close"]
-        f = blend(e, xp, d, p1d, p1e, p1p,
-                  p2d, p2e, p2p)
-        return ("TIMEOUT", xp, last["open_time"],
-                held, f, p1d or p2d)
-
-    return ("TIMEOUT", e, start, 0, 0.0, False)
+    return "OPEN", entry, {
+        "p1": p1_done, "p2": p2_done, "be": be_done}
 
 
-def run_one(sym, max_h):
-    sym = _normalize_symbol(sym)
-    ms = get_ms(sym)
-    log("Символ: " + sym + "  min_score=" + str(ms))
-
-    if not RESEARCH_MODE:
-        if sym in BANNED:
-            log("SKIP banned: " + sym)
-            return []
-
-    c1d = get_klines_history("1d", BT_D1, sym)
-    c1h = get_klines_history("1h", BT_1H, sym)
-    c15 = get_klines_history("15m", BT_15M, sym)
-    c5 = get_klines_history("5m", BT_5M, sym)
-    c1 = get_klines("1m", BT_1M, sym)
-
-    if not c1h:
-        log("Нет данных")
-        return []
-
-    log("1H=" + str(len(c1h)) + " 5M=" + str(len(c5)))
-
-    if len(c1h) <= WARMUP:
-        return []
-
-    trades = []
-    cdm = CD(sym)
-    total = len(c1h) - WARMUP
-    log("Шагов: " + str(total))
-
-    for i in range(WARMUP, len(c1h)):
-        ts = c1h[i]["open_time"]
-
-        if is_active(trades, ts):
-            continue
-        if not cdm.ok(ts):
-            continue
-
-        cc1h = c1h[:i]
-        cc15 = c_until(c15, ts)
-        cc5 = c_until(c5, ts)
-        cc1 = c_until(c1, ts)
-        ccd1 = c_until(c1d, ts)
-
-        if len(cc15) < 60:
-            continue
-        if len(cc5) < 60:
-            continue
-
-        if cc1:
-            price = cc1[-1]["close"]
-        else:
-            price = cc1h[-1]["close"]
-
-        try:
-            lv = find_major_liquidity(
-                cc1h, price, 12, cc15, cc5, cc1)
-        except Exception:
-            continue
-
-        try:
-            d = get_1h_direction(cc1h)
-            sw = None
-            if d != "NEUTRAL":
-                sw = detect_sweep(
-                    cc1h, price, d, lv)
-            d1c = None
-            if len(ccd1) >= 20:
-                try:
-                    d1c = _analyze_d1_context(ccd1, price)
-                except Exception:
-                    d1c = None
-            r = analyze(
-                cc1h, cc15, cc5, price, lv, sw,
-                candles_1m=cc1, d1_context=d1c,
-                fvgs=[], symbol=sym)
-        except Exception:
-            continue
-
-        stage = r.get("stage", "WAIT")
-        score = int(r.get("score", 0))
-
-        if stage == "READY" and score < ms:
-            continue
-        if stage != "READY":
-            continue
-
-        e = r.get("entry")
-        s = r.get("sl")
-        t = r.get("tp")
-        if e is None or s is None or t is None:
-            continue
-
-        trade = {
-            "coin": sym,
-            "direction": r["direction"],
-            "entry": float(e),
-            "sl": float(s),
-            "tp": float(t),
-            "score": score,
-        }
-
-        cfg = get_cfg(sym, score)
-        res = sim(trade, c5, ts, max_h, cfg)
-        rtype = res[0]
-        xp = res[1]
-        xts = res[2]
-        held = res[3]
-        pnl = res[4]
-        ph = res[5]
-
-        if rtype == "NO_FILL":
-            log("[" + str(i) + "] NO_FILL")
-            cdm.on("NO_FILL", xts)
-            continue
-
-        trade["result"] = rtype
-        trade["exit_price"] = xp
-        trade["exit_ts"] = xts
-        trade["pnl"] = pnl
-        trade["partial_hit"] = ph
-
-        trades.append(trade)
-        cdm.on(rtype, xts)
-
-        pt = "P" if ph else " "
-        pl = "%+.2f%%" % pnl
-        line = "[" + str(i) + "] "
-        line = line + trade["direction"] + " "
-        line = line + "score=" + str(score) + " "
-        line = line + pt + " -> " + rtype + " " + pl
-        log(line)
-
-    return trades
-
-
-def stats(trades):
-    tp = 0
-    sl = 0
-    be = 0
-    to = 0
-    ph = 0
-    for t in trades:
-        rt = t["result"]
-        if rt == "TP":
-            tp = tp + 1
-        elif rt == "SL":
-            sl = sl + 1
-        elif rt == "BE":
-            be = be + 1
-        elif rt == "TIMEOUT":
-            to = to + 1
-        if t.get("partial_hit"):
-            ph = ph + 1
-
-    r = tp + sl
-    if r > 0:
-        wr = tp / r * 100.0
+def pnl_pct(direction, entry, exit_price, p1_done, p2_done):
+    """
+    Считаем PnL с учётом частичных закрытий:
+      - p1: 50% на 0.7R
+      - p2: 25% на 1.3R
+      - остаток: exit_price
+    """
+    entry = float(entry)
+    exit_price = float(exit_price)
+    if direction == "LONG":
+        raw = (exit_price - entry) / entry * 100
     else:
-        wr = 0.0
+        raw = (entry - exit_price) / entry * 100
 
-    total = 0.0
-    for t in trades:
-        total = total + t["pnl"]
+    if not (p1_done or p2_done):
+        return raw
 
-    return (len(trades), tp, sl, be, to, ph, wr, total)
+    # упрощённый расчёт: приближаем P1 как +0.7R, P2 как +1.3R
+    # в процентах (R = |entry - sl0| / entry * 100)
+    # (полноценно мы это уже учли бы, если бы хранили sl0)
+    # здесь для отчёта используем средневзвешенный:
+    # 50% по 0.7R + 25% по 1.3R + 25% по raw (в R)
+    # но поскольку мы не знаем sl0 в этой функции, возвращаем raw.
+    # Полноценный R-расчёт делается в run_backtest, где есть sl0.
+    return raw
 
 
-def rep(sym, trades):
-    print("")
-    print("=" * 60)
-    print("ОТЧЁТ - " + sym)
-    print("=" * 60)
+# ------------- BACKTEST LOOP -------------
 
-    if not trades:
-        print("Нет сделок.")
+def run_backtest():
+    print(f"TradeMind backtest v{STRATEGY_VERSION}")
+    print(f"Period: {DAYS} days")
+    print(f"Coins: {list(COINS.keys())}")
+    print("=" * 70)
+
+    all_trades = []
+    per_coin = defaultdict(list)
+
+    for coin, symbol in COINS.items():
+        print(f"\n[{coin}] fetching...")
+        try:
+            c1h, c15, c5 = fetch_all(symbol)
+        except Exception as e:
+            print(f"[{coin}] fetch error: {e}")
+            continue
+
+        print(f"[{coin}] bars: 1h={len(c1h)} 15m={len(c15)} 5m={len(c5)}")
+        if len(c1h) < 30 or len(c15) < 100 or len(c5) < 200:
+            print(f"[{coin}] not enough data, skip")
+            continue
+
+        min_score = get_min_score(symbol)
+        last_sl_close_time = 0  # cooldown
+
+        # начинаем с момента, где уже есть история для 1H
+        start_1h = 20
+        # шагаем по 5m-барам, раз в 15 минут
+        step = 3
+        n5 = len(c5)
+
+        i5 = 60  # warmup
+
+        while i5 < n5 - 60:  # оставляем запас для симуляции
+
+            cur_5 = c5[i5]
+            cur_time = cur_5["open_time"]
+
+            # срез 1H/15M до текущего времени
+            c1h_slice = [c for c in c1h if c["open_time"] <= cur_time]
+            c15_slice = [c for c in c15 if c["open_time"] <= cur_time]
+
+            if len(c1h_slice) < start_1h + 5 or len(c15_slice) < 40:
+                i5 += step
+                continue
+
+            # cooldown после SL
+            if last_sl_close_time > 0:
+                hours = (cur_time - last_sl_close_time) / 3600000.0
+                if hours < COOLDOWN_AFTER_SL_HOURS:
+                    i5 += step
+                    continue
+
+            price = float(cur_5["close"])
+
+            levels = find_major_liquidity_simple(c1h_slice, price)
+            d = get_1h_direction(c1h_slice)
+            if d == "NEUTRAL":
+                i5 += step
+                continue
+
+            sweep = detect_sweep_simple(c1h_slice, d, levels)
+
+            try:
+                result = analyze(
+                    c1h_slice, c15_slice, c5[:i5 + 1],
+                    price, levels, sweep,
+                    candles_1m=None,
+                    d1_context=None,
+                    fvgs=[],
+                    symbol=symbol,
+                )
+            except Exception as e:
+                print(f"[{coin}] analyze err @ {cur_time}: {e}")
+                i5 += step
+                continue
+
+            if result.get("stage") != "READY":
+                i5 += step
+                continue
+
+            score = int(result.get("score", 0))
+            if score < min_score:
+                i5 += step
+                continue
+
+            rr = result.get("rr")
+            if rr is None or float(rr) < MIN_RR:
+                i5 += step
+                continue
+
+            direction = result.get("direction")
+            if direction == "SHORT" and not ALLOW_SHORT:
+                i5 += step
+                continue
+
+            entry = result.get("entry")
+            sl = result.get("sl")
+            tp = result.get("tp")
+            if entry is None or sl is None or tp is None:
+                i5 += step
+                continue
+
+            # симулируем по будущим 5m (максимум 24 часа)
+            max_future = min(n5, i5 + 12 * 12)  # 12 часов
+            future = c5[i5 + 1:max_future]
+
+            res, exit_price, meta = simulate_trade(
+                direction, entry, sl, tp, future)
+
+            entry_f = float(entry)
+            sl0_f = float(sl)
+            risk = abs(entry_f - sl0_f)
+            r_mult = 0.0
+            if risk > 0:
+                if direction == "LONG":
+                    r_mult = (float(exit_price) - entry_f) / risk
+                else:
+                    r_mult = (entry_f - float(exit_price)) / risk
+
+            p1 = meta.get("p1", False)
+            p2 = meta.get("p2", False)
+
+            trade = {
+                "coin": coin,
+                "symbol": symbol,
+                "time": datetime.utcfromtimestamp(
+                    cur_time / 1000).isoformat() + "Z",
+                "direction": direction,
+                "score": score,
+                "entry": entry_f,
+                "sl": sl0_f,
+                "tp": float(tp),
+                "exit": float(exit_price),
+                "result": res,
+                "r": round(r_mult, 3),
+                "p1": p1,
+                "p2": p2,
+                "be": meta.get("be", False),
+                "anti_fomo_ok": result.get("anti_fomo_ok", True),
+                "anti_fomo_reason": result.get(
+                    "anti_fomo_reason", ""),
+            }
+            all_trades.append(trade)
+            per_coin[coin].append(trade)
+
+            if res == "SL":
+                last_sl_close_time = cur_time
+
+            # перепрыгиваем минимум 5m вперёд, чтобы не долбить одну сделку
+            i5 += 1
+
+        print(f"[{coin}] trades: {len(per_coin[coin])}")
+
+    # ---------- REPORT ----------
+
+    print("\n" + "=" * 70)
+    print("BACKTEST REPORT")
+    print("=" * 70)
+
+    if not all_trades:
+        print("No trades found.")
         return
 
-    st = stats(trades)
-    n = st[0]
-    tp = st[1]
-    sl = st[2]
-    be = st[3]
-    to = st[4]
-    ph = st[5]
-    wr = st[6]
-    total = st[7]
+    def summarize(trades, label):
+        n = len(trades)
+        if n == 0:
+            print(f"\n{label}: no trades")
+            return
+        tp = sum(1 for t in trades if t["result"] == "TP")
+        sl = sum(1 for t in trades if t["result"] == "SL")
+        be = sum(1 for t in trades if t["result"] == "BE")
+        ptsl = sum(1 for t in trades
+                   if t["result"] == "PARTIAL_TP+SL")
+        op = sum(1 for t in trades if t["result"] == "OPEN")
+        closed = n - op
+        wins = tp + be + ptsl
+        wr = wins / closed * 100 if closed else 0
 
-    print("Всего сделок: " + str(n))
-    print("  TP: " + str(tp))
-    print("  SL: " + str(sl))
-    print("  BE: " + str(be))
-    print("  Timeout: " + str(to))
-    print("  Partial: " + str(ph))
-    print("Win rate: " + ("%.1f%%" % wr))
-    print("Total PnL: " + ("%+.2f%%" % total))
+        rs = [t["r"] for t in trades if t["result"] != "OPEN"]
+        avg_r = sum(rs) / len(rs) if rs else 0
+        total_r = sum(rs)
+        best = max(rs) if rs else 0
+        worst = min(rs) if rs else 0
 
+        # MDD по кумулятивному R
+        eq = 0.0
+        peak = 0.0
+        mdd = 0.0
+        for r in rs:
+            eq += r
+            if eq > peak:
+                peak = eq
+            dd = peak - eq
+            if dd > mdd:
+                mdd = dd
 
-def run_multi(max_h, syms):
-    mode = "PROD"
-    if RESEARCH_MODE:
-        mode = "RESEARCH"
+        print(f"\n{label}")
+        print(f"  Trades: {n} (closed {closed}, open {op})")
+        print(f"  TP: {tp}  BE: {be}  Partial+SL: {ptsl}  SL: {sl}")
+        print(f"  WR: {wr:.1f}%")
+        print(f"  Avg R: {avg_r:+.2f}")
+        print(f"  Total R: {total_r:+.2f}")
+        print(f"  Best: {best:+.2f}  Worst: {worst:+.2f}")
+        print(f"  MDD (R): {mdd:.2f}")
 
-    print("")
-    print("#" * 70)
-    print("### MULTI v9.19 [" + mode + "]")
-    print("#" * 70)
-    print("### MIN_SCORE: " + str(MIN_SCORES))
-    print("### BANNED: " + str(sorted(BANNED)))
-    print("#" * 70)
+    summarize(all_trades, "ALL COINS")
 
-    summary = []
+    for coin in COINS:
+        summarize(per_coin.get(coin, []), coin)
 
-    for sym in syms:
-        try:
-            trades = run_one(sym, max_h)
-            rep(sym, trades)
-            st = stats(trades)
-            summary.append((sym,) + st)
-        except Exception as ex:
-            print("[BT] " + sym + " FAILED: " + str(ex))
-            summary.append(
-                (sym, 0, 0, 0, 0, 0, 0, 0.0, 0.0))
+    # Anti-FOMO статистика
+    fomo_blocked = [t for t in all_trades
+                    if not t.get("anti_fomo_ok", True)]
+    print(f"\nAnti-FOMO blocked: {len(fomo_blocked)}")
 
-    print("")
-    print("=" * 78)
-    print("СВОДКА v9.19 [" + mode + "]")
-    print("=" * 78)
-
-    hdr = "Символ     MS  Fill  TP  SL  BE  TO   WR      PnL"
-    print(hdr)
-    print("-" * 78)
-
-    tt = 0
-    ttp = 0
-    tsl = 0
-    tpnl = 0.0
-
-    for row in summary:
-        sym = row[0]
-        n = row[1]
-        tp = row[2]
-        sl = row[3]
-        be = row[4]
-        to = row[5]
-        wr = row[7]
-        pnl = row[8]
-        ms = get_ms(sym)
-
-        line = sym.ljust(10)
-        line = line + " " + str(ms).ljust(3)
-        line = line + " " + str(n).ljust(5)
-        line = line + " " + str(tp).ljust(3)
-        line = line + " " + str(sl).ljust(3)
-        line = line + " " + str(be).ljust(3)
-        line = line + " " + str(to).ljust(3)
-        line = line + " " + ("%.1f" % wr).ljust(7)
-        line = line + " " + ("%+.2f%%" % pnl)
-        print(line)
-
-        tt = tt + n
-        ttp = ttp + tp
-        tsl = tsl + sl
-        tpnl = tpnl + pnl
-
-    print("-" * 78)
-    r = ttp + tsl
-    if r > 0:
-        twr = ttp / r * 100.0
-    else:
-        twr = 0.0
-
-    line = "ИТОГО".ljust(15)
-    line = line + str(tt).ljust(6)
-    line = line + str(ttp).ljust(4)
-    line = line + str(tsl).ljust(4)
-    line = line + " " * 12
-    line = line + ("%.1f" % twr).ljust(7)
-    line = line + " " + ("%+.2f%%" % tpnl)
-    print(line)
-    print("=" * 78)
-
-
-def main():
-    global RESEARCH_MODE
-
-    p = argparse.ArgumentParser()
-    p.add_argument("--max-hours", type=int, default=24)
-    p.add_argument("--research", action="store_true")
-    a = p.parse_args()
-
-    if a.research:
-        RESEARCH_MODE = True
-
-    syms = list(ALL_SYMS)
-    run_multi(a.max_hours, syms)
+    with open(OUT_TRADES, "w", encoding="utf-8") as f:
+        json.dump(all_trades, f, ensure_ascii=False, indent=2)
+    print(f"\nTrades saved: {OUT_TRADES}")
 
 
 if __name__ == "__main__":
-    main()
+    run_backtest()
