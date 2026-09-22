@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.30.
+TradeMind backtest v9.31.
 5 пар: XRP, BCH, APT, SUI, INJ.
+90 дней истории.
 """
 
 from market import (
@@ -18,9 +19,9 @@ from strategy import analyze, get_1h_direction
 # --- CONFIG ---
 
 BT_D1 = 250
-BT_1H = 1200
-BT_15M = 4800
-BT_5M = 14400
+BT_1H = 2200        # ~90 дней
+BT_15M = 8800       # ~90 дней
+BT_5M = 26400       # ~90 дней
 BT_1M = 500
 WARMUP = 150
 
@@ -497,7 +498,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.30 [final] [" + mode + "]")
+    print("### MULTI v9.31 [90 days] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
@@ -507,6 +508,7 @@ def run_multi(max_h=24, syms=None):
     print("### CFG_STRONG: " + str(CFG_STRONG))
     print("### CFG_DEF:    " + str(CFG_DEF))
     print("### CFG_WEAK:   " + str(CFG_WEAK))
+    print("### HISTORY:    90 days (1H=2200, 5M=26400)")
     print("#" * 70)
 
     summary = []
@@ -526,7 +528,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("=" * 82)
-    print("СВОДКА v9.30 [" + mode + "]")
+    print("СВОДКА v9.31 [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
