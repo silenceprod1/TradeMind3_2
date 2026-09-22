@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.25.
-v9.24.1: временно отключены ATR-regime и space filter.
-v9.25: откат широкого SL (сужение сломало стратегию),
-       RR повышен до 2.5 для роста асимметрии.
+TradeMind strategy v9.26.
+v9.25: широкий SL, RR 2.5.
+v9.26: откат к базе v9.19-c — RR 2.0, volume confirmation OFF.
+       Оставлено: широкий SL, space/ATR/D1 фильтры отключены.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.25"
+STRATEGY_VERSION = "9.26"
 
 ALLOW_SHORT = True
 
 MAX_ILM_AGE_FOR_ENTRY = 6
 
-# ---- v9.25: широкий SL (откат к v9.19-c) ----
 ATR_SL_MULT_SOFT = 0.8
 SL_BUFFER_PCT = 0.20
 ATR_SL_MAX_MULT = 3.0
@@ -33,8 +32,7 @@ MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 1.0
-# v9.25: RR 2.5 вместо 2.0
-FIXED_RR = 2.5
+FIXED_RR = 2.0
 
 MIN_SWEEP_DEPTH_PCT = 0.12
 MAX_SWEEP_AGE_1H = 24
@@ -55,7 +53,7 @@ MIN_BODY_RATIO_TRIGGER_5M = 0.40
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = True
 
-VOLUME_CONFIRMATION_ENABLED = True
+VOLUME_CONFIRMATION_ENABLED = False
 VOLUME_CONFIRMATION_MULT = 1.2
 VOLUME_CONFIRMATION_LOOKBACK = 20
 
@@ -1496,7 +1494,7 @@ def _apply_ready_promote(result):
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.25 promote: score={score} "
+            f"v9.26 promote: score={score} "
             f"trend={trend:.2f} bos={bos}"
         )
         result["_v910_promoted"] = True
