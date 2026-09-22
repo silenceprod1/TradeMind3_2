@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.29.
+TradeMind backtest v9.30.
 5 пар: XRP, BCH, APT, SUI, INJ.
 
-v9.28: WEAK reverted.
-v9.29: ban BTC, min_score для APT/SUI поднят 90 -> 93.
+v9.29: ban BTC, min_score APT/SUI -> 93.
+v9.30: SUI revert к default=90 (мин-score 93 душил монету).
 """
 
 from market import (
@@ -30,12 +30,12 @@ WARMUP = 150
 FEE_PCT = 0.08
 SLIP_PCT = 0.05
 
+# v9.30: SUI возвращён к default=90
 MIN_SCORES = {
     "default": 90,
     "INJUSDT": 88,
     "BCHUSDT": 92,
     "APTUSDT": 93,
-    "SUIUSDT": 93,
 }
 
 BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT", "LINKUSDT", "BTCUSDT"}
@@ -501,7 +501,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.29 [no BTC, tight APT/SUI] [" + mode + "]")
+    print("### MULTI v9.30 [SUI reverted to 90] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
@@ -530,7 +530,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("=" * 82)
-    print("СВОДКА v9.29 [" + mode + "]")
+    print("СВОДКА v9.30 [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
