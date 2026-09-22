@@ -1,20 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.24.
+TradeMind strategy v9.24.1.
 v9.23: A+C fix — суженный SL + space filter.
-v9.24: fix space filter — не блокируем при отсутствии целей,
-       MIN_RR_SPACE_MULT 1.8 -> 1.3.
+v9.24: fix space filter — не блокируем при отсутствии целей.
+v9.24.1: временно ОТКЛЮЧЕНЫ ATR-regime и space filter.
+         Оставляем только суженный SL + volume confirmation.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.24"
+STRATEGY_VERSION = "9.24.1"
 
 ALLOW_SHORT = True
 
 MAX_ILM_AGE_FOR_ENTRY = 6
 
+# ---- суженный SL ----
 ATR_SL_MULT_SOFT = 1.0
 SL_BUFFER_PCT = 0.10
 ATR_SL_MAX_MULT = 1.8
@@ -104,17 +106,17 @@ ATR_PULLBACK_TOL_MULT = 0.30
 
 ANTI_FOMO_HARD_BLOCK = True
 
+# D1 EMA — отключён с v9.22
 ENABLE_D1_TREND_FILTER = False
 D1_EMA_PERIOD = 50
 D1_TREND_BAND_PCT = 1.0
 
-ENABLE_ATR_REGIME_FILTER = True
+# ---- v9.24.1: ATR-regime ОТКЛЮЧЁН ----
+ENABLE_ATR_REGIME_FILTER = False
 ATR_REGIME_MIN = 1.08
 
-# v9.24: space filter — мягкий
-# MIN_RR_SPACE_MULT 1.8 -> 1.3 (было слишком жёстко).
-# При отсутствии целей — НЕ блокируем.
-ENABLE_SPACE_FILTER = True
+# ---- v9.24.1: SPACE filter ОТКЛЮЧЁН ----
+ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.3
 
 
@@ -572,22 +574,10 @@ def compute_fvg_bonus(sweep, entry, fvgs, direction):
 
 
 # ============================================================
-# v9.24: SPACE FILTER (FIXED)
+# SPACE FILTER (v9.24.1 — отключён)
 # ============================================================
 
 def check_space_to_target(entry, sl, direction, levels):
-    """
-    Проверяет, есть ли пространство от entry до ближайшего
-    противоположного уровня.
-
-    v9.24 fix:
-      - если целей в списке нет — НЕ блокируем (return True).
-      - если после фильтра по направлению пусто — НЕ блокируем.
-      - блокируем ТОЛЬКО когда есть реальная цель ближе
-        MIN_RR_SPACE_MULT × risk.
-
-    Возвращает (ok, nearest_r, nearest_price).
-    """
     if not ENABLE_SPACE_FILTER:
         return True, None, None
 
@@ -601,7 +591,6 @@ def check_space_to_target(entry, sl, direction, levels):
 
     targets = _opposite_levels(levels or [], direction)
     if not targets:
-        # Нет целей в списке — не блокируем
         return True, None, None
 
     candidates = []
@@ -615,7 +604,6 @@ def check_space_to_target(entry, sl, direction, levels):
             candidates.append(tp)
 
     if not candidates:
-        # Все цели не в нужную сторону — не блокируем
         return True, None, None
 
     if direction == "LONG":
@@ -1511,7 +1499,7 @@ def _apply_ready_promote(result):
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.24 promote: score={score} "
+            f"v9.24.1 promote: score={score} "
             f"trend={trend:.2f} bos={bos}"
         )
         result["_v910_promoted"] = True
