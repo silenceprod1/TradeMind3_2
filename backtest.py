@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.28.
-6 пар: BTC, XRP, BCH, APT, SUI, INJ (LINK забанен).
+TradeMind backtest v9.29.
+5 пар: XRP, BCH, APT, SUI, INJ.
 
-v9.27: LINK banned, partials отложены (DEF/STRONG).
-v9.28: CFG_WEAK откачен — слабые монеты (SUI, APT) не ходят далеко.
+v9.28: WEAK reverted.
+v9.29: ban BTC, min_score для APT/SUI поднят 90 -> 93.
 """
 
 from market import (
@@ -34,13 +34,13 @@ MIN_SCORES = {
     "default": 90,
     "INJUSDT": 88,
     "BCHUSDT": 92,
-    "APTUSDT": 90,
+    "APTUSDT": 93,
+    "SUIUSDT": 93,
 }
 
-BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT", "LINKUSDT"}
+BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT", "LINKUSDT", "BTCUSDT"}
 
 ALL_SYMS = [
-    "BTCUSDT",
     "XRPUSDT",
     "BCHUSDT",
     "APTUSDT",
@@ -55,14 +55,12 @@ COOLDOWN = {
     "BCHUSDT": {2: 4, 3: 8},
 }
 
-# v9.28: откат CFG_WEAK к оригинальному
-# Формат: (P1_R, P2_R, BE_R, P1_%, P2_%)
 TRAIL_TRIG = 1.5
 TRAIL_DIST = 0.8
 
-CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)   # score >= 95
-CFG_DEF    = (0.9, 1.6, 1.1, 40, 25)   # default
-CFG_WEAK   = (0.5, 1.1, 0.8, 50, 25)   # SUI, APT, BCH
+CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
+CFG_DEF    = (0.9, 1.6, 1.1, 40, 25)
+CFG_WEAK   = (0.5, 1.1, 0.8, 50, 25)
 
 WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
 
@@ -503,7 +501,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.28 [WEAK reverted] [" + mode + "]")
+    print("### MULTI v9.29 [no BTC, tight APT/SUI] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
@@ -532,7 +530,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("=" * 82)
-    print("СВОДКА v9.28 [" + mode + "]")
+    print("СВОДКА v9.29 [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
