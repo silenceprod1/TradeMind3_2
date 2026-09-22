@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.30.0.
-v9.20.6: ручной getUpdates вместо updater.start_polling().
-v9.20.7: команда /backtest — запуск бэктеста из Telegram.
-v9.20.8: /backtest пишет прогресс в логи BotHost и отправляет .txt.
-v9.30.0: финальная стратегия — 5 пар (без BTC/LINK),
-         score-gated exits (STRONG/DEF/WEAK), обновлены partials/BE/trailing.
+TradeMind bot v9.30.1.
+v9.30.0: финальная стратегия — 5 пар, score-gated exits.
+v9.30.1: fix — fallback price fetch в monitor_active_trades.
+         Если основной скан не дал цену для монеты из активной сделки,
+         дёргаем get_current_price напрямую. Плюс лог активных сделок.
 """
 
 import asyncio
@@ -43,6 +42,7 @@ from market import (
     get_market_data,
     find_major_liquidity,
     detect_sweep,
+    get_current_price,
 )
 
 from strategy import (
@@ -58,9 +58,9 @@ from strategy import (
 TOKEN = os.getenv("BOT_TOKEN")
 
 CHECK_INTERVAL = 60
-SCAN_WORKERS = 12
+SCAN_WORKERS = 8
 MIN_RR = 2.0
-SCAN_CACHE_TTL = 5.0
+SCAN_CACHE_TTL = 3.0
 
 RUN_BACKTEST_ON_START = False
 BACKTEST_SYMBOL = "INJUSDT"
@@ -74,7 +74,6 @@ TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.5
 TRAILING_DISTANCE_R = 0.8
 
-# v9.30: дефолтный CFG_DEF из backtest
 BREAKEVEN_TRIGGER_R = 1.1
 PARTIAL_TP_ENABLED = True
 PARTIAL_TP_TRIGGER_R = 0.9
@@ -102,7 +101,6 @@ NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
 PULLBACK_NOTIF_ENABLED = True
 PULLBACK_NOTIF_DEDUP_HOURS = 1
 
-# v9.30: 5 монет — убраны BTC и LINK
 COINS = {
     "XRP": "XRPUSDT",
     "BCH": "BCHUSDT",
@@ -668,7 +666,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.30.0</b>",
+        "🧠 <b>TRADEMIND v9.30.1</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -719,7 +717,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.30</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.30.1</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -1164,10 +1162,6 @@ def close_trade(trade, exit_price, rtype):
 # --- v9.30: score-gated CFG ---
 
 def _get_cfg_for_trade(trade):
-    """
-    Возвращает (P1_R, P2_R, BE_R, P1_%, P2_%) в зависимости
-    от score и symbol. Совпадает с CFG из backtest.py.
-    """
     score = int(trade.get("score", 0) or 0)
     sym = trade.get("symbol", "")
     if score >= SCORE_STRONG:
@@ -1178,10 +1172,6 @@ def _get_cfg_for_trade(trade):
 
 
 def apply_trailing(trade, cur_price):
-    """
-    v9.30: score-gated exits (STRONG/DEF/WEAK).
-    Возвращает события [("P1"|"P2"|"BE", price)].
-    """
     events = []
 
     try:
@@ -1197,7 +1187,6 @@ def apply_trailing(trade, cur_price):
     if risk <= 0:
         return events
 
-    # v9.30: score-gated config
     p1r, p2r, be_r, p1p, p2p = _get_cfg_for_trade(trade)
 
     # --- LONG ---
@@ -1206,7 +1195,6 @@ def apply_trailing(trade, cur_price):
             best = cur_price
         mr = (best - entry) / risk
 
-        # P1
         if (PARTIAL_TP_ENABLED
                 and not trade.get("partial_tp_done")
                 and mr >= p1r):
@@ -1214,7 +1202,6 @@ def apply_trailing(trade, cur_price):
             trade["partial_tp_price"] = round(cur_price, 8)
             events.append(("P1", cur_price))
 
-        # P2
         if (PARTIAL_TP_2_ENABLED
                 and not trade.get("partial_tp_2_done")
                 and trade.get("partial_tp_done")
@@ -1223,7 +1210,6 @@ def apply_trailing(trade, cur_price):
             trade["partial_tp_2_price"] = round(cur_price, 8)
             events.append(("P2", cur_price))
 
-        # BE — только после P1
         be_ready = (not PARTIAL_TP_ENABLED) or trade.get(
             "partial_tp_done")
         if (be_ready
@@ -1235,7 +1221,6 @@ def apply_trailing(trade, cur_price):
                 trade["be_moved"] = True
                 events.append(("BE", entry))
 
-        # Trailing
         if mr >= TRAILING_TRIGGER_R:
             ns = best - risk * TRAILING_DISTANCE_R
             if ns > cur_sl:
@@ -1248,7 +1233,6 @@ def apply_trailing(trade, cur_price):
             best = cur_price
         mr = (entry - best) / risk
 
-        # P1
         if (PARTIAL_TP_ENABLED
                 and not trade.get("partial_tp_done")
                 and mr >= p1r):
@@ -1256,7 +1240,6 @@ def apply_trailing(trade, cur_price):
             trade["partial_tp_price"] = round(cur_price, 8)
             events.append(("P1", cur_price))
 
-        # P2
         if (PARTIAL_TP_2_ENABLED
                 and not trade.get("partial_tp_2_done")
                 and trade.get("partial_tp_done")
@@ -1265,7 +1248,6 @@ def apply_trailing(trade, cur_price):
             trade["partial_tp_2_price"] = round(cur_price, 8)
             events.append(("P2", cur_price))
 
-        # BE
         be_ready = (not PARTIAL_TP_ENABLED) or trade.get(
             "partial_tp_done")
         if (be_ready
@@ -1277,7 +1259,6 @@ def apply_trailing(trade, cur_price):
                 trade["be_moved"] = True
                 events.append(("BE", entry))
 
-        # Trailing
         if mr >= TRAILING_TRIGGER_R:
             ns = best + risk * TRAILING_DISTANCE_R
             if ns < cur_sl:
@@ -1468,6 +1449,8 @@ async def safe_send_photo(app, chat_id, photo, **kwargs):
             await asyncio.sleep(1.5 * (i + 1))
 
 
+# --- MONITOR ACTIVE TRADES (v9.30.1 FIX) ---
+
 async def monitor_active_trades(app, results):
     active = load_active_trades()
     if not active:
@@ -1485,15 +1468,44 @@ async def monitor_active_trades(app, results):
             continue
         coin = trade.get("coin")
         result = results.get(coin)
-        if not result or result.get("error"):
-            continue
 
-        cur = result.get("price")
+        cur = None
+
+        if result and not result.get("error"):
+            p = result.get("price")
+            if p is not None:
+                try:
+                    cur = float(p)
+                except Exception:
+                    cur = None
+
+        # v9.30.1: fallback — если основной скан не дал цену,
+        # тянем её напрямую через get_current_price
         if cur is None:
-            continue
-        try:
-            cur = float(cur)
-        except Exception:
+            sym = trade.get("symbol")
+            if not sym:
+                print(
+                    f"[MONITOR] {coin} no symbol, skip",
+                    flush=True)
+                continue
+            try:
+                cur = await asyncio.to_thread(
+                    get_current_price, sym)
+                if cur is not None:
+                    try:
+                        cur = float(cur)
+                    except Exception:
+                        cur = None
+            except Exception as exc:
+                print(
+                    f"[MONITOR] {coin} price fetch failed: "
+                    f"{exc}", flush=True)
+                continue
+
+        if cur is None:
+            print(
+                f"[MONITOR] {coin} cur price None, skip",
+                flush=True)
             continue
 
         cms = now_ms()
@@ -1519,6 +1531,10 @@ async def monitor_active_trades(app, results):
 
         if hit is not None:
             rtype, exp = hit
+            print(
+                f"[MONITOR] {coin} {d} hit {rtype} "
+                f"@ {exp} (SL={sl} TP={tp})",
+                flush=True)
             to_close.append((trade, rtype, exp))
             continue
 
@@ -1537,6 +1553,17 @@ async def monitor_active_trades(app, results):
     for t in snap:
         if t.get("status") == "OPEN":
             still_open.append(t)
+
+    # v9.30.1: лог активных сделок для отладки
+    if still_open:
+        try:
+            info = ", ".join(
+                f"{t.get('coin')}@{t.get('last_price')}"
+                for t in still_open)
+            print(f"[MONITOR] open: {info}", flush=True)
+        except Exception:
+            pass
+
     save_active_trades(still_open)
 
     for chat_id, ev_type, ev_price, tr_snap in to_notify:
@@ -2438,7 +2465,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.30.0</b>\n\n"
+        f"🎯 <b>MODEL 9.30.1</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2678,13 +2705,13 @@ async def callbacks(update, context):
             if score < get_min_score(sym):
                 continue
             rr = result.get("rr")
-            if rr is None:
+           > if rrВ is None:
                 continue
-            if float(rr) < MIN_RR:
+            ifЫ float(rr) < MIN_RБR:
                 continue
-            in_cd, _ = coin_in_cooldown(coin)
+            in_cd,Е _ = coin_in_cooldown(coin)
             if in_cd:
-                continue
+РИ                continue
             setup = save_ready_setup(coin, result)
             if setup:
                 items.append((score, coin, result, setup))
@@ -2775,7 +2802,7 @@ async def callbacks(update, context):
     if data == "charts":
         await edit_query(
             query,
-            "📈 <b>ВЫБЕРИ МОНЕТУ</b>",
+            "📈 <b МОНЕТУ</b>",
             chart_keyboard())
         return
 
