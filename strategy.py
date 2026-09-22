@@ -1,25 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.24.1.
-v9.23: A+C fix — суженный SL + space filter.
-v9.24: fix space filter — не блокируем при отсутствии целей.
-v9.24.1: временно ОТКЛЮЧЕНЫ ATR-regime и space filter.
-         Оставляем только суженный SL + volume confirmation.
+TradeMind strategy v9.25.
+v9.24.1: временно отключены ATR-regime и space filter.
+v9.25: откат широкого SL (сужение сломало стратегию),
+       RR повышен до 2.5 для роста асимметрии.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.24.1"
+STRATEGY_VERSION = "9.25"
 
 ALLOW_SHORT = True
 
 MAX_ILM_AGE_FOR_ENTRY = 6
 
-# ---- суженный SL ----
-ATR_SL_MULT_SOFT = 1.0
-SL_BUFFER_PCT = 0.10
-ATR_SL_MAX_MULT = 1.8
+# ---- v9.25: широкий SL (откат к v9.19-c) ----
+ATR_SL_MULT_SOFT = 0.8
+SL_BUFFER_PCT = 0.20
+ATR_SL_MAX_MULT = 3.0
 
 ENABLE_SESSION_FILTER = False
 SESSION_BLOCK_START_HOUR = 2
@@ -34,7 +33,8 @@ MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 1.0
-FIXED_RR = 2.0
+# v9.25: RR 2.5 вместо 2.0
+FIXED_RR = 2.5
 
 MIN_SWEEP_DEPTH_PCT = 0.12
 MAX_SWEEP_AGE_1H = 24
@@ -106,16 +106,13 @@ ATR_PULLBACK_TOL_MULT = 0.30
 
 ANTI_FOMO_HARD_BLOCK = True
 
-# D1 EMA — отключён с v9.22
 ENABLE_D1_TREND_FILTER = False
 D1_EMA_PERIOD = 50
 D1_TREND_BAND_PCT = 1.0
 
-# ---- v9.24.1: ATR-regime ОТКЛЮЧЁН ----
 ENABLE_ATR_REGIME_FILTER = False
 ATR_REGIME_MIN = 1.08
 
-# ---- v9.24.1: SPACE filter ОТКЛЮЧЁН ----
 ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.3
 
@@ -574,7 +571,7 @@ def compute_fvg_bonus(sweep, entry, fvgs, direction):
 
 
 # ============================================================
-# SPACE FILTER (v9.24.1 — отключён)
+# SPACE FILTER (отключён)
 # ============================================================
 
 def check_space_to_target(entry, sl, direction, levels):
@@ -1499,7 +1496,7 @@ def _apply_ready_promote(result):
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.24.1 promote: score={score} "
+            f"v9.25 promote: score={score} "
             f"trend={trend:.2f} bos={bos}"
         )
         result["_v910_promoted"] = True
