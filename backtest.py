@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.21 FINAL.
+TradeMind backtest v9.23.
 7 пар: BTC, XRP, LINK, BCH, APT, SUI, INJ.
 
-v9.19-c: fees/slippage, cooldown по счётчику SL, is_active,
-         blend-PnL с partial, CFG_WEAK/DEF/STRONG, BT_1H=1200.
-v9.21:   D1 EMA Trend Filter — прокидываем candles_d1 в strategy.analyze().
+v9.19-c: fees/slippage, cooldown, is_active, blend-PnL.
+v9.21:   D1 EMA Trend Filter (прокидываем candles_d1).
+v9.23:   A+C fix — суженный SL и фильтр пространства.
 """
 
 from market import (
@@ -21,16 +21,15 @@ from strategy import analyze, get_1h_direction
 
 # --- CONFIG ---
 
-BT_D1 = 250      # хватает для EMA200
-BT_1H = 1200     # ~50 дней на 1h
+BT_D1 = 250
+BT_1H = 1200
 BT_15M = 4800
 BT_5M = 14400
 BT_1M = 500
 WARMUP = 150
 
-# Реальные издержки Binance Futures
-FEE_PCT = 0.08       # taker × 2 стороны, %
-SLIP_PCT = 0.05      # проскальзывание на входе, %
+FEE_PCT = 0.08
+SLIP_PCT = 0.05
 
 MIN_SCORES = {
     "default": 90,
@@ -103,17 +102,12 @@ def is_active(trades, ts):
 
 
 def pnl_p(e, x, d):
-    """Процентный PnL без учёта издержек."""
     if d == "LONG":
         return (x - e) / e * 100.0
     return (e - x) / e * 100.0
 
 
 def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
-    """
-    Средневзвешенный PnL с учётом частичных закрытий.
-    fees/slippage применяются один раз к итоговому PnL.
-    """
     w1 = 0.0
     if p1d and p1e is not None:
         w1 = p1p / 100.0
@@ -134,8 +128,6 @@ def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
 
     return t - (FEE_PCT + SLIP_PCT)
 
-
-# --- COOLDOWN ---
 
 class CD:
     def __init__(self, sym):
@@ -179,13 +171,6 @@ class CD:
 # --- SIMULATION ---
 
 def sim(trade, c5, start, max_h, cfg):
-    """
-    Симуляция одной сделки:
-      - ждём касания entry (лимитка, макс 12 часов)
-      - проверяем SL/TP на каждом 5m баре
-      - ведём partials (P1/P2), BE, trailing
-      - возвращаем (result, exit_price, exit_ts, held, pnl_net, partial_hit)
-    """
     d = trade["direction"]
     e = float(trade["entry"])
     sl0 = float(trade["sl"])
@@ -196,7 +181,6 @@ def sim(trade, c5, start, max_h, cfg):
 
     p1r, p2r, be_r, p1p, p2p = cfg
 
-    # --- 1. Ждём касания entry ---
     fill_max = start + 12 * 5 * 60 * 1000
     filled = False
     fts = None
@@ -221,7 +205,6 @@ def sim(trade, c5, start, max_h, cfg):
     if not filled:
         return ("NO_FILL", e, fill_max, 0, 0.0, False)
 
-    # --- 2. Ведём сделку ---
     sl = sl0
     best = e
     p1d = False
@@ -262,7 +245,6 @@ def sim(trade, c5, start, max_h, cfg):
         elif d == "SHORT" and sl < e:
             et = "BE"
 
-        # SL и TP в одном баре — SL приоритетнее (консервативно)
         if hsl and htp:
             f = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
             return (et, sl, ot, held, f, p1d or p2d)
@@ -275,7 +257,6 @@ def sim(trade, c5, start, max_h, cfg):
             f = blend(e, tp, d, p1d, p1e, p1p, p2d, p2e, p2p)
             return ("TP", tp, ot, held, f, p1d or p2d)
 
-        # MFE (max favorable excursion)
         if d == "LONG":
             if hi > best:
                 best = hi
@@ -285,17 +266,14 @@ def sim(trade, c5, start, max_h, cfg):
                 best = lo
             mr = (e - best) / risk
 
-        # P1
         if not p1d and mr >= p1r:
             p1e = e + risk * p1r if d == "LONG" else e - risk * p1r
             p1d = True
 
-        # P2
         if p1d and not p2d and mr >= p2r:
             p2e = e + risk * p2r if d == "LONG" else e - risk * p2r
             p2d = True
 
-        # BE
         if not bem and mr >= be_r:
             if d == "LONG":
                 if e > sl:
@@ -306,7 +284,6 @@ def sim(trade, c5, start, max_h, cfg):
                     sl = e
                     bem = True
 
-        # Trailing
         if mr >= TRAIL_TRIG:
             if d == "LONG":
                 ns = best - risk * TRAIL_DIST
@@ -317,7 +294,6 @@ def sim(trade, c5, start, max_h, cfg):
                 if ns < sl:
                     sl = ns
 
-    # Таймаут — закрываем по последнему close
     if last is not None:
         xp = last["close"]
         f = blend(e, xp, d, p1d, p1e, p1p, p2d, p2e, p2p)
@@ -394,7 +370,6 @@ def run_one(sym, max_h):
             if len(ccd1) >= 20:
                 try:
                     d1c = _analyze_d1_context(ccd1, price)
-                    # v9.21: пробрасываем сырые D1-свечи для EMA-фильтра
                     if isinstance(d1c, dict):
                         d1c["candles_d1"] = ccd1
                 except Exception:
@@ -480,7 +455,6 @@ def stats(trades):
     wr = (tp / r * 100.0) if r > 0 else 0.0
     total = sum(t["pnl"] for t in trades)
 
-    # MDD по кумулятивному PnL
     eq = 0.0
     peak = 0.0
     mdd = 0.0
@@ -529,13 +503,14 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.21 [" + mode + "]")
+    print("### MULTI v9.23 [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
     print("### FEES:     " + ("%.3f%%" % FEE_PCT) +
           " + SLIP " + ("%.3f%%" % SLIP_PCT))
-    print("### D1 EMA:   filter ON (250 D1 candles)")
+    print("### SL config: ATR_SL_MAX_MULT=1.8, BUFFER=0.10")
+    print("### SPACE filter: MIN_RR_SPACE_MULT=1.8")
     print("#" * 70)
 
     summary = []
@@ -555,7 +530,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("=" * 82)
-    print("СВОДКА v9.21 [" + mode + "]")
+    print("СВОДКА v9.23 [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
@@ -605,7 +580,6 @@ def run_multi(max_h=24, syms=None):
 # --- ENTRY POINT ---
 
 def main(max_hours=24, research=False, syms=None):
-    """Вызывается из bot.py: main(24)."""
     global RESEARCH_MODE
     RESEARCH_MODE = bool(research)
     if syms is None:
