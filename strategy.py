@@ -1,19 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.21.
-v9.20: Anti-FOMO / Pullback Entry Filter.
-v9.21: D1 EMA Trend Filter (фильтр направления по дневной EMA).
+TradeMind strategy v9.23.
+v9.22: ATR-regime filter, volume confirmation.
+v9.23: A+C fix — суженный SL (1.8×ATR, buffer 0.10) +
+       фильтр пространства до сопротивления (MIN_RR_SPACE_MULT).
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.21"
+STRATEGY_VERSION = "9.23"
 
 ALLOW_SHORT = True
 
 MAX_ILM_AGE_FOR_ENTRY = 6
-ATR_SL_MULT_SOFT = 0.8
+
+# ---- v9.23: суженный SL ----
+ATR_SL_MULT_SOFT = 1.0          # было 0.8 → 1.0 (мин. SL = 1×ATR)
+SL_BUFFER_PCT = 0.10            # было 0.20 → 0.10
+ATR_SL_MAX_MULT = 1.8           # было 3.0 → 1.8 (макс. SL = 1.8×ATR)
 
 ENABLE_SESSION_FILTER = False
 SESSION_BLOCK_START_HOUR = 2
@@ -26,7 +31,6 @@ RETEST_OFFSET_PCT = 0.0
 
 MIN_SCORE_READY = 85
 REQUIRE_BOS_FOR_READY = True
-SL_BUFFER_PCT = 0.20
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 1.0
 FIXED_RR = 2.0
@@ -36,7 +40,6 @@ MAX_SWEEP_AGE_1H = 24
 
 USE_ATR_SCALING = True
 ATR_SL_MULT = 1.2
-ATR_SL_MAX_MULT = 3.0
 MIN_SL_DISTANCE_PCT = 0.35
 MAX_SL_DISTANCE_PCT = 4.0
 
@@ -51,7 +54,7 @@ MIN_BODY_RATIO_TRIGGER_5M = 0.40
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = True
 
-VOLUME_CONFIRMATION_ENABLED = False
+VOLUME_CONFIRMATION_ENABLED = True
 VOLUME_CONFIRMATION_MULT = 1.2
 VOLUME_CONFIRMATION_LOOKBACK = 20
 
@@ -79,7 +82,6 @@ READY_PROMOTE_TIERS = (
     (88, 0.30, True),
 )
 
-# ---- Anti-FOMO / Pullback Entry Filter ----
 ENABLE_ANTI_FOMO = True
 
 RSI_PERIOD = 14
@@ -103,22 +105,21 @@ ATR_PULLBACK_TOL_MULT = 0.30
 
 ANTI_FOMO_HARD_BLOCK = True
 
-# ---- v9.21: D1 EMA Trend Filter ----
-# Включает блокировку входов против тренда D1.
-#  NEUTRAL (цена в ±D1_TREND_BAND_PCT от EMA) — торгуем обе стороны.
-#  LONG  (цена > EMA + band) — блокируем SHORT.
-#  SHORT (цена < EMA - band) — блокируем LONG.
-ENABLE_D1_TREND_FILTER = True
-
-# Период EMA на D1.
-#  50  — работает с текущим LOOKBACK_D1=60 в market.py.
-#  200 — классический трендовый фильтр, но требует LOOKBACK_D1 >= 250.
+# D1 EMA-фильтр отключён (v9.22 показал убыточность)
+ENABLE_D1_TREND_FILTER = False
 D1_EMA_PERIOD = 50
-
-# Ширина нейтральной зоны вокруг EMA в процентах.
-#  Слишком узкая → флэт будет уходить в LONG/SHORT и резать сделки.
-#  Слишком широкая → фильтр не работает.
 D1_TREND_BAND_PCT = 1.0
+
+# ATR-regime filter (боковик)
+ENABLE_ATR_REGIME_FILTER = True
+ATR_REGIME_MIN = 1.08
+
+# ---- v9.23: фильтр пространства до сопротивления ----
+# Требуем, чтобы от entry до ближайшего противоположного уровня
+# (BSL для LONG, SSL для SHORT) было не меньше
+# MIN_RR_SPACE_MULT × risk. Иначе TP некуда идти.
+ENABLE_SPACE_FILTER = True
+MIN_RR_SPACE_MULT = 1.8
 
 
 # ============================================================
@@ -333,21 +334,11 @@ def _avg_atr(candles, fast=14, slow=50):
 
 
 # ============================================================
-# D1 EMA TREND FILTER (v9.21)
+# D1 EMA (оставлено для совместимости, отключено)
 # ============================================================
 
 def get_d1_trend_ema(candles_d1, price,
                      period=None, band_pct=None):
-    """
-    Определяет тренд D1 по EMA.
-
-    Возвращает (trend, ema_value):
-      trend ∈ {"LONG", "SHORT", "NEUTRAL"}
-      ema_value — значение EMA или None
-
-    NEUTRAL — цена в пределах ±band_pct% от EMA (флэт).
-    Использует только закрытые свечи (без последней формирующейся).
-    """
     if period is None:
         period = D1_EMA_PERIOD
     if band_pct is None:
@@ -528,6 +519,21 @@ def _levels_for_dir(levels, direction):
     return res
 
 
+def _opposite_levels(levels, direction):
+    """BSL для LONG, SSL для SHORT — куда идёт TP."""
+    res = []
+    exp = "BSL" if direction == "LONG" else "SSL"
+    for lv in levels or []:
+        price = _level_price(lv)
+        if price is None:
+            continue
+        lt = _level_type(lv)
+        side = _level_side(lv)
+        if lt == exp or lt.startswith(exp + "_") or side == exp:
+            res.append(lv)
+    return res
+
+
 # ============================================================
 # FVG
 # ============================================================
@@ -568,6 +574,65 @@ def compute_fvg_bonus(sweep, entry, fvgs, direction):
     if ei:
         b += FVG_ENTRY_BONUS
     return min(b, FVG_MAX_BONUS), si, ei
+
+
+# ============================================================
+# v9.23: SPACE FILTER
+# ============================================================
+
+def check_space_to_target(entry, sl, direction, levels):
+    """
+    Проверяет, достаточно ли места от entry до ближайшего
+    противоположного уровня.
+
+    Для LONG: ищем BSL > entry. Расстояние от entry до
+    ближайшего BSL должно быть >= MIN_RR_SPACE_MULT × risk.
+    Считаем по БЛИЖАЙШЕМУ уровню выше entry — если он ближе
+    нужного, значит TP некуда идти.
+
+    Возвращает (ok, nearest_r, nearest_price).
+    """
+    if not ENABLE_SPACE_FILTER:
+        return True, None, None
+
+    e = _f(entry)
+    s = _f(sl)
+    if e is None or s is None:
+        return True, None, None
+    risk = abs(e - s)
+    if risk <= 0:
+        return True, None, None
+
+    targets = _opposite_levels(levels or [], direction)
+    if not targets:
+        # Нет целей — считаем, что пространства нет
+        return False, 0.0, None
+
+    # Ближайший подходящий уровень
+    candidates = []
+    for t in targets:
+        tp = _level_price(t)
+        if tp is None:
+            continue
+        if direction == "LONG" and tp > e:
+            candidates.append(tp)
+        elif direction == "SHORT" and tp < e:
+            candidates.append(tp)
+
+    if not candidates:
+        return False, 0.0, None
+
+    # Ближайший к entry
+    if direction == "LONG":
+        nearest = min(candidates)
+        dist = (nearest - e) / risk
+    else:
+        nearest = max(candidates)
+        dist = (e - nearest) / risk
+
+    if dist < MIN_RR_SPACE_MULT:
+        return False, round(dist, 3), nearest
+    return True, round(dist, 3), nearest
 
 
 # ============================================================
@@ -1451,7 +1516,7 @@ def _apply_ready_promote(result):
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.21 promote: score={score} "
+            f"v9.23 promote: score={score} "
             f"trend={trend:.2f} bos={bos}"
         )
         result["_v910_promoted"] = True
@@ -1499,6 +1564,10 @@ def _analyze_scenario(c1h, c15, c5, price,
         "anti_fomo_ok": True,
         "d1_trend_ema": "NEUTRAL",
         "d1_ema_value": None,
+        "atr_regime": None,
+        "space_ok": True,
+        "space_r": None,
+        "space_target": None,
     }
 
     if direction == "SHORT" and not ALLOW_SHORT:
@@ -1510,7 +1579,24 @@ def _analyze_scenario(c1h, c15, c5, price,
         result["reason"] = "Недостаточно данных."
         return result
 
-    # ---- v9.21: D1 EMA Trend Filter ----
+    # ATR-regime filter
+    if ENABLE_ATR_REGIME_FILTER:
+        atr_fast = calculate_atr(c1h, 14)
+        atr_slow = calculate_atr(c1h, 50)
+        if (atr_fast is not None and atr_slow is not None
+                and atr_slow > 0):
+            ratio = atr_fast / atr_slow
+            result["atr_regime"] = round(ratio, 3)
+            if ratio < ATR_REGIME_MIN:
+                result["stage"] = "WAIT"
+                result["score"] = 10
+                result["reason"] = (
+                    f"ATR-regime: {ratio:.2f} < "
+                    f"{ATR_REGIME_MIN} (боковик)"
+                )
+                return result
+
+    # D1 EMA (опционально, отключён)
     if ENABLE_D1_TREND_FILTER:
         candles_d1 = None
         if isinstance(d1_context, dict):
@@ -1628,6 +1714,23 @@ def _analyze_scenario(c1h, c15, c5, price,
     if sl is None:
         result["score"] = 68
         result["reason"] = "Нет SL."
+        return result
+
+    # ---- v9.23: SPACE FILTER ----
+    space_ok, space_r, space_target = check_space_to_target(
+        entry, sl, direction, levels)
+    result["space_ok"] = space_ok
+    result["space_r"] = space_r
+    result["space_target"] = (round(space_target, 8)
+                              if space_target is not None else None)
+
+    if not space_ok:
+        result["stage"] = "WAIT"
+        result["score"] = 30
+        result["reason"] = (
+            f"Space filter: RR до сопротивления "
+            f"{space_r} < {MIN_RR_SPACE_MULT}"
+        )
         return result
 
     tp = calculate_tp_by_rr(entry, sl, direction, FIXED_RR)
@@ -1803,14 +1906,6 @@ def analyze(candles_1h, candles_15m, candles_5m,
     base["long"] = lr
     base["short"] = sr
 
-    # Прокидываем D1 EMA-инфо с лучшего сценария
-    if lr.get("d1_trend_ema") != "NEUTRAL":
-        base["d1_trend_ema"] = lr.get("d1_trend_ema")
-        base["d1_ema_value"] = lr.get("d1_ema_value")
-    elif sr.get("d1_trend_ema") != "NEUTRAL":
-        base["d1_trend_ema"] = sr.get("d1_trend_ema")
-        base["d1_ema_value"] = sr.get("d1_ema_value")
-
     if ctx_dir == "NEUTRAL":
         if lr.get("score", 0) >= sr.get("score", 0):
             best = lr
@@ -1982,6 +2077,7 @@ __all__ = [
     "USE_ATR_SCALING",
     "MAX_ILM_AGE_FOR_ENTRY",
     "ATR_SL_MULT_SOFT",
+    "ATR_SL_MAX_MULT",
     "RETEST_OFFSET_PCT",
     "ENABLE_ANTI_FOMO",
     "RSI_OVERBOUGHT_LONG",
@@ -1995,6 +2091,11 @@ __all__ = [
     "ENABLE_D1_TREND_FILTER",
     "D1_EMA_PERIOD",
     "D1_TREND_BAND_PCT",
+    "ENABLE_ATR_REGIME_FILTER",
+    "ATR_REGIME_MIN",
+    "VOLUME_CONFIRMATION_ENABLED",
+    "ENABLE_SPACE_FILTER",
+    "MIN_RR_SPACE_MULT",
     "calculate_atr",
     "calculate_ema",
     "calculate_rsi",
@@ -2013,6 +2114,7 @@ __all__ = [
     "find_structural_sl",
     "validate_geometry",
     "check_anti_fomo",
+    "check_space_to_target",
     "analyze",
     "analyze_sol",
 ]
