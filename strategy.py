@@ -1,24 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.23.
-v9.22: ATR-regime filter, volume confirmation.
-v9.23: A+C fix — суженный SL (1.8×ATR, buffer 0.10) +
-       фильтр пространства до сопротивления (MIN_RR_SPACE_MULT).
+TradeMind strategy v9.24.
+v9.23: A+C fix — суженный SL + space filter.
+v9.24: fix space filter — не блокируем при отсутствии целей,
+       MIN_RR_SPACE_MULT 1.8 -> 1.3.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.23"
+STRATEGY_VERSION = "9.24"
 
 ALLOW_SHORT = True
 
 MAX_ILM_AGE_FOR_ENTRY = 6
 
-# ---- v9.23: суженный SL ----
-ATR_SL_MULT_SOFT = 1.0          # было 0.8 → 1.0 (мин. SL = 1×ATR)
-SL_BUFFER_PCT = 0.10            # было 0.20 → 0.10
-ATR_SL_MAX_MULT = 1.8           # было 3.0 → 1.8 (макс. SL = 1.8×ATR)
+ATR_SL_MULT_SOFT = 1.0
+SL_BUFFER_PCT = 0.10
+ATR_SL_MAX_MULT = 1.8
 
 ENABLE_SESSION_FILTER = False
 SESSION_BLOCK_START_HOUR = 2
@@ -105,21 +104,18 @@ ATR_PULLBACK_TOL_MULT = 0.30
 
 ANTI_FOMO_HARD_BLOCK = True
 
-# D1 EMA-фильтр отключён (v9.22 показал убыточность)
 ENABLE_D1_TREND_FILTER = False
 D1_EMA_PERIOD = 50
 D1_TREND_BAND_PCT = 1.0
 
-# ATR-regime filter (боковик)
 ENABLE_ATR_REGIME_FILTER = True
 ATR_REGIME_MIN = 1.08
 
-# ---- v9.23: фильтр пространства до сопротивления ----
-# Требуем, чтобы от entry до ближайшего противоположного уровня
-# (BSL для LONG, SSL для SHORT) было не меньше
-# MIN_RR_SPACE_MULT × risk. Иначе TP некуда идти.
+# v9.24: space filter — мягкий
+# MIN_RR_SPACE_MULT 1.8 -> 1.3 (было слишком жёстко).
+# При отсутствии целей — НЕ блокируем.
 ENABLE_SPACE_FILTER = True
-MIN_RR_SPACE_MULT = 1.8
+MIN_RR_SPACE_MULT = 1.3
 
 
 # ============================================================
@@ -334,7 +330,7 @@ def _avg_atr(candles, fast=14, slow=50):
 
 
 # ============================================================
-# D1 EMA (оставлено для совместимости, отключено)
+# D1 EMA (отключён)
 # ============================================================
 
 def get_d1_trend_ema(candles_d1, price,
@@ -520,7 +516,6 @@ def _levels_for_dir(levels, direction):
 
 
 def _opposite_levels(levels, direction):
-    """BSL для LONG, SSL для SHORT — куда идёт TP."""
     res = []
     exp = "BSL" if direction == "LONG" else "SSL"
     for lv in levels or []:
@@ -577,18 +572,19 @@ def compute_fvg_bonus(sweep, entry, fvgs, direction):
 
 
 # ============================================================
-# v9.23: SPACE FILTER
+# v9.24: SPACE FILTER (FIXED)
 # ============================================================
 
 def check_space_to_target(entry, sl, direction, levels):
     """
-    Проверяет, достаточно ли места от entry до ближайшего
+    Проверяет, есть ли пространство от entry до ближайшего
     противоположного уровня.
 
-    Для LONG: ищем BSL > entry. Расстояние от entry до
-    ближайшего BSL должно быть >= MIN_RR_SPACE_MULT × risk.
-    Считаем по БЛИЖАЙШЕМУ уровню выше entry — если он ближе
-    нужного, значит TP некуда идти.
+    v9.24 fix:
+      - если целей в списке нет — НЕ блокируем (return True).
+      - если после фильтра по направлению пусто — НЕ блокируем.
+      - блокируем ТОЛЬКО когда есть реальная цель ближе
+        MIN_RR_SPACE_MULT × risk.
 
     Возвращает (ok, nearest_r, nearest_price).
     """
@@ -605,10 +601,9 @@ def check_space_to_target(entry, sl, direction, levels):
 
     targets = _opposite_levels(levels or [], direction)
     if not targets:
-        # Нет целей — считаем, что пространства нет
-        return False, 0.0, None
+        # Нет целей в списке — не блокируем
+        return True, None, None
 
-    # Ближайший подходящий уровень
     candidates = []
     for t in targets:
         tp = _level_price(t)
@@ -620,9 +615,9 @@ def check_space_to_target(entry, sl, direction, levels):
             candidates.append(tp)
 
     if not candidates:
-        return False, 0.0, None
+        # Все цели не в нужную сторону — не блокируем
+        return True, None, None
 
-    # Ближайший к entry
     if direction == "LONG":
         nearest = min(candidates)
         dist = (nearest - e) / risk
@@ -1516,7 +1511,7 @@ def _apply_ready_promote(result):
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.23 promote: score={score} "
+            f"v9.24 promote: score={score} "
             f"trend={trend:.2f} bos={bos}"
         )
         result["_v910_promoted"] = True
@@ -1579,7 +1574,6 @@ def _analyze_scenario(c1h, c15, c5, price,
         result["reason"] = "Недостаточно данных."
         return result
 
-    # ATR-regime filter
     if ENABLE_ATR_REGIME_FILTER:
         atr_fast = calculate_atr(c1h, 14)
         atr_slow = calculate_atr(c1h, 50)
@@ -1596,7 +1590,6 @@ def _analyze_scenario(c1h, c15, c5, price,
                 )
                 return result
 
-    # D1 EMA (опционально, отключён)
     if ENABLE_D1_TREND_FILTER:
         candles_d1 = None
         if isinstance(d1_context, dict):
@@ -1716,7 +1709,6 @@ def _analyze_scenario(c1h, c15, c5, price,
         result["reason"] = "Нет SL."
         return result
 
-    # ---- v9.23: SPACE FILTER ----
     space_ok, space_r, space_target = check_space_to_target(
         entry, sl, direction, levels)
     result["space_ok"] = space_ok
