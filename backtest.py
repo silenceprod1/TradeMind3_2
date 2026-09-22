@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.23.
+TradeMind backtest v9.25.
 7 пар: BTC, XRP, LINK, BCH, APT, SUI, INJ.
 
 v9.19-c: fees/slippage, cooldown, is_active, blend-PnL.
-v9.21:   D1 EMA Trend Filter (прокидываем candles_d1).
-v9.23:   A+C fix — суженный SL и фильтр пространства.
+v9.25:   широкий SL, RR 2.5 (в стратегии).
 """
 
 from market import (
@@ -503,14 +502,16 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.23 [" + mode + "]")
+    print("### MULTI v9.25 [wide SL, RR 2.5] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
     print("### FEES:     " + ("%.3f%%" % FEE_PCT) +
           " + SLIP " + ("%.3f%%" % SLIP_PCT))
-    print("### SL config: ATR_SL_MAX_MULT=1.8, BUFFER=0.10")
-    print("### SPACE filter: MIN_RR_SPACE_MULT=1.8")
+    print("### SL config: ATR_SL_MULT_SOFT=0.8, "
+          "ATR_SL_MAX_MULT=3.0, BUFFER=0.20")
+    print("### FIXED_RR: 2.5")
+    print("### SPACE filter: OFF | ATR-regime: OFF")
     print("#" * 70)
 
     summary = []
@@ -530,7 +531,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("=" * 82)
-    print("СВОДКА v9.23 [" + mode + "]")
+    print("СВОДКА v9.25 [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
