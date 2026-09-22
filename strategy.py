@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.26.
-v9.25: широкий SL, RR 2.5.
-v9.26: откат к базе v9.19-c — RR 2.0, volume confirmation OFF.
-       Оставлено: широкий SL, space/ATR/D1 фильтры отключены.
+TradeMind strategy v9.30.
+Финальная версия: широкий SL (v9.19-c), RR 2.0,
+space/ATR-regime/D1/volume — отключены, anti-FOMO включён.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.26"
+STRATEGY_VERSION = "9.30"
 
 ALLOW_SHORT = True
 
@@ -326,10 +325,6 @@ def _avg_atr(candles, fast=14, slow=50):
     return fv, sv
 
 
-# ============================================================
-# D1 EMA (отключён)
-# ============================================================
-
 def get_d1_trend_ema(candles_d1, price,
                      period=None, band_pct=None):
     if period is None:
@@ -567,10 +562,6 @@ def compute_fvg_bonus(sweep, entry, fvgs, direction):
         b += FVG_ENTRY_BONUS
     return min(b, FVG_MAX_BONUS), si, ei
 
-
-# ============================================================
-# SPACE FILTER (отключён)
-# ============================================================
 
 def check_space_to_target(entry, sl, direction, levels):
     if not ENABLE_SPACE_FILTER:
@@ -1494,7 +1485,7 @@ def _apply_ready_promote(result):
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.26 promote: score={score} "
+            f"v9.30 promote: score={score} "
             f"trend={trend:.2f} bos={bos}"
         )
         result["_v910_promoted"] = True
