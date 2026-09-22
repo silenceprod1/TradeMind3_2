@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.27.
-6 пар: BTC, XRP, BCH, APT, SUI, INJ (LINK забанен — стабильно убыточен).
+TradeMind backtest v9.28.
+6 пар: BTC, XRP, BCH, APT, SUI, INJ (LINK забанен).
 
-v9.26: baseline (fees, cooldown, is_active, blend).
-v9.27: LINK banned, partials отложены (P1 0.7->0.9, P2 1.3->1.6),
-       меньше % на partials — даём прибыли бежать дольше.
+v9.27: LINK banned, partials отложены (DEF/STRONG).
+v9.28: CFG_WEAK откачен — слабые монеты (SUI, APT) не ходят далеко.
 """
 
 from market import (
@@ -40,7 +39,6 @@ MIN_SCORES = {
 
 BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT", "LINKUSDT"}
 
-# LINK убран
 ALL_SYMS = [
     "BTCUSDT",
     "XRPUSDT",
@@ -57,14 +55,14 @@ COOLDOWN = {
     "BCHUSDT": {2: 4, 3: 8},
 }
 
-# v9.27: отложенные partials
+# v9.28: откат CFG_WEAK к оригинальному
 # Формат: (P1_R, P2_R, BE_R, P1_%, P2_%)
 TRAIL_TRIG = 1.5
 TRAIL_DIST = 0.8
 
 CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)   # score >= 95
 CFG_DEF    = (0.9, 1.6, 1.1, 40, 25)   # default
-CFG_WEAK   = (0.7, 1.4, 0.9, 40, 25)   # SUI, APT, BCH
+CFG_WEAK   = (0.5, 1.1, 0.8, 50, 25)   # SUI, APT, BCH
 
 WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
 
@@ -505,7 +503,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.27 [no LINK, delayed partials] [" + mode + "]")
+    print("### MULTI v9.28 [WEAK reverted] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
@@ -534,7 +532,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("=" * 82)
-    print("СВОДКА v9.27 [" + mode + "]")
+    print("СВОДКА v9.28 [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
