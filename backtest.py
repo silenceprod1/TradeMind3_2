@@ -2,9 +2,6 @@
 """
 TradeMind backtest v9.30.
 5 пар: XRP, BCH, APT, SUI, INJ.
-
-v9.29: ban BTC, min_score APT/SUI -> 93.
-v9.30: SUI revert к default=90 (мин-score 93 душил монету).
 """
 
 from market import (
@@ -30,7 +27,6 @@ WARMUP = 150
 FEE_PCT = 0.08
 SLIP_PCT = 0.05
 
-# v9.30: SUI возвращён к default=90
 MIN_SCORES = {
     "default": 90,
     "INJUSDT": 88,
@@ -501,7 +497,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.30 [SUI reverted to 90] [" + mode + "]")
+    print("### MULTI v9.30 [final] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
