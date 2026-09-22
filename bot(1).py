@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.21.0.
+TradeMind bot v9.30.0.
 v9.20.6: ручной getUpdates вместо updater.start_polling().
 v9.20.7: команда /backtest — запуск бэктеста из Telegram.
 v9.20.8: /backtest пишет прогресс в логи BotHost и отправляет .txt.
-v9.21.0: D1 EMA Trend Filter — прокидываем candles_d1 в strategy.analyze().
+v9.30.0: финальная стратегия — 5 пар (без BTC/LINK),
+         score-gated exits (STRONG/DEF/WEAK), обновлены partials/BE/trailing.
 """
 
 import asyncio
@@ -70,16 +71,24 @@ BACKTEST_COMMAND_ENABLED = True
 BACKTEST_DAYS = 14
 
 TRAILING_ENABLED = True
-TRAILING_TRIGGER_R = 1.3
+TRAILING_TRIGGER_R = 1.5
 TRAILING_DISTANCE_R = 0.8
 
-BREAKEVEN_TRIGGER_R = 0.7
+# v9.30: дефолтный CFG_DEF из backtest
+BREAKEVEN_TRIGGER_R = 1.1
 PARTIAL_TP_ENABLED = True
-PARTIAL_TP_TRIGGER_R = 0.7
-PARTIAL_TP_PERCENT = 50
+PARTIAL_TP_TRIGGER_R = 0.9
+PARTIAL_TP_PERCENT = 40
 PARTIAL_TP_2_ENABLED = True
-PARTIAL_TP_2_TRIGGER_R = 1.3
+PARTIAL_TP_2_TRIGGER_R = 1.6
 PARTIAL_TP_2_PERCENT = 25
+
+# v9.30: score-gated config
+SCORE_STRONG = 95
+CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
+CFG_DEF = (0.9, 1.6, 1.1, 40, 25)
+CFG_WEAK = (0.5, 1.1, 0.8, 50, 25)
+WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
 
 BLOCK_CONFLICTING_TRADES = True
 
@@ -93,10 +102,9 @@ NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
 PULLBACK_NOTIF_ENABLED = True
 PULLBACK_NOTIF_DEDUP_HOURS = 1
 
+# v9.30: 5 монет — убраны BTC и LINK
 COINS = {
-    "BTC": "BTCUSDT",
     "XRP": "XRPUSDT",
-    "LINK": "LINKUSDT",
     "BCH": "BCHUSDT",
     "APT": "APTUSDT",
     "SUI": "SUIUSDT",
@@ -109,7 +117,7 @@ MIN_SCORE_MAP = {
     "default": 90,
     "INJUSDT": 88,
     "BCHUSDT": 92,
-    "APTUSDT": 90,
+    "APTUSDT": 93,
 }
 
 MIN_SCORE_READY = 90
@@ -354,16 +362,6 @@ def stage_text(s):
     return STAGE_TEXTS.get(s, "⏳ ОЖИДАНИЕ")
 
 
-def tp_src_label(source):
-    m = {
-        "d1": " (D1)",
-        "major": " (major)",
-        "local": " (local)",
-        "fixed_rr": " (RR 1:2)",
-    }
-    return m.get(source, "")
-
-
 def strong_levels(levels):
     if not levels:
         return []
@@ -451,21 +449,6 @@ def anti_fomo_text(result):
             f"EMA21 15M: <b>{format_price(ema)}</b>")
     if reason:
         lines.append(f"ℹ️ {escape(str(reason))}")
-    return "\n".join(lines)
-
-
-def d1_trend_text(result):
-    """v9.21: строка про D1 EMA-фильтр."""
-    trend = result.get("d1_trend_ema", "NEUTRAL")
-    ema = result.get("d1_ema_value")
-    if trend == "NEUTRAL" and ema is None:
-        return ""
-    icon = {"LONG": "🟢", "SHORT": "🔴", "NEUTRAL": "⚪"}.get(
-        trend, "⚪")
-    lines = ["", "📅 <b>D1 EMA-тренд</b>"]
-    lines.append(f"{icon} <b>{trend}</b>")
-    if ema is not None:
-        lines.append(f"EMA: <b>{format_price(ema)}</b>")
     return "\n".join(lines)
 
 
@@ -588,8 +571,6 @@ def build_analysis(symbol):
         sweep = detect_sweep(
             market["candles_1h"], price, d, levels)
 
-    # v9.21: прокидываем candles_d1 в d1_context
-    # (нужно для D1 EMA-фильтра в strategy.py)
     d1_ctx = dict(market.get("d1_context") or {})
     d1_ctx["candles_d1"] = market.get("candles_d1") or []
 
@@ -687,7 +668,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.21.0</b>",
+        "🧠 <b>TRADEMIND v9.30.0</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -738,7 +719,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.21.0</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.30</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -748,10 +729,9 @@ def dashboard_message(results, chat_id=None):
         f"/{PARTIAL_TP_PERCENT}%",
         f"💰 P2: {PARTIAL_TP_2_TRIGGER_R}R"
         f"/{PARTIAL_TP_2_PERCENT}%",
-        f"🛡 BE: {BREAKEVEN_TRIGGER_R}R (после P1)",
+        f"🛡 BE: {BREAKEVEN_TRIGGER_R}R",
         "",
         f"🧲 Anti-FOMO: <b>ON</b>",
-        f"📅 D1 EMA filter: <b>ON</b>",
         f"⚡ Pullback-увед: <b>ON</b>",
         "",
         f"🎯 Trail: <b>{tr_label}</b>",
@@ -795,14 +775,6 @@ def checklist_text(result):
     else:
         step1 = "⬜ 1H: NEUTRAL"
 
-    d1t = result.get("d1_trend_ema", "NEUTRAL")
-    if d1t == "NEUTRAL":
-        step_d1 = "⬜ D1 EMA: NEUTRAL (флэт)"
-    elif d1t == d:
-        step_d1 = f"✅ D1 EMA: {d1t} (в сторону)"
-    else:
-        step_d1 = f"❌ D1 EMA: {d1t} (против)"
-
     levels = result.get("major_levels") or []
     exp_type = "SSL" if d == "LONG" else "BSL"
 
@@ -844,7 +816,7 @@ def checklist_text(result):
 
     lines = [
         "📋 <b>ПРОГРЕСС</b>", "",
-        step1, step_d1, step2, step3,
+        step1, step2, step3,
         step4, step5, step6,
     ]
 
@@ -935,10 +907,6 @@ def coin_message(coin, result):
     fomo_block = anti_fomo_text(result)
     if fomo_block:
         lines.append(fomo_block)
-
-    d1_block = d1_trend_text(result)
-    if d1_block:
-        lines.append(d1_block)
 
     lines.extend([
         "",
@@ -1193,7 +1161,27 @@ def close_trade(trade, exit_price, rtype):
     return target
 
 
+# --- v9.30: score-gated CFG ---
+
+def _get_cfg_for_trade(trade):
+    """
+    Возвращает (P1_R, P2_R, BE_R, P1_%, P2_%) в зависимости
+    от score и symbol. Совпадает с CFG из backtest.py.
+    """
+    score = int(trade.get("score", 0) or 0)
+    sym = trade.get("symbol", "")
+    if score >= SCORE_STRONG:
+        return CFG_STRONG
+    if sym in WEAK_SYMS:
+        return CFG_WEAK
+    return CFG_DEF
+
+
 def apply_trailing(trade, cur_price):
+    """
+    v9.30: score-gated exits (STRONG/DEF/WEAK).
+    Возвращает события [("P1"|"P2"|"BE", price)].
+    """
     events = []
 
     try:
@@ -1209,74 +1197,87 @@ def apply_trailing(trade, cur_price):
     if risk <= 0:
         return events
 
+    # v9.30: score-gated config
+    p1r, p2r, be_r, p1p, p2p = _get_cfg_for_trade(trade)
+
+    # --- LONG ---
     if d == "LONG":
         if cur_price > best:
             best = cur_price
         mr = (best - entry) / risk
 
+        # P1
         if (PARTIAL_TP_ENABLED
                 and not trade.get("partial_tp_done")
-                and mr >= PARTIAL_TP_TRIGGER_R):
+                and mr >= p1r):
             trade["partial_tp_done"] = True
             trade["partial_tp_price"] = round(cur_price, 8)
             events.append(("P1", cur_price))
 
+        # P2
         if (PARTIAL_TP_2_ENABLED
                 and not trade.get("partial_tp_2_done")
                 and trade.get("partial_tp_done")
-                and mr >= PARTIAL_TP_2_TRIGGER_R):
+                and mr >= p2r):
             trade["partial_tp_2_done"] = True
             trade["partial_tp_2_price"] = round(cur_price, 8)
             events.append(("P2", cur_price))
 
+        # BE — только после P1
         be_ready = (not PARTIAL_TP_ENABLED) or trade.get(
             "partial_tp_done")
         if (be_ready
                 and not trade.get("be_moved")
-                and mr >= BREAKEVEN_TRIGGER_R):
+                and mr >= be_r):
             if entry > cur_sl:
                 trade["sl"] = round(entry, 8)
                 trade["trailing_active"] = True
                 trade["be_moved"] = True
                 events.append(("BE", entry))
 
+        # Trailing
         if mr >= TRAILING_TRIGGER_R:
             ns = best - risk * TRAILING_DISTANCE_R
             if ns > cur_sl:
                 trade["sl"] = round(ns, 8)
                 trade["trailing_active"] = True
 
+    # --- SHORT ---
     elif d == "SHORT":
         if cur_price < best:
             best = cur_price
         mr = (entry - best) / risk
 
+        # P1
         if (PARTIAL_TP_ENABLED
                 and not trade.get("partial_tp_done")
-                and mr >= PARTIAL_TP_TRIGGER_R):
+                and mr >= p1r):
             trade["partial_tp_done"] = True
             trade["partial_tp_price"] = round(cur_price, 8)
             events.append(("P1", cur_price))
 
+        # P2
         if (PARTIAL_TP_2_ENABLED
                 and not trade.get("partial_tp_2_done")
                 and trade.get("partial_tp_done")
-                and mr >= PARTIAL_TP_2_TRIGGER_R):
+                and mr >= p2r):
             trade["partial_tp_2_done"] = True
             trade["partial_tp_2_price"] = round(cur_price, 8)
             events.append(("P2", cur_price))
 
+        # BE
         be_ready = (not PARTIAL_TP_ENABLED) or trade.get(
             "partial_tp_done")
         if (be_ready
                 and not trade.get("be_moved")
-                and mr >= BREAKEVEN_TRIGGER_R):
+                and mr >= be_r):
             if entry < cur_sl:
                 trade["sl"] = round(entry, 8)
                 trade["trailing_active"] = True
                 trade["be_moved"] = True
                 events.append(("BE", entry))
 
+        # Trailing
         if mr >= TRAILING_TRIGGER_R:
             ns = best + risk * TRAILING_DISTANCE_R
             if ns < cur_sl:
@@ -1310,7 +1311,7 @@ def event_notify_message(trade, event_type, price):
 
     if event_type == "P1":
         return (
-            f"💰 <b>P1 — ЗАКРОЙ 50%</b>\n\n"
+            f"💰 <b>P1 — ЗАКРОЙ {PARTIAL_TP_PERCENT}%</b>\n\n"
             f"💠 <b>{escape(str(coin))}</b>\n"
             f"📐 {dir_icon(d)} <b>{d}</b>\n\n"
             f"Текущая цена: "
@@ -1324,7 +1325,7 @@ def event_notify_message(trade, event_type, price):
         )
     if event_type == "P2":
         return (
-            f"💰 <b>P2 — ЗАКРОЙ ЕЩЁ 25%</b>\n\n"
+            f"💰 <b>P2 — ЗАКРОЙ ЕЩЁ {PARTIAL_TP_2_PERCENT}%</b>\n\n"
             f"💠 <b>{escape(str(coin))}</b>\n"
             f"📐 {dir_icon(d)} <b>{d}</b>\n\n"
             f"Текущая цена: "
@@ -1734,19 +1735,13 @@ def ready_message(coin, result, setup):
         fvg_tag = f"\n⚡ FVG: <b>+{fvg}</b>"
     bos_tag = " ✅" if result.get("bos") else " —"
 
-    d1t = result.get("d1_trend_ema", "NEUTRAL")
-    d1_tag = ""
-    if d1t != "NEUTRAL":
-        d1_icon = "🟢" if d1t == "LONG" else "🔴"
-        d1_tag = f"\n📅 D1 EMA: {d1_icon} <b>{d1t}</b>"
-
     lines = [
         "🚨 <b>TRADEMIND READY</b>", "",
         f"💠 <b>{escape(str(coin))}</b>",
         f"📐 {dir_icon(result.get('direction'))} "
         f"<b>{result.get('direction')}</b>",
         f"⭐ Score: <b>{result.get('score', 0)}/100</b>"
-        f"{fvg_tag}{d1_tag}",
+        f"{fvg_tag}",
         f"🎯 BOS: <b>{bos_tag}</b>",
         "",
         "━━━━━━━━━━━━━━━━━━━━", "",
@@ -1935,7 +1930,7 @@ async def backtest_cmd(update, context):
     await update.message.reply_text(
         f"⏳ <b>ЗАПУСК БЭКТЕСТА</b>\n\n"
         f"📅 1H: <b>1200</b>  •  15M: <b>4800</b>  •  5M: <b>14400</b>\n"
-        f"💠 Пары: BTC, XRP, LINK, BCH, APT, SUI, INJ\n\n"
+        f"💠 Пары: XRP, BCH, APT, SUI, INJ\n\n"
         f"Ход прогона — в логах BotHost.\n"
         f"Отчёт придёт <b>.txt-файлом</b>.",
         parse_mode="HTML")
@@ -2018,7 +2013,7 @@ async def backtest_cmd(update, context):
 
     header = (
         "✅ <b>БЭКТЕСТ ЗАВЕРШЁН</b>\n"
-        "💠 Пары: BTC, XRP, LINK, BCH, APT, SUI, INJ\n"
+        "💠 Пары: XRP, BCH, APT, SUI, INJ\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
     )
 
@@ -2443,7 +2438,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.21.0</b>\n\n"
+        f"🎯 <b>MODEL 9.30.0</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2452,7 +2447,6 @@ async def status_cmd(update, context):
         f"🛡 BE: <b>{BREAKEVEN_TRIGGER_R}R</b>"
         f" (после P1)\n\n"
         f"🧲 Anti-FOMO: <b>ON</b>\n"
-        f"📅 D1 EMA filter: <b>ON</b>\n"
         f"⚡ Pullback-увед: <b>ON</b>\n"
         f"🎯 Trailing: <b>{tr}</b>\n"
         f"💰 Partial: <b>{pt}</b>\n"
@@ -2910,7 +2904,6 @@ async def callbacks(update, context):
             f"BE: <b>{BREAKEVEN_TRIGGER_R}R</b>\n"
             f"BE после P1\n"
             f"Anti-FOMO: <b>ON</b>\n"
-            f"D1 EMA filter: <b>ON</b>\n"
             f"Pullback-увед: <b>ON</b>\n"
             f"Trail: <b>{tr}</b>\n"
             f"Partial: <b>{pt}</b>\n"
