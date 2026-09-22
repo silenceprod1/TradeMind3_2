@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.26.
-7 пар: BTC, XRP, LINK, BCH, APT, SUI, INJ.
+TradeMind backtest v9.27.
+6 пар: BTC, XRP, BCH, APT, SUI, INJ (LINK забанен — стабильно убыточен).
 
-v9.19-c: baseline (fees, cooldown, is_active, blend).
-v9.26:   sanity-check — возврат к базе после экспериментов.
+v9.26: baseline (fees, cooldown, is_active, blend).
+v9.27: LINK banned, partials отложены (P1 0.7->0.9, P2 1.3->1.6),
+       меньше % на partials — даём прибыли бежать дольше.
 """
 
 from market import (
@@ -37,12 +38,12 @@ MIN_SCORES = {
     "APTUSDT": 90,
 }
 
-BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT"}
+BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT", "LINKUSDT"}
 
+# LINK убран
 ALL_SYMS = [
     "BTCUSDT",
     "XRPUSDT",
-    "LINKUSDT",
     "BCHUSDT",
     "APTUSDT",
     "SUIUSDT",
@@ -56,12 +57,14 @@ COOLDOWN = {
     "BCHUSDT": {2: 4, 3: 8},
 }
 
-TRAIL_TRIG = 1.3
+# v9.27: отложенные partials
+# Формат: (P1_R, P2_R, BE_R, P1_%, P2_%)
+TRAIL_TRIG = 1.5
 TRAIL_DIST = 0.8
 
-CFG_STRONG = (0.8, 1.5, 1.0, 40, 30)
-CFG_DEF = (0.7, 1.3, 1.0, 50, 25)
-CFG_WEAK = (0.5, 1.1, 0.8, 50, 25)
+CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)   # score >= 95
+CFG_DEF    = (0.9, 1.6, 1.1, 40, 25)   # default
+CFG_WEAK   = (0.7, 1.4, 0.9, 40, 25)   # SUI, APT, BCH
 
 WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
 
@@ -502,14 +505,16 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.26 [base v9.19-c] [" + mode + "]")
+    print("### MULTI v9.27 [no LINK, delayed partials] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
     print("### FEES:     " + ("%.3f%%" % FEE_PCT) +
           " + SLIP " + ("%.3f%%" % SLIP_PCT))
     print("### FIXED_RR: 2.0")
-    print("### SPACE filter: OFF | ATR-regime: OFF | Volume: OFF")
+    print("### CFG_STRONG: " + str(CFG_STRONG))
+    print("### CFG_DEF:    " + str(CFG_DEF))
+    print("### CFG_WEAK:   " + str(CFG_WEAK))
     print("#" * 70)
 
     summary = []
@@ -529,7 +534,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("=" * 82)
-    print("СВОДКА v9.26 [" + mode + "]")
+    print("СВОДКА v9.27 [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
