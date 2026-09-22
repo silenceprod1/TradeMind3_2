@@ -3,8 +3,6 @@
 TradeMind bot v9.30.1.
 v9.30.0: финальная стратегия — 5 пар, score-gated exits.
 v9.30.1: fix — fallback price fetch в monitor_active_trades.
-         Если основной скан не дал цену для монеты из активной сделки,
-         дёргаем get_current_price напрямую. Плюс лог активных сделок.
 """
 
 import asyncio
@@ -82,7 +80,6 @@ PARTIAL_TP_2_ENABLED = True
 PARTIAL_TP_2_TRIGGER_R = 1.6
 PARTIAL_TP_2_PERCENT = 25
 
-# v9.30: score-gated config
 SCORE_STRONG = 95
 CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
 CFG_DEF = (0.9, 1.6, 1.1, 40, 25)
@@ -128,8 +125,6 @@ NOTIFICATION_STATE_FILE = "notification_state.json"
 
 _storage_lock = threading.RLock()
 
-
-# --- WEBHOOK (BotHost) ---
 
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -276,8 +271,6 @@ def save_notification_state(data):
     with _storage_lock:
         save_json(NOTIFICATION_STATE_FILE, data)
 
-
-# --- FORMATTERS ---
 
 def format_price(price):
     if price is None:
@@ -450,8 +443,6 @@ def anti_fomo_text(result):
     return "\n".join(lines)
 
 
-# --- NOTIFICATION DEDUP ---
-
 def _entry_bucket(entry, tol=None):
     if tol is None:
         tol = NOTIFICATION_ENTRY_TOLERANCE_PCT
@@ -512,8 +503,6 @@ def _pb_mark(state, coin, direction, reason):
     }
 
 
-# --- COOLDOWN ---
-
 def _recent_result_ms(coin, rtype):
     journal = load_journal()
     latest = None
@@ -550,8 +539,6 @@ def coin_in_cooldown(coin):
                 return True, f"TP {eh:.1f}h ago ({rem:.1f}h left)"
     return False, None
 
-
-# --- ANALYSIS ---
 
 def build_analysis(symbol):
     market = get_market_data(symbol)
@@ -633,8 +620,6 @@ def scan_all():
     _scan_cache["t"] = now
     return final
 
-
-# --- MESSAGES ---
 
 def dashboard_message(results, chat_id=None):
     ready = 0
@@ -1159,8 +1144,6 @@ def close_trade(trade, exit_price, rtype):
     return target
 
 
-# --- v9.30: score-gated CFG ---
-
 def _get_cfg_for_trade(trade):
     score = int(trade.get("score", 0) or 0)
     sym = trade.get("symbol", "")
@@ -1189,7 +1172,6 @@ def apply_trailing(trade, cur_price):
 
     p1r, p2r, be_r, p1p, p2p = _get_cfg_for_trade(trade)
 
-    # --- LONG ---
     if d == "LONG":
         if cur_price > best:
             best = cur_price
@@ -1227,7 +1209,6 @@ def apply_trailing(trade, cur_price):
                 trade["sl"] = round(ns, 8)
                 trade["trailing_active"] = True
 
-    # --- SHORT ---
     elif d == "SHORT":
         if cur_price < best:
             best = cur_price
@@ -1449,8 +1430,6 @@ async def safe_send_photo(app, chat_id, photo, **kwargs):
             await asyncio.sleep(1.5 * (i + 1))
 
 
-# --- MONITOR ACTIVE TRADES (v9.30.1 FIX) ---
-
 async def monitor_active_trades(app, results):
     active = load_active_trades()
     if not active:
@@ -1479,8 +1458,6 @@ async def monitor_active_trades(app, results):
                 except Exception:
                     cur = None
 
-        # v9.30.1: fallback — если основной скан не дал цену,
-        # тянем её напрямую через get_current_price
         if cur is None:
             sym = trade.get("symbol")
             if not sym:
@@ -1554,7 +1531,6 @@ async def monitor_active_trades(app, results):
         if t.get("status") == "OPEN":
             still_open.append(t)
 
-    # v9.30.1: лог активных сделок для отладки
     if still_open:
         try:
             info = ", ".join(
@@ -1939,8 +1915,6 @@ async def broadcast_pullback(app, coin, result):
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
-# --- BACKTEST RUNNER ---
-
 async def backtest_cmd(update, context):
     if not BACKTEST_COMMAND_ENABLED:
         await update.message.reply_text(
@@ -1956,7 +1930,7 @@ async def backtest_cmd(update, context):
 
     await update.message.reply_text(
         f"⏳ <b>ЗАПУСК БЭКТЕСТА</b>\n\n"
-        f"📅 1H: <b>1200</b>  •  15M: <b>4800</b>  •  5M: <b>14400</b>\n"
+        f"📅 1H: <b>2200</b>  •  15M: <b>8800</b>  •  5M: <b>26400</b>\n"
         f"💠 Пары: XRP, BCH, APT, SUI, INJ\n\n"
         f"Ход прогона — в логах BotHost.\n"
         f"Отчёт придёт <b>.txt-файлом</b>.",
@@ -2065,8 +2039,6 @@ async def backtest_cmd(update, context):
         except Exception as e2:
             print("BACKTEST SEND TEXT ERR:", e2, flush=True)
 
-
-# --- PNG ---
 
 def png_chunk(ctype, data):
     crc = zlib.crc32(ctype + data) & 0xffffffff
@@ -2323,8 +2295,6 @@ def chart_png(result, trade=None):
     return io.BytesIO(make_png(W, H, pix))
 
 
-# --- HANDLERS ---
-
 async def start(update, context):
     results = await asyncio.to_thread(scan_all)
     await update.message.reply_text(
@@ -2487,8 +2457,6 @@ async def status_cmd(update, context):
         reply_markup=dashboard_keyboard())
 
 
-# --- MONITOR ---
-
 async def _safe_monitor(app):
     while True:
         try:
@@ -2627,8 +2595,6 @@ async def monitor(app):
         await asyncio.sleep(sleep)
 
 
-# --- CALLBACKS ---
-
 async def edit_query(query, text, kb=None):
     try:
         await query.edit_message_text(
@@ -2705,13 +2671,13 @@ async def callbacks(update, context):
             if score < get_min_score(sym):
                 continue
             rr = result.get("rr")
-           > if rrВ is None:
+            if rr is None:
                 continue
-            ifЫ float(rr) < MIN_RБR:
+            if float(rr) < MIN_RR:
                 continue
-            in_cd,Е _ = coin_in_cooldown(coin)
+            in_cd, _ = coin_in_cooldown(coin)
             if in_cd:
-РИ                continue
+                continue
             setup = save_ready_setup(coin, result)
             if setup:
                 items.append((score, coin, result, setup))
@@ -2802,7 +2768,7 @@ async def callbacks(update, context):
     if data == "charts":
         await edit_query(
             query,
-            "📈 <b МОНЕТУ</b>",
+            "📈 <b>ВЫБЕРИ МОНЕТУ</b>",
             chart_keyboard())
         return
 
@@ -2943,8 +2909,6 @@ async def callbacks(update, context):
         return
 
 
-# --- POST INIT / POST SHUTDOWN ---
-
 async def post_init(application):
     if RUN_BACKTEST_ON_START:
         try:
@@ -3018,8 +2982,6 @@ async def post_shutdown(application):
     else:
         print("[SHUTDOWN] no monitor task to stop", flush=True)
 
-
-# --- STURDY POLLING ---
 
 async def _run_polling_forever(app):
     print("[POLLING] initialize...", flush=True)
@@ -3108,8 +3070,6 @@ async def _run_polling_forever(app):
             traceback.print_exc()
             await asyncio.sleep(5)
 
-
-# --- MAIN ---
 
 def main():
     if not TOKEN:
