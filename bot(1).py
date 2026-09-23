@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.30.1.
-v9.30.0: финальная стратегия — 5 пар, score-gated exits.
-v9.30.1: fix — fallback price fetch в monitor_active_trades.
+TradeMind bot v9.30.2.
+v9.30.1: fallback price fetch в monitor_active_trades.
+v9.30.2: fix — собираем symbol из coin+"USDT" для старых сделок,
+         у которых нет поля "symbol".
 """
 
 import asyncio
@@ -651,7 +652,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.30.1</b>",
+        "🧠 <b>TRADEMIND v9.30.2</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -702,7 +703,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.30.1</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.30.2</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -1460,6 +1461,11 @@ async def monitor_active_trades(app, results):
 
         if cur is None:
             sym = trade.get("symbol")
+            # v9.30.2: если symbol нет — собираем из coin
+            if not sym:
+                coin_c = trade.get("coin")
+                if coin_c:
+                    sym = f"{coin_c}USDT"
             if not sym:
                 print(
                     f"[MONITOR] {coin} no symbol, skip",
@@ -2434,7 +2440,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.30.1</b>\n\n"
+        f"🎯 <b>MODEL 9.30.2</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
