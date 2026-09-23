@@ -1930,7 +1930,6 @@ async def backtest_cmd(update, context):
 
     await update.message.reply_text(
         f"⏳ <b>ЗАПУСК БЭКТЕСТА</b>\n\n"
-        f"📅 1H: <b>2200</b>  •  15M: <b>8800</b>  •  5M: <b>26400</b>\n"
         f"💠 Пары: XRP, BCH, APT, SUI, INJ\n\n"
         f"Ход прогона — в логах BotHost.\n"
         f"Отчёт придёт <b>.txt-файлом</b>.",
