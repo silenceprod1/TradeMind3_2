@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.30.2.
-v9.30.1: fallback price fetch в monitor_active_trades.
-v9.30.2: fix — собираем symbol из coin+"USDT" для старых сделок,
-         у которых нет поля "symbol".
+TradeMind bot v9.30.3.
+v9.30.1: fallback price fetch.
+v9.30.2: symbol from coin fallback.
+v9.30.3: диагностика — подробное логирование монитора,
+         защита monitor_active_trades от падений.
 """
 
 import asyncio
@@ -652,7 +653,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.30.2</b>",
+        "🧠 <b>TRADEMIND v9.30.3</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -703,7 +704,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.30.2</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.30.3</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -1436,6 +1437,10 @@ async def monitor_active_trades(app, results):
     if not active:
         return
 
+    print(
+        f"[MONITOR] processing {len(active)} active trade(s)",
+        flush=True)
+
     snap = []
     for t in active:
         snap.append(dict(t))
@@ -1459,9 +1464,15 @@ async def monitor_active_trades(app, results):
                 except Exception:
                     cur = None
 
+        # v9.30.3: диагностика
+        print(
+            f"[MONITOR] {coin} status=OPEN "
+            f"scan_ok={bool(result and not result.get('error'))} "
+            f"cur_from_scan={cur}",
+            flush=True)
+
         if cur is None:
             sym = trade.get("symbol")
-            # v9.30.2: если symbol нет — собираем из coin
             if not sym:
                 coin_c = trade.get("coin")
                 if coin_c:
@@ -1471,6 +1482,9 @@ async def monitor_active_trades(app, results):
                     f"[MONITOR] {coin} no symbol, skip",
                     flush=True)
                 continue
+            print(
+                f"[MONITOR] {coin} fallback fetch {sym}",
+                flush=True)
             try:
                 cur = await asyncio.to_thread(
                     get_current_price, sym)
@@ -1479,6 +1493,9 @@ async def monitor_active_trades(app, results):
                         cur = float(cur)
                     except Exception:
                         cur = None
+                print(
+                    f"[MONITOR] {coin} fallback got {cur}",
+                    flush=True)
             except Exception as exc:
                 print(
                     f"[MONITOR] {coin} price fetch failed: "
@@ -1497,8 +1514,16 @@ async def monitor_active_trades(app, results):
             sl = float(trade["sl"])
             tp = float(trade["tp"])
             d = trade["direction"]
-        except Exception:
+        except Exception as exc:
+            print(
+                f"[MONITOR] {coin} bad sl/tp/dir: {exc}",
+                flush=True)
             continue
+
+        print(
+            f"[MONITOR] {coin} {d} cur={cur} "
+            f"sl={sl} tp={tp}",
+            flush=True)
 
         hit = None
         if d == "LONG":
@@ -1515,8 +1540,8 @@ async def monitor_active_trades(app, results):
         if hit is not None:
             rtype, exp = hit
             print(
-                f"[MONITOR] {coin} {d} hit {rtype} "
-                f"@ {exp} (SL={sl} TP={tp})",
+                f"[MONITOR] {coin} {d} HIT {rtype} "
+                f"@ {exp}",
                 flush=True)
             to_close.append((trade, rtype, exp))
             continue
@@ -1559,17 +1584,29 @@ async def monitor_active_trades(app, results):
                     parse_mode="HTML",
                     reply_markup=active_keyboard(chat_id))
                 print(
-                    f"[{ev_type}] {tr_snap.get('coin')} "
+                    f"[EVENT {ev_type}] {tr_snap.get('coin')} "
                     f"@ {ev_price}", flush=True)
         except Exception as exc:
             print("EVENT NOTIFY ERR:", exc)
 
     for trade, rtype, exp in to_close:
+        print(
+            f"[MONITOR] closing {trade.get('coin')} "
+            f"{trade.get('direction')} {rtype} @ {exp}",
+            flush=True)
         closed = close_trade(trade, exp, rtype)
         if closed is None:
+            print(
+                f"[MONITOR] close_trade returned None for "
+                f"{trade.get('id')}",
+                flush=True)
             continue
         chat_id = closed.get("chat_id")
         if not chat_id:
+            print(
+                f"[MONITOR] no chat_id for closed "
+                f"{closed.get('coin')}",
+                flush=True)
             continue
         coin = closed.get("coin")
         result = results.get(coin)
@@ -1580,6 +1617,9 @@ async def monitor_active_trades(app, results):
                 trade_close_message(closed),
                 parse_mode="HTML",
                 reply_markup=trade_close_keyboard(closed))
+            print(
+                f"[CLOSE NOTIFY] {coin} {rtype} sent",
+                flush=True)
         except Exception as exc:
             print("CLOSE MSG ERR:", exc)
 
@@ -1898,7 +1938,13 @@ async def send_chart(message, coin,
 async def broadcast_ready(app, coin, result, setup):
     ids = subscribers()
     if not ids:
+        print(
+            f"[READY] {coin} no subscribers, skip broadcast",
+            flush=True)
         return
+    print(
+        f"[READY] {coin} broadcast to {len(ids)} subs",
+        flush=True)
     tasks = []
     for cid in ids:
         tasks.append(send_ready_chart(
@@ -2440,7 +2486,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.30.2</b>\n\n"
+        f"🎯 <b>MODEL 9.30.3</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2487,7 +2533,19 @@ async def monitor(app):
 
         try:
             results = await asyncio.to_thread(scan_all)
-            await monitor_active_trades(app, results)
+
+            # v9.30.3: monitor_active_trades обёрнут в try,
+            # чтобы падение не сломало основной цикл
+            try:
+                await monitor_active_trades(app, results)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                import traceback
+                print(
+                    f"[MONITOR-TRADES] ERROR: {exc}",
+                    flush=True)
+                traceback.print_exc()
 
             state_changed = False
             opens = []
@@ -2750,6 +2808,11 @@ async def callbacks(update, context):
                 f"💠 {setup.get('coin')}",
                 active_keyboard(chat_id))
             return
+        print(
+            f"[ENTER] {coin} {trade.get('direction')} "
+            f"entry={trade.get('entry')} "
+            f"chat_id={chat_id}",
+            flush=True)
         await edit_query(
             query,
             (f"🟢 <b>ПРИНЯТА</b>\n\n"
@@ -2856,6 +2919,10 @@ async def callbacks(update, context):
             if chat_id not in d:
                 d.append(chat_id)
                 save_subscribers(d)
+        print(
+            f"[SUBSCRIBE] chat_id={chat_id} "
+            f"total={len(subscribers())}",
+            flush=True)
         await edit_query(
             query,
             "🔔 <b>УВЕД ON</b>",
