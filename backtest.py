@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.35.
-Синхронизирован с strategy v9.35.
-- MIN_SCORES: 80-84
+TradeMind backtest v9.36.
+- 30 дней истории (быстрый прогон)
+- FVG-патч: fvgs считаются в бэктесте (было пусто)
+- MIN_SCORES: 78-82
 - debug-счётчики отсечений
 - CLI: --sym=XRPUSDT, --max-hours=N, --research, --no-debug
 """
@@ -14,32 +15,37 @@ from market import (
     find_major_liquidity,
     detect_sweep,
     _analyze_d1_context,
+    collect_fvgs,
 )
 from strategy import analyze, get_1h_direction, STRATEGY_VERSION
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 BT_D1   = 250
-BT_1H   = 2200
-BT_15M  = 8800
-BT_5M   = 26400
+BT_1H   = 750         # 30 дней
+BT_15M  = 3000        # 30 дней
+BT_5M   = 8800        # 30 дней
 BT_1M   = 500
-WARMUP  = 150
+WARMUP  = 100
 
 FEE_PCT  = 0.08
 SLIP_PCT = 0.05
 
 MIN_SCORES = {
-    "default":  80,
-    "XRPUSDT":  82,
-    "BCHUSDT":  80,
-    "APTUSDT":  84,
-    "SUIUSDT":  84,
-    "INJUSDT":  83,
-    "SOLUSDT":  82,
-    "ADAUSDT":  80,
-    "AVAXUSDT": 82,
-    "LINKUSDT": 80,
-    "ARBUSDT":  82,
+    "default":  78,
+    "XRPUSDT":  80,
+    "BCHUSDT":  78,
+    "APTUSDT":  82,
+    "SUIUSDT":  82,
+    "INJUSDT":  81,
+    "SOLUSDT":  80,
+    "ADAUSDT":  78,
+    "AVAXUSDT": 80,
+    "LINKUSDT": 78,
+    "ARBUSDT":  80,
 }
 
 BANNED = {"ETHUSDT", "DOTUSDT", "BTCUSDT"}
@@ -73,6 +79,10 @@ WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT",
 RESEARCH_MODE = False
 DEBUG_MODE = True
 
+
+# ============================================================
+# HELPERS
+# ============================================================
 
 def get_ms(sym):
     return MIN_SCORES.get(sym, MIN_SCORES["default"])
@@ -185,6 +195,10 @@ class CD:
         el = (ts - self.last) / 3600000.0
         return el >= h
 
+
+# ============================================================
+# TRADE SIMULATION
+# ============================================================
 
 def sim(trade, c5, start, max_h, cfg):
     d = trade["direction"]
@@ -316,6 +330,10 @@ def sim(trade, c5, start, max_h, cfg):
     return ("TIMEOUT", e, start, 0, 0.0, False)
 
 
+# ============================================================
+# RUN ONE SYMBOL
+# ============================================================
+
 def run_one(sym, max_h):
     sym = _normalize_symbol(sym)
     ms = get_ms(sym)
@@ -350,6 +368,7 @@ def run_one(sym, max_h):
         "score_samples": [], "trend_samples": [],
         "score_hist": {},
         "no_fill": 0,
+        "fvg_hits": 0,
     }
 
     for i in range(WARMUP, len(c1h)):
@@ -394,10 +413,16 @@ def run_one(sym, max_h):
                 except Exception:
                     d1c = None
 
+            # v9.36: считаем FVG на текущем срезе
+            try:
+                fvgs_now = collect_fvgs(cc5, cc15, price)
+            except Exception:
+                fvgs_now = []
+
             r = analyze(
                 cc1h, cc15, cc5, price, lv, sw,
                 candles_1m=cc1, d1_context=d1c,
-                fvgs=[], symbol=sym,
+                fvgs=fvgs_now, symbol=sym,
             )
         except Exception:
             continue
@@ -405,8 +430,11 @@ def run_one(sym, max_h):
         stage = r.get("stage", "WAIT")
         score = int(r.get("score", 0))
         trend = float(r.get("trend_activity", 0.0))
+        fvg_bonus = int(r.get("fvg_bonus", 0))
 
         if DEBUG_MODE:
+            if fvg_bonus > 0:
+                stats["fvg_hits"] += 1
             if stage == "WAIT": stats["wait"] += 1
             elif stage == "SWEPT": stats["swept"] += 1
             elif stage == "15M_CONFIRMED":
@@ -488,6 +516,7 @@ def run_one(sym, max_h):
         log("  READY < min_score: " + str(stats["ready_low_score"]))
         log("  READY >= min:      " + str(stats["ready_pass"]))
         log("  NO_FILL:           " + str(stats["no_fill"]))
+        log("  FVG hits:          " + str(stats["fvg_hits"]))
         if stats["score_samples"]:
             sc = stats["score_samples"]
             tr = stats["trend_samples"]
@@ -504,6 +533,10 @@ def run_one(sym, max_h):
 
     return trades
 
+
+# ============================================================
+# STATS / REPORT
+# ============================================================
 
 def stats(trades):
     tp = sl = be = to = ph = 0
@@ -568,7 +601,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v" + STRATEGY_VERSION + " [90 days] [" + mode + "]")
+    print("### MULTI v" + STRATEGY_VERSION + " [30 days] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
@@ -579,7 +612,7 @@ def run_multi(max_h=24, syms=None):
     print("### CFG_DEF:    " + str(CFG_DEF))
     print("### CFG_WEAK:   " + str(CFG_WEAK))
     print("### COOLDOWN:   " + str(COOLDOWN))
-    print("### HISTORY:    90 days (1H=2200, 5M=26400)")
+    print("### HISTORY:    30 days (1H=750, 5M=8800)")
     print("#" * 70)
 
     summary = []
@@ -645,6 +678,10 @@ def run_multi(max_h=24, syms=None):
     print(line)
     print("=" * 82)
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 def main(max_hours=24, research=False, syms=None):
     global RESEARCH_MODE
