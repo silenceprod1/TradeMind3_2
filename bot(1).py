@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.33.
+TradeMind bot v9.34.
 - 10 монет (XRP, BCH, APT, SUI, INJ, SOL, ADA, AVAX, LINK, ARB)
 - CFG_* с BE между P1 и P2 (A4b)
 - MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS
+- v9.34: COOLDOWN синхронизирован с backtest.COOLDOWN
+- v9.34: coin_in_cooldown учитывает серию SL по монете
 """
 
 import asyncio
@@ -90,9 +92,24 @@ WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT",
 
 BLOCK_CONFLICTING_TRADES = True
 
+# v9.34: cooldown синхронизирован с backtest.COOLDOWN
 COOLDOWN_AFTER_SL_ENABLED = True
-COOLDOWN_AFTER_SL_HOURS = 3
 COOLDOWN_AFTER_TP_HOURS = 0
+try:
+    from backtest import COOLDOWN as _BT_COOLDOWN
+except Exception:
+    _BT_COOLDOWN = {
+        "default":   {2: 3,  3: 6},
+        "APTUSDT":   {2: 6,  3: 12},
+        "INJUSDT":   {2: 4,  3: 8},
+        "BCHUSDT":   {2: 4,  3: 8},
+        "SUIUSDT":   {2: 6,  3: 10},
+        "SOLUSDT":   {2: 5,  3: 10},
+        "AVAXUSDT":  {2: 5,  3: 10},
+        "ARBUSDT":   {2: 5,  3: 10},
+    }
+COOLDOWN_AFTER_SL_HOURS = 3  # legacy для /status
+COOLDOWN_AFTER_SL_MAP = _BT_COOLDOWN
 
 NOTIFICATION_DEDUP_HOURS = 3
 NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
@@ -116,20 +133,20 @@ COINS = {
 BACKTEST_COINS = dict(COINS)
 
 MIN_SCORE_MAP = {
-    "default":  92,
-    "XRPUSDT":  93,
-    "BCHUSDT":  92,
-    "APTUSDT":  96,
-    "SUIUSDT":  96,
-    "INJUSDT":  94,
-    "SOLUSDT":  93,
-    "ADAUSDT":  92,
-    "AVAXUSDT": 93,
-    "LINKUSDT": 92,
-    "ARBUSDT":  93,
+    "default":  90,
+    "XRPUSDT":  91,
+    "BCHUSDT":  90,
+    "APTUSDT":  94,
+    "SUIUSDT":  94,
+    "INJUSDT":  92,
+    "SOLUSDT":  91,
+    "ADAUSDT":  90,
+    "AVAXUSDT": 91,
+    "LINKUSDT": 90,
+    "ARBUSDT":  91,
 }
 
-MIN_SCORE_READY = 92
+MIN_SCORE_READY = 90
 
 SUBSCRIBERS_FILE = "subscribers.json"
 TRADE_JOURNAL_FILE = "trade_journal.json"
@@ -533,17 +550,46 @@ def _recent_result_ms(coin, rtype):
     return latest
 
 
+def _count_recent_consecutive_sl(coin):
+    """v9.34: считаем подряд идущие SL для монеты (до 3)."""
+    journal = load_journal()
+    n = 0
+    for t in reversed(journal):
+        if t.get("coin") != coin:
+            continue
+        if t.get("result") == "SL":
+            n += 1
+            if n >= 3:
+                break
+        else:
+            break
+    return n
+
+
+def _cooldown_hours_for(coin):
+    """v9.34: часы cooldown для монеты по числу последних SL."""
+    sym = coin if coin.endswith("USDT") else f"{coin}USDT"
+    cfg = COOLDOWN_AFTER_SL_MAP.get(sym) or COOLDOWN_AFTER_SL_MAP.get("default")
+    n = _count_recent_consecutive_sl(coin)
+    if n < 2:
+        return 0
+    h = None
+    for k in sorted(cfg.keys()):
+        if n >= k:
+            h = cfg[k]
+    if h is None:
+        h = max(cfg.values())
+    return h
+
+
 def coin_in_cooldown(coin):
+    """v9.34: cooldown считается от серии SL по монете."""
     if not COOLDOWN_AFTER_SL_ENABLED:
         return False, None
+    hours = _cooldown_hours_for(coin)
+    if hours <= 0:
+        return False, None
     cur = now_ms()
-    if COOLDOWN_AFTER_SL_HOURS > 0:
-        last_sl = _recent_result_ms(coin, "SL")
-        if last_sl is not None:
-            eh = (cur - last_sl) / 3600000
-            if eh < COOLDOWN_AFTER_SL_HOURS:
-                rem = COOLDOWN_AFTER_SL_HOURS - eh
-                return True, f"SL {eh:.1f}h ago ({rem:.1f}h left)"
     if COOLDOWN_AFTER_TP_HOURS > 0:
         last_tp = _recent_result_ms(coin, "TP")
         if last_tp is not None:
@@ -551,6 +597,13 @@ def coin_in_cooldown(coin):
             if eh < COOLDOWN_AFTER_TP_HOURS:
                 rem = COOLDOWN_AFTER_TP_HOURS - eh
                 return True, f"TP {eh:.1f}h ago ({rem:.1f}h left)"
+    last_sl = _recent_result_ms(coin, "SL")
+    if last_sl is None:
+        return False, None
+    eh = (cur - last_sl) / 3600000
+    if eh < hours:
+        rem = hours - eh
+        return True, f"SL {eh:.1f}h ago ({rem:.1f}h left)"
     return False, None
 
 
@@ -665,7 +718,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.33</b>",
+        "🧠 <b>TRADEMIND v9.34</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -678,8 +731,7 @@ def dashboard_message(results, chat_id=None):
         f"⏳ WAIT: <b>{waiting}</b>",
         f"📌 ACTIVE: <b>{active}</b>",
         "",
-        f"❄️ Cooldown: <b>{cd_label} "
-        f"{COOLDOWN_AFTER_SL_HOURS}h</b>",
+        f"❄️ Cooldown: <b>{cd_label}</b>",
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
@@ -716,7 +768,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.33</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.34</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -733,8 +785,7 @@ def dashboard_message(results, chat_id=None):
         "",
         f"🎯 Trail: <b>{tr_label}</b>",
         f"📈 SHORT: <b>{sh_label}</b>",
-        f"❄️ Cooldown: <b>{cd_label} "
-        f"{COOLDOWN_AFTER_SL_HOURS}h</b>",
+        f"❄️ Cooldown: <b>{cd_label}</b>",
     ])
     return "\n".join(lines)
 
@@ -1398,9 +1449,12 @@ def trade_close_message(trade):
 
     cd_notice = ""
     if rt == "SL" and COOLDOWN_AFTER_SL_ENABLED:
-        cd_notice = (
-            f"\n\n❄️ <b>{trade.get('coin')} в cooldown "
-            f"на {COOLDOWN_AFTER_SL_HOURS}h</b>")
+        coin = trade.get("coin")
+        h = _cooldown_hours_for(coin)
+        if h > 0:
+            cd_notice = (
+                f"\n\n❄️ <b>{coin} в cooldown "
+                f"на {h}h</b>")
 
     lines = [
         f"{icon} <b>TRADEMIND — {title}</b>", "",
@@ -2483,7 +2537,7 @@ async def status_cmd(update, context):
     pt = "ON" if PARTIAL_TP_ENABLED else "OFF"
     sh = "ON" if ALLOW_SHORT else "OFF"
     if COOLDOWN_AFTER_SL_ENABLED:
-        cd = f"{COOLDOWN_AFTER_SL_HOURS}h"
+        cd = "MAP"
     else:
         cd = "OFF"
 
@@ -2499,7 +2553,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.33</b>\n\n"
+        f"🎯 <b>MODEL 9.34</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2964,7 +3018,7 @@ async def callbacks(update, context):
         pt = "ON" if PARTIAL_TP_ENABLED else "OFF"
         sh = "ON" if ALLOW_SHORT else "OFF"
         if COOLDOWN_AFTER_SL_ENABLED:
-            cd = f"{COOLDOWN_AFTER_SL_HOURS}h"
+            cd = "MAP"
         else:
             cd = "OFF"
         mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
@@ -3206,7 +3260,7 @@ def main():
         f"[BOOT] Monitoring {len(COINS)} coins",
         flush=True)
     print(
-        f"[BOOT] Cooldown: {COOLDOWN_AFTER_SL_HOURS}h",
+        f"[BOOT] Cooldown: MAP (см. backtest.COOLDOWN)",
         flush=True)
 
     if USE_WEBHOOK:
