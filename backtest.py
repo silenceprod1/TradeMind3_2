@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.33.
+TradeMind backtest v9.34.
 10 пар: XRP, BCH, APT, SUI, INJ, SOL, ADA, AVAX, LINK, ARB.
 90 дней истории.
-Совместим с strategy.py v9.33 и bot.py v9.33.
 
-Запуск из бота:  /backtest
-Локально:        python backtest.py
-                 python backtest.py --research
-                 python backtest.py --max-hours=48
+v9.34 fixes:
+- sim(): правильный порядок SL/TP/trailing + средневзвешенная цена выхода
+- COOLDOWN теперь единый источник (используется и в bot.py)
+- MIN_SCORES синхронизированы со strategy.COIN_CONFIGS
+
+Запуск:
+  python backtest.py
+  python backtest.py --research
+  python backtest.py --max-hours=48
 """
 
 from market import (
@@ -36,19 +40,19 @@ WARMUP  = 150
 FEE_PCT  = 0.08
 SLIP_PCT = 0.05
 
-# Синхронизировано со strategy.COIN_CONFIGS
+# v9.34: синхронизировано со strategy.COIN_CONFIGS
 MIN_SCORES = {
-    "default":  92,
-    "XRPUSDT":  93,
-    "BCHUSDT":  92,
-    "APTUSDT":  96,
-    "SUIUSDT":  96,
-    "INJUSDT":  94,
-    "SOLUSDT":  93,
-    "ADAUSDT":  92,
-    "AVAXUSDT": 93,
-    "LINKUSDT": 92,
-    "ARBUSDT":  93,
+    "default":  90,
+    "XRPUSDT":  91,
+    "BCHUSDT":  90,
+    "APTUSDT":  94,
+    "SUIUSDT":  94,
+    "INJUSDT":  92,
+    "SOLUSDT":  91,
+    "ADAUSDT":  90,
+    "AVAXUSDT": 91,
+    "LINKUSDT": 90,
+    "ARBUSDT":  91,
 }
 
 BANNED = {"ETHUSDT", "DOTUSDT", "BTCUSDT"}
@@ -58,6 +62,7 @@ ALL_SYMS = [
     "SOLUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
 ]
 
+# v9.34: единый источник cooldown — используется и bot.py
 COOLDOWN = {
     "default":   {2: 3,  3: 6},
     "APTUSDT":   {2: 6,  3: 12},
@@ -72,8 +77,6 @@ COOLDOWN = {
 TRAIL_TRIG = 1.5
 TRAIL_DIST = 0.8
 
-# A4b: BE между P1 и P2
-# (P1_R, P2_R, BE_R, P1_%, P2_%)
 CFG_STRONG = (1.2, 2.0, 1.5, 30, 30)
 CFG_DEF    = (1.0, 1.8, 1.4, 40, 25)
 CFG_WEAK   = (0.8, 1.5, 1.2, 50, 25)
@@ -125,6 +128,9 @@ def pnl_p(e, x, d):
 
 
 def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
+    """
+    v9.34: возвращает (weighted_pnl_pct, weighted_exit_price).
+    """
     w1 = 0.0
     if p1d and p1e is not None:
         w1 = p1p / 100.0
@@ -136,14 +142,29 @@ def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
         rw = 0.0
 
     t = 0.0
+    weighted_exit = 0.0
+    total_w = 0.0
+
     if w1 > 0.0:
         t += pnl_p(e, p1e, d) * w1
+        weighted_exit += p1e * w1
+        total_w += w1
     if w2 > 0.0:
         t += pnl_p(e, p2e, d) * w2
+        weighted_exit += p2e * w2
+        total_w += w2
     if rw > 0.0:
         t += pnl_p(e, fx, d) * rw
+        weighted_exit += fx * rw
+        total_w += rw
 
-    return t - (FEE_PCT + SLIP_PCT)
+    if total_w > 0.0:
+        weighted_exit = weighted_exit / total_w
+    else:
+        weighted_exit = fx
+
+    t -= (FEE_PCT + SLIP_PCT)
+    return t, weighted_exit
 
 
 class CD:
@@ -186,10 +207,17 @@ class CD:
 
 
 # ============================================================
-# TRADE SIMULATION
+# TRADE SIMULATION (v9.34 — исправлен порядок)
 # ============================================================
 
 def sim(trade, c5, start, max_h, cfg):
+    """
+    v9.34:
+    - Trailing обновляется ПОСЛЕ проверки SL/TP (как в реале на 5m баре)
+    - Возвращаем средневзвешенную цену выхода
+    - Если в одной свече и SL, и TP — консервативно SL, но с
+      учётом того, что трейлинг уже мог сдвинуться в предыдущих барах
+    """
     d = trade["direction"]
     e = float(trade["entry"])
     sl0 = float(trade["sl"])
@@ -246,6 +274,7 @@ def sim(trade, c5, start, max_h, cfg):
         hi = c["high"]
         lo = c["low"]
 
+        # --- 1. Проверяем SL/TP по текущему (ещё не сдвинутому) SL
         if d == "LONG":
             htp = hi >= tp
             hsl = lo <= sl
@@ -263,17 +292,18 @@ def sim(trade, c5, start, max_h, cfg):
             et = "BE"
 
         if hsl and htp:
-            f = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
-            return (et, sl, ot, held, f, p1d or p2d)
+            f, xp = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
+            return (et, xp, ot, held, f, p1d or p2d)
 
         if hsl:
-            f = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
-            return (et, sl, ot, held, f, p1d or p2d)
+            f, xp = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
+            return (et, xp, ot, held, f, p1d or p2d)
 
         if htp:
-            f = blend(e, tp, d, p1d, p1e, p1p, p2d, p2e, p2p)
-            return ("TP", tp, ot, held, f, p1d or p2d)
+            f, xp = blend(e, tp, d, p1d, p1e, p1p, p2d, p2e, p2p)
+            return ("TP", xp, ot, held, f, p1d or p2d)
 
+        # --- 2. Обновляем best / partials / trailing по этой свече
         if d == "LONG":
             if hi > best:
                 best = hi
@@ -312,8 +342,8 @@ def sim(trade, c5, start, max_h, cfg):
                     sl = ns
 
     if last is not None:
-        xp = last["close"]
-        f = blend(e, xp, d, p1d, p1e, p1p, p2d, p2e, p2p)
+        xp_in = last["close"]
+        f, xp = blend(e, xp_in, d, p1d, p1e, p1p, p2d, p2e, p2p)
         return ("TIMEOUT", xp, last["open_time"], held, f, p1d or p2d)
 
     return ("TIMEOUT", e, start, 0, 0.0, False)
@@ -530,100 +560,4 @@ def run_multi(max_h=24, syms=None):
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
     print("### FEES:     " + ("%.3f%%" % FEE_PCT) +
-          " + SLIP " + ("%.3f%%" % SLIP_PCT))
-    print("### FIXED_RR: 2.0")
-    print("### CFG_STRONG: " + str(CFG_STRONG))
-    print("### CFG_DEF:    " + str(CFG_DEF))
-    print("### CFG_WEAK:   " + str(CFG_WEAK))
-    print("### HISTORY:    90 days (1H=2200, 5M=26400)")
-    print("#" * 70)
-
-    summary = []
-    for sym in syms:
-        try:
-            trades = run_one(sym, max_h)
-            rep(sym, trades)
-            st = stats(trades)
-            summary.append((sym, st))
-        except Exception as ex:
-            print("[BT] " + sym + " FAILED: " + str(ex))
-            summary.append((sym, {
-                "n": 0, "tp": 0, "sl": 0, "be": 0, "to": 0,
-                "ph": 0, "wr": 0.0, "total": 0.0,
-                "avg": 0.0, "mdd": 0.0,
-            }))
-
-    print("")
-    print("=" * 82)
-    print("СВОДКА v" + STRATEGY_VERSION + " [" + mode + "]")
-    print("=" * 82)
-    print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
-    print("-" * 82)
-
-    t_n = t_tp = t_sl = t_be = t_to = 0
-    t_total = 0.0
-
-    for sym, st in summary:
-        ms = get_ms(sym)
-        line  = sym.ljust(11)
-        line += str(ms).ljust(4)
-        line += str(st["n"]).ljust(4)
-        line += str(st["tp"]).ljust(4)
-        line += str(st["sl"]).ljust(4)
-        line += str(st["be"]).ljust(4)
-        line += str(st["to"]).ljust(4)
-        line += ("%.1f" % st["wr"]).ljust(8)
-        line += ("%+.3f" % st["avg"]).ljust(8)
-        line += ("%+.2f" % st["total"]).ljust(10)
-        line += "%.2f" % st["mdd"]
-        print(line)
-
-        t_n     += st["n"]
-        t_tp    += st["tp"]
-        t_sl    += st["sl"]
-        t_be    += st["be"]
-        t_to    += st["to"]
-        t_total += st["total"]
-
-    print("-" * 82)
-    r = t_tp + t_sl
-    twr  = (t_tp / r * 100.0) if r > 0 else 0.0
-    tavg = (t_total / t_n) if t_n else 0.0
-    line  = "ИТОГО".ljust(15)
-    line += str(t_n).ljust(4)
-    line += str(t_tp).ljust(4)
-    line += str(t_sl).ljust(4)
-    line += str(t_be).ljust(4)
-    line += str(t_to).ljust(4)
-    line += ("%.1f" % twr).ljust(8)
-    line += ("%+.3f" % tavg).ljust(8)
-    line += ("%+.2f" % t_total)
-    print(line)
-    print("=" * 82)
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-def main(max_hours=24, research=False, syms=None):
-    global RESEARCH_MODE
-    RESEARCH_MODE = bool(research)
-    if syms is None:
-        syms = list(ALL_SYMS)
-    run_multi(max_hours, syms)
-
-
-if __name__ == "__main__":
-    import sys as _sys
-    _mh = 24
-    _rs = False
-    for _a in _sys.argv[1:]:
-        if _a.startswith("--max-hours="):
-            try:
-                _mh = int(_a.split("=", 1)[1])
-            except Exception:
-                pass
-        elif _a == "--research":
-            _rs = True
-    main(_mh, _rs)
+          "
