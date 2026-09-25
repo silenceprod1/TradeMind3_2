@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.39.
+TradeMind strategy v9.39 (FIXED).
 v9.39 fixes (data-driven):
-- MAX_5M_RECOVERY_RATIO = 0.95 — блок догона (было ilm_rec 1.3-3.7 → SL)
-- MAX_ILM_AGE_FOR_ENTRY = 3   (было 6, ILM старый = SL)
-- 15M engulf УБРАН — только BOS (engulf давал 100% SL)
-- MIN_LEVEL_STRENGTH = 70     (было 55)
-- MAX_SWEEP_AGE_1H = 6        (было 12)
+- MAX_5M_RECOVERY_RATIO = 0.95 — блок догона
+- MAX_ILM_AGE_FOR_ENTRY = 3
+- 15M engulf УБРАН — только BOS
+- MIN_LEVEL_STRENGTH = 70
+- MAX_SWEEP_AGE_1H = 6
+- FIX: разделены base["long"]=lr и min_score (была SyntaxError)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,13 +28,13 @@ SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 RETEST_OFFSET_PCT = 0.0
 
 MIN_SCORE_READY = 78
-REQUIRE_BOS_FOR_READY = True    # v9.39: BOS обязателен
+REQUIRE_BOS_FOR_READY = True
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
 
 MIN_SWEEP_DEPTH_PCT = 0.12
-MAX_SWEEP_AGE_1H = 6            # v9.39: было 12
+MAX_SWEEP_AGE_1H = 6
 
 USE_ATR_SCALING = True
 ATR_SL_MULT = 1.4
@@ -60,8 +61,8 @@ MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
 MAX_ILM_AGE_CANDLES_5M = 48
 
-MIN_5M_RECOVERY_RATIO = 0.50    # v9.39: было 0.40
-MAX_5M_RECOVERY_RATIO = 0.95    # v9.39: НОВЫЙ — блок догона
+MIN_5M_RECOVERY_RATIO = 0.50
+MAX_5M_RECOVERY_RATIO = 0.95
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 1.0
 
 MIN_TREND_ACTIVITY_READY = 0.45
@@ -106,7 +107,7 @@ ATR_REGIME_MIN = 1.08
 ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.3
 
-MIN_LEVEL_STRENGTH = 70.0       # v9.39: было 55
+MIN_LEVEL_STRENGTH = 70.0
 
 
 # ============================================================
@@ -606,9 +607,6 @@ def _is_local_low_15m(c, i):
 
 
 def confirmation_15m(candles_15m, sweep, direction):
-    """
-    v9.39: только BOS. Engulf убран.
-    """
     if not sweep or not candles_15m:
         return False, None, None, False, 0.0
     if direction not in ("LONG", "SHORT"):
@@ -699,7 +697,7 @@ def _ilm_long(candles, i, sweep_lvl, sweep_ext, min_depth):
     if tc is None: return None
     rec = (tc - ml) / m_range
     if rec < MIN_5M_RECOVERY_RATIO: return None
-    if rec > MAX_5M_RECOVERY_RATIO: return None   # v9.39
+    if rec > MAX_5M_RECOVERY_RATIO: return None
     if sweep_lvl is not None:
         d = abs(ml - sweep_lvl) / sweep_lvl * 100
         if d > MIN_5M_ILM_SWEEP_DISTANCE_PCT: return None
@@ -742,7 +740,7 @@ def _ilm_short(candles, i, sweep_lvl, sweep_ext, min_depth):
     if tc is None: return None
     rec = (mh - tc) / m_range
     if rec < MIN_5M_RECOVERY_RATIO: return None
-    if rec > MAX_5M_RECOVERY_RATIO: return None   # v9.39
+    if rec > MAX_5M_RECOVERY_RATIO: return None
     if sweep_lvl is not None:
         d = abs(mh - sweep_lvl) / sweep_lvl * 100
         if d > MIN_5M_ILM_SWEEP_DISTANCE_PCT: return None
@@ -976,7 +974,7 @@ def check_anti_fomo(candles_15m, direction, price):
 
 
 # ============================================================
-# SCORE (v9.39)
+# SCORE
 # ============================================================
 
 def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
@@ -1143,7 +1141,6 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
     if not conf_ok:
         result["score"] = 50; result["reason"] = "Ждём 15M BOS."; return result
 
-    # v9.39: только BOS
     if not bos:
         result["score"] = 40
         result["reason"] = "Только BOS (engulf заблокирован)."
@@ -1252,9 +1249,6 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
                    ilm, rr, ms, fb, conf_text=conf_text or "")
     result["score"] = score
 
-    # ============================================================
-    # v9.39 DIAGNOSTIC PRINT
-    # ============================================================
     try:
         sweep_depth = sweep.get("depth_pct", 0) if sweep else 0
         ilm_rec = ilm.get("recovery_ratio", 0) if ilm else 0
@@ -1275,7 +1269,6 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
         )
     except Exception:
         pass
-    # ============================================================
 
     min_score = config.get("MIN_SCORE_READY", MIN_SCORE_READY)
     trend_ok = trend >= MIN_TREND_ACTIVITY_READY
@@ -1342,7 +1335,9 @@ def analyze(candles_1h, candles_15m, candles_5m,
                            d1_context=d1_context, fvgs=fvgs,
                            symbol=symbol, config=config,
                            provided_sweep=sweep)
-    base["long"] = lr; base["short"] = sr    min_score = config.get("MIN_SCORE_READY", MIN_SCORE_READY)
+    base["long"] = lr
+    base["short"] = sr
+    min_score = config.get("MIN_SCORE_READY", MIN_SCORE_READY)
 
     if ctx_dir == "NEUTRAL":
         best = lr if lr.get("score", 0) >= sr.get("score", 0) else sr
