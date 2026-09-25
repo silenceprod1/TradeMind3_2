@@ -560,4 +560,101 @@ def run_multi(max_h=24, syms=None):
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
     print("### FEES:     " + ("%.3f%%" % FEE_PCT) +
-          "
+          " + SLIP " + ("%.3f%%" % SLIP_PCT))
+    print("### FIXED_RR: 2.0")
+    print("### CFG_STRONG: " + str(CFG_STRONG))
+    print("### CFG_DEF:    " + str(CFG_DEF))
+    print("### CFG_WEAK:   " + str(CFG_WEAK))
+    print("### COOLDOWN:   " + str(COOLDOWN))
+    print("### HISTORY:    90 days (1H=2200, 5M=26400)")
+    print("#" * 70)
+
+    summary = []
+    for sym in syms:
+        try:
+            trades = run_one(sym, max_h)
+            rep(sym, trades)
+            st = stats(trades)
+            summary.append((sym, st))
+        except Exception as ex:
+            print("[BT] " + sym + " FAILED: " + str(ex))
+            summary.append((sym, {
+                "n": 0, "tp": 0, "sl": 0, "be": 0, "to": 0,
+                "ph": 0, "wr": 0.0, "total": 0.0,
+                "avg": 0.0, "mdd": 0.0,
+            }))
+
+    print("")
+    print("=" * 82)
+    print("СВОДКА v" + STRATEGY_VERSION + " [" + mode + "]")
+    print("=" * 82)
+    print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
+    print("-" * 82)
+
+    t_n = t_tp = t_sl = t_be = t_to = 0
+    t_total = 0.0
+
+    for sym, st in summary:
+        ms = get_ms(sym)
+        line  = sym.ljust(11)
+        line += str(ms).ljust(4)
+        line += str(st["n"]).ljust(4)
+        line += str(st["tp"]).ljust(4)
+        line += str(st["sl"]).ljust(4)
+        line += str(st["be"]).ljust(4)
+        line += str(st["to"]).ljust(4)
+        line += ("%.1f" % st["wr"]).ljust(8)
+        line += ("%+.3f" % st["avg"]).ljust(8)
+        line += ("%+.2f" % st["total"]).ljust(10)
+        line += "%.2f" % st["mdd"]
+        print(line)
+
+        t_n     += st["n"]
+        t_tp    += st["tp"]
+        t_sl    += st["sl"]
+        t_be    += st["be"]
+        t_to    += st["to"]
+        t_total += st["total"]
+
+    print("-" * 82)
+    r = t_tp + t_sl
+    twr  = (t_tp / r * 100.0) if r > 0 else 0.0
+    tavg = (t_total / t_n) if t_n else 0.0
+    line  = "ИТОГО".ljust(15)
+    line += str(t_n).ljust(4)
+    line += str(t_tp).ljust(4)
+    line += str(t_sl).ljust(4)
+    line += str(t_be).ljust(4)
+    line += str(t_to).ljust(4)
+    line += ("%.1f" % twr).ljust(8)
+    line += ("%+.3f" % tavg).ljust(8)
+    line += ("%+.2f" % t_total)
+    print(line)
+    print("=" * 82)
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+def main(max_hours=24, research=False, syms=None):
+    global RESEARCH_MODE
+    RESEARCH_MODE = bool(research)
+    if syms is None:
+        syms = list(ALL_SYMS)
+    run_multi(max_hours, syms)
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _mh = 24
+    _rs = False
+    for _a in _sys.argv[1:]:
+        if _a.startswith("--max-hours="):
+            try:
+                _mh = int(_a.split("=", 1)[1])
+            except Exception:
+                pass
+        elif _a == "--research":
+            _rs = True
+    main(_mh, _rs)
