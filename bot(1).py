@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.30.3.
-v9.30.1: fallback price fetch.
-v9.30.2: symbol from coin fallback.
-v9.30.3: диагностика — подробное логирование монитора,
-         защита monitor_active_trades от падений.
+TradeMind bot v9.33.
+- 10 монет (XRP, BCH, APT, SUI, INJ, SOL, ADA, AVAX, LINK, ARB)
+- CFG_* с BE между P1 и P2 (A4b)
+- MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS
 """
 
 import asyncio
@@ -74,19 +73,20 @@ TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.5
 TRAILING_DISTANCE_R = 0.8
 
-BREAKEVEN_TRIGGER_R = 1.1
+BREAKEVEN_TRIGGER_R = 1.4
 PARTIAL_TP_ENABLED = True
-PARTIAL_TP_TRIGGER_R = 0.9
+PARTIAL_TP_TRIGGER_R = 1.0
 PARTIAL_TP_PERCENT = 40
 PARTIAL_TP_2_ENABLED = True
-PARTIAL_TP_2_TRIGGER_R = 1.6
+PARTIAL_TP_2_TRIGGER_R = 1.8
 PARTIAL_TP_2_PERCENT = 25
 
 SCORE_STRONG = 95
-CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
-CFG_DEF = (0.9, 1.6, 1.1, 40, 25)
-CFG_WEAK = (0.5, 1.1, 0.8, 50, 25)
-WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
+CFG_STRONG = (1.2, 2.0, 1.5, 30, 30)
+CFG_DEF    = (1.0, 1.8, 1.4, 40, 25)
+CFG_WEAK   = (0.8, 1.5, 1.2, 50, 25)
+WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT",
+             "ARBUSDT", "AVAXUSDT"}
 
 BLOCK_CONFLICTING_TRADES = True
 
@@ -101,23 +101,35 @@ PULLBACK_NOTIF_ENABLED = True
 PULLBACK_NOTIF_DEDUP_HOURS = 1
 
 COINS = {
-    "XRP": "XRPUSDT",
-    "BCH": "BCHUSDT",
-    "APT": "APTUSDT",
-    "SUI": "SUIUSDT",
-    "INJ": "INJUSDT",
+    "XRP":  "XRPUSDT",
+    "BCH":  "BCHUSDT",
+    "APT":  "APTUSDT",
+    "SUI":  "SUIUSDT",
+    "INJ":  "INJUSDT",
+    "SOL":  "SOLUSDT",
+    "ADA":  "ADAUSDT",
+    "AVAX": "AVAXUSDT",
+    "LINK": "LINKUSDT",
+    "ARB":  "ARBUSDT",
 }
 
 BACKTEST_COINS = dict(COINS)
 
 MIN_SCORE_MAP = {
-    "default": 90,
-    "INJUSDT": 88,
-    "BCHUSDT": 92,
-    "APTUSDT": 93,
+    "default":  92,
+    "XRPUSDT":  93,
+    "BCHUSDT":  92,
+    "APTUSDT":  96,
+    "SUIUSDT":  96,
+    "INJUSDT":  94,
+    "SOLUSDT":  93,
+    "ADAUSDT":  92,
+    "AVAXUSDT": 93,
+    "LINKUSDT": 92,
+    "ARBUSDT":  93,
 }
 
-MIN_SCORE_READY = 90
+MIN_SCORE_READY = 92
 
 SUBSCRIBERS_FILE = "subscribers.json"
 TRADE_JOURNAL_FILE = "trade_journal.json"
@@ -653,7 +665,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.30.3</b>",
+        "🧠 <b>TRADEMIND v9.33</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -704,7 +716,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.30.3</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.33</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -1464,7 +1476,6 @@ async def monitor_active_trades(app, results):
                 except Exception:
                     cur = None
 
-        # v9.30.3: диагностика
         print(
             f"[MONITOR] {coin} status=OPEN "
             f"scan_ok={bool(result and not result.get('error'))} "
@@ -1982,7 +1993,8 @@ async def backtest_cmd(update, context):
 
     await update.message.reply_text(
         f"⏳ <b>ЗАПУСК БЭКТЕСТА</b>\n\n"
-        f"💠 Пары: XRP, BCH, APT, SUI, INJ\n\n"
+        f"💠 Пары: XRP, BCH, APT, SUI, INJ, "
+        f"SOL, ADA, AVAX, LINK, ARB\n\n"
         f"Ход прогона — в логах BotHost.\n"
         f"Отчёт придёт <b>.txt-файлом</b>.",
         parse_mode="HTML")
@@ -2065,7 +2077,8 @@ async def backtest_cmd(update, context):
 
     header = (
         "✅ <b>БЭКТЕСТ ЗАВЕРШЁН</b>\n"
-        "💠 Пары: XRP, BCH, APT, SUI, INJ\n"
+        "💠 10 монет: XRP, BCH, APT, SUI, INJ, "
+        "SOL, ADA, AVAX, LINK, ARB\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
     )
 
@@ -2486,7 +2499,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.30.3</b>\n\n"
+        f"🎯 <b>MODEL 9.33</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2534,8 +2547,6 @@ async def monitor(app):
         try:
             results = await asyncio.to_thread(scan_all)
 
-            # v9.30.3: monitor_active_trades обёрнут в try,
-            # чтобы падение не сломало основной цикл
             try:
                 await monitor_active_trades(app, results)
             except asyncio.CancelledError:
