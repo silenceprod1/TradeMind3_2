@@ -1,21 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.32 (Neurobro Edition, calibrated).
-A1: подняты MIN_SCORE_READY
-A3: расширены ATR_SL_MULT (меньше SL на шуме)
-A4: частички/BE сдвинуты (P1 1.0R, BE 1.0R)
+TradeMind strategy v9.33.
+A2: переписан scoring (100 достижимо редко)
+A5: 10 монет вместо 5
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
-STRATEGY_VERSION = "9.32"
+STRATEGY_VERSION = "9.33"
 ALLOW_SHORT = True
-
 MAX_ILM_AGE_FOR_ENTRY = 6
 
 ATR_SL_MULT_SOFT = 0.8
 SL_BUFFER_PCT = 0.20
-ATR_SL_MAX_MULT = 3.5           # было 3.0 — чуть больше потолок
+ATR_SL_MAX_MULT = 3.5
 
 ENABLE_SESSION_FILTER = False
 SESSION_BLOCK_START_HOUR = 2
@@ -24,7 +22,7 @@ SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 
 RETEST_OFFSET_PCT = 0.0
 
-MIN_SCORE_READY = 92            # default поднят с 90
+MIN_SCORE_READY = 92
 REQUIRE_BOS_FOR_READY = True
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 1.0
@@ -34,9 +32,9 @@ MIN_SWEEP_DEPTH_PCT = 0.12
 MAX_SWEEP_AGE_1H = 24
 
 USE_ATR_SCALING = True
-ATR_SL_MULT = 1.4               # default поднят с 1.2
+ATR_SL_MULT = 1.4
 MIN_SL_DISTANCE_PCT = 0.35
-MAX_SL_DISTANCE_PCT = 4.5       # было 4.0
+MAX_SL_DISTANCE_PCT = 4.5
 
 ENABLE_SIDEWAYS_FILTER = False
 ENABLE_POSITION_FILTER = False
@@ -62,7 +60,7 @@ MIN_5M_RECOVERY_RATIO = 0.15
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 5.0
 
 MIN_TREND_ACTIVITY_READY = 0.35
-COUNTER_TREND_MIN_SCORE = 90    # было 88 — для countertrend строже
+COUNTER_TREND_MIN_SCORE = 90
 
 FVG_TOLERANCE_PCT = 0.10
 FVG_SWEEP_BONUS = 10
@@ -78,79 +76,68 @@ READY_PROMOTE_TIERS = (
 )
 
 ENABLE_ANTI_FOMO = True
-
 RSI_PERIOD = 14
 STOCH_PERIOD = 14
 STOCH_SMOOTH_K = 3
 STOCH_SMOOTH_D = 3
-
 RSI_OVERBOUGHT_LONG = 70.0
 RSI_OVERSOLD_SHORT = 30.0
 STOCH_OVERBOUGHT_LONG = 80.0
 STOCH_OVERSOLD_SHORT = 20.0
-
 ANTI_FOMO_RSI_COOL_LONG = 65.0
 ANTI_FOMO_RSI_COOL_SHORT = 35.0
 ANTI_FOMO_STOCH_COOL_LONG = 80.0
 ANTI_FOMO_STOCH_COOL_SHORT = 20.0
-
 EMA_PULLBACK_PERIOD = 21
 ATR_EXTENSION_MULT = 1.0
 ATR_PULLBACK_TOL_MULT = 0.30
-
 ANTI_FOMO_HARD_BLOCK = True
 
 ENABLE_D1_TREND_FILTER = False
 D1_EMA_PERIOD = 50
 D1_TREND_BAND_PCT = 1.0
-
 ENABLE_ATR_REGIME_FILTER = False
 ATR_REGIME_MIN = 1.08
-
 ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.3
 
 
 # ============================================================
-# MULTI-COIN CONFIGURATION (A1 + A3)
+# 10 COINS
 # ============================================================
 
 COIN_CONFIGS = {
-    "XRPUSDT": {
-        "ATR_SL_MULT": 1.5,             # было 1.0
-        "MIN_SWEEP_DEPTH_PCT": 0.15,
-        "MAX_SL_DISTANCE_PCT": 3.5,     # было 3.0
-        "VOLATILITY_ATR_SPIKE_MULT": 2.0,
-        "MIN_SCORE_READY": 93,          # было 90
-    },
-    "BCHUSDT": {
-        "ATR_SL_MULT": 1.4,             # было 1.0
-        "MIN_SWEEP_DEPTH_PCT": 0.12,
-        "MAX_SL_DISTANCE_PCT": 4.0,     # было 3.5
-        "VOLATILITY_ATR_SPIKE_MULT": 2.2,
-        "MIN_SCORE_READY": 92,          # оставил
-    },
-    "APTUSDT": {
-        "ATR_SL_MULT": 1.7,             # было 1.2
-        "MIN_SWEEP_DEPTH_PCT": 0.15,
-        "MAX_SL_DISTANCE_PCT": 5.0,     # было 4.5
-        "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-        "MIN_SCORE_READY": 96,          # было 93
-    },
-    "SUIUSDT": {
-        "ATR_SL_MULT": 1.8,             # было 1.3
-        "MIN_SWEEP_DEPTH_PCT": 0.15,
-        "MAX_SL_DISTANCE_PCT": 5.5,     # было 5.0
-        "VOLATILITY_ATR_SPIKE_MULT": 3.0,
-        "MIN_SCORE_READY": 96,          # было 93
-    },
-    "INJUSDT": {
-        "ATR_SL_MULT": 1.6,             # было 1.2
-        "MIN_SWEEP_DEPTH_PCT": 0.14,
-        "MAX_SL_DISTANCE_PCT": 5.0,     # было 4.5
-        "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-        "MIN_SCORE_READY": 94,          # было 88
-    },
+    "XRPUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.15,
+                "MAX_SL_DISTANCE_PCT": 3.5, "VOLATILITY_ATR_SPIKE_MULT": 2.0,
+                "MIN_SCORE_READY": 93},
+    "BCHUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.12,
+                "MAX_SL_DISTANCE_PCT": 4.0, "VOLATILITY_ATR_SPIKE_MULT": 2.2,
+                "MIN_SCORE_READY": 92},
+    "APTUSDT": {"ATR_SL_MULT": 1.7, "MIN_SWEEP_DEPTH_PCT": 0.15,
+                "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
+                "MIN_SCORE_READY": 96},
+    "SUIUSDT": {"ATR_SL_MULT": 1.8, "MIN_SWEEP_DEPTH_PCT": 0.15,
+                "MAX_SL_DISTANCE_PCT": 5.5, "VOLATILITY_ATR_SPIKE_MULT": 3.0,
+                "MIN_SCORE_READY": 96},
+    "INJUSDT": {"ATR_SL_MULT": 1.6, "MIN_SWEEP_DEPTH_PCT": 0.14,
+                "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
+                "MIN_SCORE_READY": 94},
+    # --- NEW 5 ---
+    "SOLUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.14,
+                "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.8,
+                "MIN_SCORE_READY": 93},
+    "ADAUSDT": {"ATR_SL_MULT": 1.3, "MIN_SWEEP_DEPTH_PCT": 0.14,
+                "MAX_SL_DISTANCE_PCT": 3.5, "VOLATILITY_ATR_SPIKE_MULT": 2.3,
+                "MIN_SCORE_READY": 92},
+    "AVAXUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.15,
+                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
+                 "MIN_SCORE_READY": 93},
+    "LINKUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.13,
+                 "MAX_SL_DISTANCE_PCT": 4.5, "VOLATILITY_ATR_SPIKE_MULT": 2.3,
+                 "MIN_SCORE_READY": 92},
+    "ARBUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.15,
+                "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
+                "MIN_SCORE_READY": 93},
 }
 
 
@@ -498,12 +485,10 @@ def _has_vol_conf(candles, idx, lookback=VOLUME_CONFIRMATION_LOOKBACK,
 def find_sweep(candles_1h, major_levels, direction, config=None):
     if config is None: config = {}
     min_depth = config.get("MIN_SWEEP_DEPTH_PCT", MIN_SWEEP_DEPTH_PCT)
-
     if direction not in ("LONG", "SHORT"): return None
     if not candles_1h or len(candles_1h) < 3: return None
     levels = _levels_for_dir(major_levels, direction)
     if not levels: return None
-
     recent = candles_1h[-MAX_SWEEP_AGE_1H:]
     candidates = []
     total = len(candles_1h)
@@ -511,15 +496,12 @@ def find_sweep(candles_1h, major_levels, direction, config=None):
     for idx in range(len(recent)):
         c = recent[len(recent) - 1 - idx]
         cidx = total - 1 - idx
-
         if VOLUME_CONFIRMATION_ENABLED:
             if not _has_vol_conf(candles_1h, cidx): continue
-
         for level in levels:
             if _is_swept_level(level): continue
             price = _level_price(level)
             if price is None: continue
-
             if direction == "LONG":
                 low = _l(c); close = _c(c)
                 if low is None or close is None: continue
@@ -530,7 +512,6 @@ def find_sweep(candles_1h, major_levels, direction, config=None):
                 body = abs(close - op)
                 wick = min(op, close) - low
                 if not (wick > body or _bull(c)): continue
-
                 inv = False; consec = 0
                 for k in range(cidx + 1, total):
                     ca = candles_1h[k]; cc = _c(ca)
@@ -539,7 +520,6 @@ def find_sweep(candles_1h, major_levels, direction, config=None):
                         if consec >= 2: inv = True; break
                     else: consec = 0
                 if inv: continue
-
                 t = level.get("touches", 1); s = level.get("strength", 0)
                 candidates.append({
                     "swept": True, "direction": "LONG",
@@ -559,7 +539,6 @@ def find_sweep(candles_1h, major_levels, direction, config=None):
                 body = abs(close - op)
                 wick = high - max(op, close)
                 if not (wick > body or _bear(c)): continue
-
                 inv = False; consec = 0
                 for k in range(cidx + 1, total):
                     ca = candles_1h[k]; cc = _c(ca)
@@ -568,7 +547,6 @@ def find_sweep(candles_1h, major_levels, direction, config=None):
                         if consec >= 2: inv = True; break
                     else: consec = 0
                 if inv: continue
-
                 t = level.get("touches", 1); s = level.get("strength", 0)
                 candidates.append({
                     "swept": True, "direction": "SHORT",
@@ -578,7 +556,6 @@ def find_sweep(candles_1h, major_levels, direction, config=None):
                     "touches": t, "strength": s, "depth_pct": depth,
                     "_score": _sweep_cand_score(c, level, depth) - idx * 2.0,
                 })
-
     if not candidates: return None
     best = None; best_score = -1e9
     for cand in candidates:
@@ -624,17 +601,14 @@ def _is_local_low_15m(c, i):
 def confirmation_15m(candles_15m, sweep, direction):
     if not sweep or not candles_15m: return False, None, None, False
     if direction not in ("LONG", "SHORT"): return False, None, None, False
-
     sweep_t = _f(sweep.get("open_time"))
     candidates = []
     for c in candles_15m:
         t = _t(c)
         if sweep_t is None: candidates.append(c)
         elif t is not None and t > sweep_t: candidates.append(c)
-
     candidates = candidates[-MAX_15M_CONFIRM_CANDLES:]
     if len(candidates) < 3: return False, None, None, False
-
     fallback = None
     for i in range(1, len(candidates)):
         c = candidates[i]
@@ -643,7 +617,6 @@ def confirmation_15m(candles_15m, sweep, direction):
         if close is None: continue
         prev = candidates[i-1]
         prev_h = _h(prev); prev_l = _l(prev); prev_b = _body(prev)
-
         if direction == "LONG":
             if not _bull(c): continue
             highs = [_h(candidates[j]) for j in range(i-1)
@@ -668,7 +641,6 @@ def confirmation_15m(candles_15m, sweep, direction):
                       and _body(c) > prev_b)
             if engulf and fallback is None:
                 fallback = (True, "15M engulf", _t(c), False)
-
     if fallback is not None: return fallback
     return False, None, None, False
 
@@ -706,7 +678,6 @@ def _ilm_long(candles, i, sweep_lvl, sweep_ext, min_depth):
     if m_range <= 0: return None
     m_pct = m_range / left_ref * 100
     if m_pct < min_depth: return None
-
     trig_idx = None
     end = min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)
     for j in range(i + 1, end):
@@ -749,7 +720,6 @@ def _ilm_short(candles, i, sweep_lvl, sweep_ext, min_depth):
     if m_range <= 0: return None
     m_pct = m_range / left_ref * 100
     if m_pct < min_depth: return None
-
     trig_idx = None
     end = min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)
     for j in range(i + 1, end):
@@ -782,24 +752,20 @@ def detect_5m_ilm(candles_5m, sweep, direction, conf_time=None, config=None):
     min_depth = config.get("MIN_SWEEP_DEPTH_PCT", MIN_SWEEP_DEPTH_PCT)
     if not sweep: return False, None
     if direction not in ("LONG", "SHORT"): return False, None
-
     start = _f(conf_time) or _f(sweep.get("open_time"))
     candles = []
     for c in candles_5m or []:
         t = _t(c)
         if start is None: candles.append(c)
         elif t is not None and t > start: candles.append(c)
-
     candles = candles[-MAX_5M_ILM_CANDLES:]
     if len(candles) < 5: return False, None
-
     sl = _f(sweep.get("level")); se = _f(sweep.get("extreme"))
     cands = []
     for i in range(2, len(candles) - 2):
         if direction == "LONG": ilm = _ilm_long(candles, i, sl, se, min_depth)
         else: ilm = _ilm_short(candles, i, sl, se, min_depth)
         if ilm: cands.append(ilm)
-
     if not cands: return False, None
     best = None; best_score = -1e9
     for cand in cands:
@@ -917,14 +883,12 @@ def check_anti_fomo(candles_15m, direction, price):
     if not candles_15m or len(candles_15m) < max(
             RSI_PERIOD, STOCH_PERIOD + 10, EMA_PULLBACK_PERIOD) + 5:
         return True, "anti_fomo: not enough data", {}
-
     rsi = calculate_rsi(candles_15m, RSI_PERIOD)
     k_val, d_val = calculate_stochastic(candles_15m, STOCH_PERIOD,
                                         STOCH_SMOOTH_K, STOCH_SMOOTH_D)
     ema = calculate_ema(candles_15m, EMA_PULLBACK_PERIOD)
     atr = calculate_atr(candles_15m, 14)
     p = _f(price)
-
     meta = {
         "rsi_15m": round(rsi, 2) if rsi is not None else None,
         "stoch_k_15m": round(k_val, 2) if k_val is not None else None,
@@ -932,11 +896,9 @@ def check_anti_fomo(candles_15m, direction, price):
         "ema21_15m": round(ema, 8) if ema is not None else None,
         "atr_15m_fomo": round(atr, 8) if atr is not None else None,
     }
-
     if (rsi is None or k_val is None or ema is None
             or atr is None or atr <= 0 or p is None):
         return True, "anti_fomo: insufficient indicators", meta
-
     if direction == "LONG":
         ob = (rsi >= RSI_OVERBOUGHT_LONG and k_val >= STOCH_OVERBOUGHT_LONG)
         extended = p > ema + ATR_EXTENSION_MULT * atr
@@ -963,7 +925,6 @@ def check_anti_fomo(candles_15m, direction, price):
             return False, (f"Anti-FOMO LONG: цена растянута от EMA21 > "
                            f"{ATR_EXTENSION_MULT}*ATR без остывания."), meta
         return True, "anti_fomo LONG passed", meta
-
     if direction == "SHORT":
         os_ = (rsi <= RSI_OVERSOLD_SHORT and k_val <= STOCH_OVERSOLD_SHORT)
         extended = p < ema - ATR_EXTENSION_MULT * atr
@@ -990,38 +951,65 @@ def check_anti_fomo(candles_15m, direction, price):
             return False, (f"Anti-FOMO SHORT: цена растянута от EMA21 > "
                            f"{ATR_EXTENSION_MULT}*ATR без остывания."), meta
         return True, "anti_fomo SHORT passed", meta
-
     return True, "anti_fomo: no direction", meta
 
 
 # ============================================================
-# SCORE
+# SCORE (A2 — новая версия)
 # ============================================================
 
 def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
-           rr, maj_str, fvg_bonus):
+           rr, maj_str, fvg_bonus, conf_text=""):
     score = 0
-    if direction == ctx_dir: score += 15
-    elif ctx_dir == "NEUTRAL": score += 8
-    else: score += 5
+
+    # Контекст 1H — базовое условие
+    if direction == ctx_dir:
+        score += 12
+    elif ctx_dir == "NEUTRAL":
+        score += 6
+    else:
+        score += 3
+
+    # Глубина свипа — ужесточено
     if sweep:
         depth = sweep.get("depth_pct", 0)
-        if depth >= 0.40: score += 20
-        elif depth >= 0.25: score += 15
-        elif depth >= 0.15: score += 10
-        else: score += 6
-    if conf_str >= 0.75: score += 15
-    elif conf_str >= 0.50: score += 11
-    elif conf_str > 0: score += 7
-    if bos: score += 10
+        if depth >= 0.50: score += 22
+        elif depth >= 0.30: score += 15
+        elif depth >= 0.18: score += 8
+        else: score += 3
+
+    # Confirmation: BOS ценим, engulf почти нет
+    if conf_text == "15M BOS":
+        score += 15
+    elif conf_str >= 0.75:
+        score += 10
+    elif conf_str >= 0.50:
+        score += 6
+    else:
+        score += 3
+
+    # BOS больше НЕ дублируем (+10 убрано)
+
+    # ILM recovery + возраст
     if ilm:
         rec = ilm.get("recovery_ratio", 0)
-        if rec >= 0.66: score += 15
-        elif rec >= 0.50: score += 11
-        else: score += 7
-    if rr is not None and rr >= FIXED_RR: score += 15
-    score += min(10, maj_str / 10.0)
+        age = ilm.get("age_candles", 99)
+        base = 0
+        if rec >= 0.75: base = 16
+        elif rec >= 0.55: base = 11
+        elif rec >= 0.40: base = 6
+        else: base = 3
+        if age > 4: base -= 3
+        elif age > 2: base -= 1
+        score += max(0, base)
+
+    # RR
+    if rr is not None and rr >= FIXED_RR:
+        score += 12
+
+    score += min(6, maj_str / 12.0)
     score += fvg_bonus
+
     return int(min(100, max(0, round(score))))
 
 
@@ -1039,7 +1027,7 @@ def _apply_ready_promote(result):
         if trend < tr_min: continue
         if need_bos and not bos: continue
         result["stage"] = "READY"
-        result["reason"] = (f"v9.32 promote: score={score} "
+        result["reason"] = (f"v9.33 promote: score={score} "
                             f"trend={trend:.2f} bos={bos}")
         result["_v910_promoted"] = True
         return result
@@ -1229,7 +1217,7 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
 
     conf_str = 0.8 if conf_ok else 0.6
     score = _score(direction, ctx_dir, sweep, conf_str, bos,
-                   ilm, rr, ms, fb)
+                   ilm, rr, ms, fb, conf_text=conf_text or "")
     result["score"] = score
 
     min_score = config.get("MIN_SCORE_READY", MIN_SCORE_READY)
@@ -1264,7 +1252,6 @@ def analyze(candles_1h, candles_15m, candles_5m,
     price = _f(current_price)
     ctx_dir = get_1h_direction(candles_1h)
     config = get_config(symbol)
-
     base = {
         "stage": "WAIT", "direction": ctx_dir,
         "context_direction": ctx_dir,
@@ -1406,17 +1393,12 @@ def analyze_sol(*args, **kwargs):
     return analyze(*args, **kwargs)
 
 
-# ============================================================
-# NEUROBRO REPORT GENERATOR
-# ============================================================
-
 def generate_neurobro_report(result: dict, symbol: str,
                               risk_pct: float = 1.0) -> str:
     stage = result.get("stage", "WAIT")
     direction = result.get("direction", "NEUTRAL")
     score = result.get("score", 0)
     reason = result.get("reason", "")
-
     if stage == "READY" and direction in ("LONG", "SHORT"):
         emoji = "🟢 BUY" if direction == "LONG" else "🔴 SELL"
         entry = result.get("entry"); sl = result.get("sl"); tp = result.get("tp")
@@ -1440,19 +1422,14 @@ def generate_neurobro_report(result: dict, symbol: str,
             f"<b>Таймфрейм:</b> Скальп/Интрадей", "",
             f"<b>Логика:</b> {reason}", "",
             f"💰 При риске {risk_pct:.1f}% депозита размер позиции = "
-            f"<code>{risk_pct / risk_pct_price * 100:.1f}%</code> "
-            f"от депо (плечо не учитывается).", "",
-            "ℹ️ <i>При достижении TP1 — закрой 50% и переведи "
-            "стоп в безубыток.</i>",
+            f"<code>{risk_pct / risk_pct_price * 100:.1f}%</code> от депо.",
+            "", "ℹ️ <i>При TP1 — закрой 50% и переведи стоп в БУ.</i>",
         ]
         return "\n".join(lines)
-
     if stage == "WAIT_PULLBACK":
         meta = result.get("anti_fomo") or {}
-        lines = [
-            f"🧲 ${symbol}: <b>СИГНАЛ ГОТОВ — ЖДЁМ ОТКАТ</b>", "",
-            f"📐 {direction}", f"⭐ Score: {score}/100",
-        ]
+        lines = [f"🧲 ${symbol}: <b>СИГНАЛ ГОТОВ — ЖДЁМ ОТКАТ</b>", "",
+                 f"📐 {direction}", f"⭐ Score: {score}/100"]
         if meta.get("rsi_15m") is not None:
             lines.append(f"RSI 15M: <b>{meta['rsi_15m']:.1f}</b>")
         if meta.get("stoch_k_15m") is not None:
@@ -1463,7 +1440,6 @@ def generate_neurobro_report(result: dict, symbol: str,
         lines.extend(["", "⏳ <b>НЕ ВХОДИМ СЕЙЧАС</b>",
                       "Ждём откат к EMA21 / остывание RSI/Stoch."])
         return "\n".join(lines)
-
     return f"⚪ ${symbol}: <b>{stage}</b> — {reason}"
 
 
