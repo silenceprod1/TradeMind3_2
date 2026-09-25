@@ -1,14 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.31.
-5 пар: XRP, BCH, APT, SUI, INJ.
-90 дней истории.
-Совместим с strategy.py v9.31 и bot.py v9.30.3.
-
-Запуск из бота:  /backtest
-Локально:        python backtest.py
-                 python backtest.py --research
-                 python backtest.py --max-hours=48
+TradeMind backtest v9.32.
+A1: MIN_SCORES синхронизированы со strategy.py
+A4: CFG_* смягчены (BE/P1/P2 сдвинуты)
+A5: INJ убран из ALL_SYMS (оставлен в COOLDOWN/MIN_SCORES для будущего)
 """
 
 from market import (
@@ -27,36 +22,35 @@ from strategy import analyze, get_1h_direction, STRATEGY_VERSION
 # ============================================================
 
 BT_D1   = 250
-BT_1H   = 2200        # ~90 дней
-BT_15M  = 8800        # ~90 дней
-BT_5M   = 26400       # ~90 дней
+BT_1H   = 2200
+BT_15M  = 8800
+BT_5M   = 26400
 BT_1M   = 500
 WARMUP  = 150
 
-FEE_PCT  = 0.08       # тейкер Binance фьючерсы
-SLIP_PCT = 0.05       # проскальзывание на вход/выход
+FEE_PCT  = 0.08
+SLIP_PCT = 0.05
 
-# Пороги синхронизированы с strategy.COIN_CONFIGS
+# A1: синхронизировано со strategy.COIN_CONFIGS
 MIN_SCORES = {
-    "default":  90,
-    "XRPUSDT":  90,
+    "default":  92,
+    "XRPUSDT":  93,
     "BCHUSDT":  92,
-    "APTUSDT":  93,
-    "SUIUSDT":  93,
-    "INJUSDT":  88,
+    "APTUSDT":  96,
+    "SUIUSDT":  96,
+    "INJUSDT":  94,   # (не используется, INJ убран из ALL_SYMS)
 }
 
 BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT", "LINKUSDT", "BTCUSDT"}
 
+# A5: INJ убран из активного прогона
 ALL_SYMS = [
     "XRPUSDT",
     "BCHUSDT",
     "APTUSDT",
     "SUIUSDT",
-    "INJUSDT",
 ]
 
-# Cooldown по кол-ву последовательных SL (в часах)
 COOLDOWN = {
     "default":  {2: 3,  3: 6},
     "APTUSDT":  {2: 6,  3: 12},
@@ -67,10 +61,11 @@ COOLDOWN = {
 TRAIL_TRIG = 1.5
 TRAIL_DIST = 0.8
 
+# A4: частички/BE сдвинуты (P1 1.0R, BE 1.0R)
 # (P1_R, P2_R, BE_R, P1_%, P2_%)
-CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
-CFG_DEF    = (0.9, 1.6, 1.1, 40, 25)
-CFG_WEAK   = (0.5, 1.1, 0.8, 50, 25)
+CFG_STRONG = (1.2, 2.0, 1.3, 25, 25)
+CFG_DEF    = (1.0, 1.8, 1.0, 30, 25)
+CFG_WEAK   = (0.8, 1.5, 0.9, 35, 25)
 
 WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
 
@@ -140,8 +135,6 @@ def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
 
 
 class CD:
-    """Per-symbol cooldown tracker по последовательным SL."""
-
     def __init__(self, sym):
         self.sym = sym
         self.n = 0
@@ -195,7 +188,6 @@ def sim(trade, c5, start, max_h, cfg):
 
     p1r, p2r, be_r, p1p, p2p = cfg
 
-    # окно на фил (12 свечей по 5m = 1 час)
     fill_max = start + 12 * 5 * 60 * 1000
     filled = False
     fts = None
@@ -249,7 +241,6 @@ def sim(trade, c5, start, max_h, cfg):
             htp = lo <= tp
             hsl = hi >= sl
 
-        # тип выхода
         et = "SL"
         if bem:
             if abs(sl - e) < risk * 0.05:
@@ -259,7 +250,6 @@ def sim(trade, c5, start, max_h, cfg):
         elif d == "SHORT" and sl < e:
             et = "BE"
 
-        # оба в одной свече -> консервативно SL
         if hsl and htp:
             f = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
             return (et, sl, ot, held, f, p1d or p2d)
@@ -272,7 +262,6 @@ def sim(trade, c5, start, max_h, cfg):
             f = blend(e, tp, d, p1d, p1e, p1p, p2d, p2e, p2p)
             return ("TP", tp, ot, held, f, p1d or p2d)
 
-        # partials / trailing
         if d == "LONG":
             if hi > best:
                 best = hi
