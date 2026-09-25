@@ -1,20 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.31 (Neurobro Edition).
-Мультимонетные конфиги под XRP/BCH/APT/SUI/INJ, усиленный Anti-FOMO,
-генератор отчётов. Совместим с bot.py v9.30.3.
+TradeMind strategy v9.32 (Neurobro Edition, calibrated).
+A1: подняты MIN_SCORE_READY
+A3: расширены ATR_SL_MULT (меньше SL на шуме)
+A4: частички/BE сдвинуты (P1 1.0R, BE 1.0R)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
-STRATEGY_VERSION = "9.31"
+STRATEGY_VERSION = "9.32"
 ALLOW_SHORT = True
 
 MAX_ILM_AGE_FOR_ENTRY = 6
 
 ATR_SL_MULT_SOFT = 0.8
 SL_BUFFER_PCT = 0.20
-ATR_SL_MAX_MULT = 3.0
+ATR_SL_MAX_MULT = 3.5           # было 3.0 — чуть больше потолок
 
 ENABLE_SESSION_FILTER = False
 SESSION_BLOCK_START_HOUR = 2
@@ -23,7 +24,7 @@ SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 
 RETEST_OFFSET_PCT = 0.0
 
-MIN_SCORE_READY = 90
+MIN_SCORE_READY = 92            # default поднят с 90
 REQUIRE_BOS_FOR_READY = True
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 1.0
@@ -33,9 +34,9 @@ MIN_SWEEP_DEPTH_PCT = 0.12
 MAX_SWEEP_AGE_1H = 24
 
 USE_ATR_SCALING = True
-ATR_SL_MULT = 1.2
+ATR_SL_MULT = 1.4               # default поднят с 1.2
 MIN_SL_DISTANCE_PCT = 0.35
-MAX_SL_DISTANCE_PCT = 4.0
+MAX_SL_DISTANCE_PCT = 4.5       # было 4.0
 
 ENABLE_SIDEWAYS_FILTER = False
 ENABLE_POSITION_FILTER = False
@@ -61,7 +62,7 @@ MIN_5M_RECOVERY_RATIO = 0.15
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 5.0
 
 MIN_TREND_ACTIVITY_READY = 0.35
-COUNTER_TREND_MIN_SCORE = 88
+COUNTER_TREND_MIN_SCORE = 90    # было 88 — для countertrend строже
 
 FVG_TOLERANCE_PCT = 0.10
 FVG_SWEEP_BONUS = 10
@@ -72,8 +73,8 @@ ILM_TRIGGER_WINDOW = 5
 
 READY_PROMOTE_TIERS = (
     (95, 0.20, False),
-    (90, 0.25, True),
-    (88, 0.30, True),
+    (92, 0.25, True),
+    (90, 0.30, True),
 )
 
 ENABLE_ANTI_FOMO = True
@@ -111,30 +112,45 @@ MIN_RR_SPACE_MULT = 1.3
 
 
 # ============================================================
-# MULTI-COIN CONFIGURATION
+# MULTI-COIN CONFIGURATION (A1 + A3)
 # ============================================================
 
 COIN_CONFIGS = {
-    "XRPUSDT": {"ATR_SL_MULT": 1.0, "MIN_SWEEP_DEPTH_PCT": 0.15,
-                "MAX_SL_DISTANCE_PCT": 3.0,
-                "VOLATILITY_ATR_SPIKE_MULT": 2.0,
-                "MIN_SCORE_READY": 90},
-    "BCHUSDT": {"ATR_SL_MULT": 1.0, "MIN_SWEEP_DEPTH_PCT": 0.12,
-                "MAX_SL_DISTANCE_PCT": 3.5,
-                "VOLATILITY_ATR_SPIKE_MULT": 2.2,
-                "MIN_SCORE_READY": 92},
-    "APTUSDT": {"ATR_SL_MULT": 1.2, "MIN_SWEEP_DEPTH_PCT": 0.15,
-                "MAX_SL_DISTANCE_PCT": 4.5,
-                "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 93},
-    "SUIUSDT": {"ATR_SL_MULT": 1.3, "MIN_SWEEP_DEPTH_PCT": 0.15,
-                "MAX_SL_DISTANCE_PCT": 5.0,
-                "VOLATILITY_ATR_SPIKE_MULT": 3.0,
-                "MIN_SCORE_READY": 93},
-    "INJUSDT": {"ATR_SL_MULT": 1.2, "MIN_SWEEP_DEPTH_PCT": 0.14,
-                "MAX_SL_DISTANCE_PCT": 4.5,
-                "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 88},
+    "XRPUSDT": {
+        "ATR_SL_MULT": 1.5,             # было 1.0
+        "MIN_SWEEP_DEPTH_PCT": 0.15,
+        "MAX_SL_DISTANCE_PCT": 3.5,     # было 3.0
+        "VOLATILITY_ATR_SPIKE_MULT": 2.0,
+        "MIN_SCORE_READY": 93,          # было 90
+    },
+    "BCHUSDT": {
+        "ATR_SL_MULT": 1.4,             # было 1.0
+        "MIN_SWEEP_DEPTH_PCT": 0.12,
+        "MAX_SL_DISTANCE_PCT": 4.0,     # было 3.5
+        "VOLATILITY_ATR_SPIKE_MULT": 2.2,
+        "MIN_SCORE_READY": 92,          # оставил
+    },
+    "APTUSDT": {
+        "ATR_SL_MULT": 1.7,             # было 1.2
+        "MIN_SWEEP_DEPTH_PCT": 0.15,
+        "MAX_SL_DISTANCE_PCT": 5.0,     # было 4.5
+        "VOLATILITY_ATR_SPIKE_MULT": 2.5,
+        "MIN_SCORE_READY": 96,          # было 93
+    },
+    "SUIUSDT": {
+        "ATR_SL_MULT": 1.8,             # было 1.3
+        "MIN_SWEEP_DEPTH_PCT": 0.15,
+        "MAX_SL_DISTANCE_PCT": 5.5,     # было 5.0
+        "VOLATILITY_ATR_SPIKE_MULT": 3.0,
+        "MIN_SCORE_READY": 96,          # было 93
+    },
+    "INJUSDT": {
+        "ATR_SL_MULT": 1.6,             # было 1.2
+        "MIN_SWEEP_DEPTH_PCT": 0.14,
+        "MAX_SL_DISTANCE_PCT": 5.0,     # было 4.5
+        "VOLATILITY_ATR_SPIKE_MULT": 2.5,
+        "MIN_SCORE_READY": 94,          # было 88
+    },
 }
 
 
@@ -1023,7 +1039,7 @@ def _apply_ready_promote(result):
         if trend < tr_min: continue
         if need_bos and not bos: continue
         result["stage"] = "READY"
-        result["reason"] = (f"v9.31 promote: score={score} "
+        result["reason"] = (f"v9.32 promote: score={score} "
                             f"trend={trend:.2f} bos={bos}")
         result["_v910_promoted"] = True
         return result
