@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.37.
-- 30 дней истории (быстрый прогон)
+TradeMind backtest v9.38 (DIAGNOSTIC).
+- 30 дней истории
 - FVG-патч: fvgs считаются в бэктесте
-- MIN_SCORES: 78-82 (синхрон со strategy v9.37)
-- debug-счётчики отсечений
+- MIN_SCORES: 78-82 (синхрон со strategy v9.38)
+- [SETUP] print из strategy
+- [RESULT] print — результат каждой сделки
 - CLI: --sym=XRPUSDT, --max-hours=N, --research, --no-debug
 """
 
@@ -415,7 +416,6 @@ def run_one(sym, max_h):
                 except Exception:
                     d1c = None
 
-            # FVG-патч
             try:
                 fvgs_now = collect_fvgs(cc5, cc15, price)
             except Exception:
@@ -512,6 +512,18 @@ def run_one(sym, max_h):
                 " score=" + str(score) + " " + pt +
                 " -> " + rtype + " " + ("%+.2f%%" % pnl))
         log(line)
+
+        # v9.38: [RESULT] print — итог сделки
+        try:
+            print(
+                f"[RESULT] {sym} {trade['direction']} "
+                f"score={score} result={rtype} "
+                f"pnl={pnl:+.2f}% held={held} "
+                f"ph={int(bool(ph))}",
+                flush=True,
+            )
+        except Exception:
+            pass
 
     if DEBUG_MODE:
         log("=" * 55)
