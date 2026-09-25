@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.37.
-v9.37 fixes (от v9.36):
-- Жёсткий фильтр силы уровня (strength >= 55)
-- MIN_5M_RECOVERY_RATIO: 0.15 -> 0.40 (ILM только на реальном V)
-- NEUTRAL ctx = блок (сделки только при чётком 1H)
-- MIN_TREND_ACTIVITY_READY: 0.35 -> 0.45
-- MAX_SWEEP_AGE_1H: 24 -> 12
-- ENTRY_TOLERANCE_PCT: 1.0 -> 0.5
+TradeMind strategy v9.38 (DIAGNOSTIC).
+v9.38:
+- добавлен print [SETUP] в _analyze_scenario для диагностики
+- все фильтры v9.37 сохранены
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
-STRATEGY_VERSION = "9.37"
+STRATEGY_VERSION = "9.38"
 ALLOW_SHORT = True
 MAX_ILM_AGE_FOR_ENTRY = 6
 
@@ -106,7 +102,6 @@ ATR_REGIME_MIN = 1.08
 ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.3
 
-# v9.37: минимальная сила уровня для входа
 MIN_LEVEL_STRENGTH = 55.0
 
 
@@ -987,7 +982,7 @@ def check_anti_fomo(candles_15m, direction, price):
 
 
 # ============================================================
-# SCORE (v9.37)
+# SCORE
 # ============================================================
 
 def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
@@ -1050,9 +1045,9 @@ def _apply_ready_promote(result):
         if trend < tr_min: continue
         if need_bos and not bos: continue
         result["stage"] = "READY"
-        result["reason"] = (f"v9.37 promote: score={score} "
+        result["reason"] = (f"v9.38 promote: score={score} "
                             f"trend={trend:.2f} bos={bos}")
-        result["_v937_promoted"] = True
+        result["_v938_promoted"] = True
         return result
     return result
 
@@ -1121,7 +1116,6 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
         t = "SSL" if direction == "LONG" else "BSL"
         result["reason"] = f"Нет Major {t}."; return result
 
-    # v9.37: жёсткий фильтр по силе уровня
     min_str = config.get("MIN_LEVEL_STRENGTH", MIN_LEVEL_STRENGTH)
     strong_lv = [x for x in lv if _level_strength(x) >= min_str]
     if not strong_lv:
@@ -1259,6 +1253,31 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
                    ilm, rr, ms, fb, conf_text=conf_text or "")
     result["score"] = score
 
+    # ============================================================
+    # v9.38 DIAGNOSTIC PRINT — каждый сетап
+    # ============================================================
+    try:
+        sweep_depth = sweep.get("depth_pct", 0) if sweep else 0
+        ilm_rec = ilm.get("recovery_ratio", 0) if ilm else 0
+        ilm_age = ilm.get("age_candles", 0) if ilm else 0
+        ilm_manip = ilm.get("manipulation_pct", 0) if ilm else 0
+        risk_pct_v = abs(entry - sl) / entry * 100 if entry else 0
+        print(
+            f"[SETUP] {symbol} {direction} score={score} "
+            f"sweep_depth={sweep_depth:.2f} "
+            f"conf={conf_text} conf_br={conf_str:.2f} bos={bos} "
+            f"ilm_rec={ilm_rec:.2f} ilm_age={ilm_age} "
+            f"ilm_manip={ilm_manip:.2f} "
+            f"trend={trend:.2f} "
+            f"entry={entry:.6f} sl={sl:.6f} tp={tp:.6f} "
+            f"risk_pct={risk_pct_v:.2f} "
+            f"maj_str={ms:.0f} fvg={fb}",
+            flush=True,
+        )
+    except Exception:
+        pass
+    # ============================================================
+
     min_score = config.get("MIN_SCORE_READY", MIN_SCORE_READY)
     trend_ok = trend >= MIN_TREND_ACTIVITY_READY
     bos_ok = (not REQUIRE_BOS_FOR_READY) or bos
@@ -1327,7 +1346,6 @@ def analyze(candles_1h, candles_15m, candles_5m,
     base["long"] = lr; base["short"] = sr
     min_score = config.get("MIN_SCORE_READY", MIN_SCORE_READY)
 
-    # v9.37: NEUTRAL = блок (не отдаём сетапы в боковике)
     if ctx_dir == "NEUTRAL":
         best = lr if lr.get("score", 0) >= sr.get("score", 0) else sr
         base["score"] = best.get("score", 0)
