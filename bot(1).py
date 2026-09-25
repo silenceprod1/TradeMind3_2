@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.37.
+TradeMind bot v9.39.
 - 10 монет (XRP, BCH, APT, SUI, INJ, SOL, ADA, AVAX, LINK, ARB)
-- MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS v9.37 (78-82)
+- MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS v9.39 (78-82)
 - COOLDOWN синхронизирован с backtest.COOLDOWN
 - coin_in_cooldown учитывает серию SL по монете
 """
@@ -91,7 +91,6 @@ WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT",
 
 BLOCK_CONFLICTING_TRADES = True
 
-# v9.37: cooldown синхронизирован с backtest.COOLDOWN
 COOLDOWN_AFTER_SL_ENABLED = True
 COOLDOWN_AFTER_TP_HOURS = 0
 try:
@@ -714,7 +713,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.37</b>",
+        "🧠 <b>TRADEMIND v9.39</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -764,7 +763,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.37</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.39</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -885,7 +884,7 @@ def checklist_text(result):
             ])
     elif stage == "SWEPT":
         lines.append("")
-        lines.append("🎯 Ждём 15M")
+        lines.append("🎯 Ждём 15M BOS")
     elif stage == "15M_CONFIRMED":
         if ilm:
             lines.extend([
@@ -1526,12 +1525,6 @@ async def monitor_active_trades(app, results):
                 except Exception:
                     cur = None
 
-        print(
-            f"[MONITOR] {coin} status=OPEN "
-            f"scan_ok={bool(result and not result.get('error'))} "
-            f"cur_from_scan={cur}",
-            flush=True)
-
         if cur is None:
             sym = trade.get("symbol")
             if not sym:
@@ -1539,13 +1532,7 @@ async def monitor_active_trades(app, results):
                 if coin_c:
                     sym = f"{coin_c}USDT"
             if not sym:
-                print(
-                    f"[MONITOR] {coin} no symbol, skip",
-                    flush=True)
                 continue
-            print(
-                f"[MONITOR] {coin} fallback fetch {sym}",
-                flush=True)
             try:
                 cur = await asyncio.to_thread(
                     get_current_price, sym)
@@ -1554,19 +1541,10 @@ async def monitor_active_trades(app, results):
                         cur = float(cur)
                     except Exception:
                         cur = None
-                print(
-                    f"[MONITOR] {coin} fallback got {cur}",
-                    flush=True)
-            except Exception as exc:
-                print(
-                    f"[MONITOR] {coin} price fetch failed: "
-                    f"{exc}", flush=True)
+            except Exception:
                 continue
 
         if cur is None:
-            print(
-                f"[MONITOR] {coin} cur price None, skip",
-                flush=True)
             continue
 
         cms = now_ms()
@@ -1575,16 +1553,8 @@ async def monitor_active_trades(app, results):
             sl = float(trade["sl"])
             tp = float(trade["tp"])
             d = trade["direction"]
-        except Exception as exc:
-            print(
-                f"[MONITOR] {coin} bad sl/tp/dir: {exc}",
-                flush=True)
+        except Exception:
             continue
-
-        print(
-            f"[MONITOR] {coin} {d} cur={cur} "
-            f"sl={sl} tp={tp}",
-            flush=True)
 
         hit = None
         if d == "LONG":
@@ -1600,10 +1570,6 @@ async def monitor_active_trades(app, results):
 
         if hit is not None:
             rtype, exp = hit
-            print(
-                f"[MONITOR] {coin} {d} HIT {rtype} "
-                f"@ {exp}",
-                flush=True)
             to_close.append((trade, rtype, exp))
             continue
 
@@ -1623,15 +1589,6 @@ async def monitor_active_trades(app, results):
         if t.get("status") == "OPEN":
             still_open.append(t)
 
-    if still_open:
-        try:
-            info = ", ".join(
-                f"{t.get('coin')}@{t.get('last_price')}"
-                for t in still_open)
-            print(f"[MONITOR] open: {info}", flush=True)
-        except Exception:
-            pass
-
     save_active_trades(still_open)
 
     for chat_id, ev_type, ev_price, tr_snap in to_notify:
@@ -1644,30 +1601,15 @@ async def monitor_active_trades(app, results):
                     app, chat_id, msg,
                     parse_mode="HTML",
                     reply_markup=active_keyboard(chat_id))
-                print(
-                    f"[EVENT {ev_type}] {tr_snap.get('coin')} "
-                    f"@ {ev_price}", flush=True)
         except Exception as exc:
             print("EVENT NOTIFY ERR:", exc)
 
     for trade, rtype, exp in to_close:
-        print(
-            f"[MONITOR] closing {trade.get('coin')} "
-            f"{trade.get('direction')} {rtype} @ {exp}",
-            flush=True)
         closed = close_trade(trade, exp, rtype)
         if closed is None:
-            print(
-                f"[MONITOR] close_trade returned None for "
-                f"{trade.get('id')}",
-                flush=True)
             continue
         chat_id = closed.get("chat_id")
         if not chat_id:
-            print(
-                f"[MONITOR] no chat_id for closed "
-                f"{closed.get('coin')}",
-                flush=True)
             continue
         coin = closed.get("coin")
         result = results.get(coin)
@@ -1678,9 +1620,6 @@ async def monitor_active_trades(app, results):
                 trade_close_message(closed),
                 parse_mode="HTML",
                 reply_markup=trade_close_keyboard(closed))
-            print(
-                f"[CLOSE NOTIFY] {coin} {rtype} sent",
-                flush=True)
         except Exception as exc:
             print("CLOSE MSG ERR:", exc)
 
@@ -2549,7 +2488,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.37</b>\n\n"
+        f"🎯 <b>MODEL 9.39</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2869,11 +2808,6 @@ async def callbacks(update, context):
                 f"💠 {setup.get('coin')}",
                 active_keyboard(chat_id))
             return
-        print(
-            f"[ENTER] {coin} {trade.get('direction')} "
-            f"entry={trade.get('entry')} "
-            f"chat_id={chat_id}",
-            flush=True)
         await edit_query(
             query,
             (f"🟢 <b>ПРИНЯТА</b>\n\n"
@@ -2980,10 +2914,6 @@ async def callbacks(update, context):
             if chat_id not in d:
                 d.append(chat_id)
                 save_subscribers(d)
-        print(
-            f"[SUBSCRIBE] chat_id={chat_id} "
-            f"total={len(subscribers())}",
-            flush=True)
         await edit_query(
             query,
             "🔔 <b>УВЕД ON</b>",
@@ -3045,16 +2975,10 @@ async def callbacks(update, context):
 async def post_init(application):
     if RUN_BACKTEST_ON_START:
         try:
-            print("=" * 70, flush=True)
-            print("BACKTEST start", flush=True)
-            print("=" * 70, flush=True)
             import backtest
             if BACKTEST_MULTI:
                 backtest.run_multi(
                     BACKTEST_MAX_HOURS)
-            print("=" * 70, flush=True)
-            print("BACKTEST done", flush=True)
-            print("=" * 70, flush=True)
         except Exception as exc:
             import traceback
             print("BACKTEST ERR:", exc, flush=True)
