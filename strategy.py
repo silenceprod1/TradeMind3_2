@@ -2,7 +2,7 @@
 """
 TradeMind strategy v9.34.
 v9.34 fixes:
-- _score() пересчитан: 92 достижимо
+- _score() пересчитан: 90-92 достижимо
 - find_structural_sl: max(se, swing) для LONG / min(se, swing) для SHORT
 - MIN_5M_ILM_SWEEP_DISTANCE_PCT: 5.0 -> 1.0
 - ANTI_FOMO_HARD_BLOCK = False (warning, не блок)
@@ -31,8 +31,8 @@ SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 
 RETEST_OFFSET_PCT = 0.0
 
-MIN_SCORE_READY = 90              # v9.34: было 92
-REQUIRE_BOS_FOR_READY = False     # v9.34: было True
+MIN_SCORE_READY = 90
+REQUIRE_BOS_FOR_READY = False
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 1.0
 FIXED_RR = 2.0
@@ -54,7 +54,7 @@ SL_USE_SWEEP_EXTREME = True
 MIN_SL_ATR_MULT = 1.2
 MIN_BODY_RATIO_TRIGGER_5M = 0.40
 VOLATILITY_ATR_SPIKE_MULT = 2.5
-ENABLE_VOLATILITY_FILTER = False   # v9.34: было True
+ENABLE_VOLATILITY_FILTER = False
 
 VOLUME_CONFIRMATION_ENABLED = False
 VOLUME_CONFIRMATION_MULT = 1.2
@@ -66,7 +66,7 @@ MAX_15M_CONFIRM_CANDLES = 24
 MAX_ILM_AGE_CANDLES_5M = 48
 
 MIN_5M_RECOVERY_RATIO = 0.15
-MIN_5M_ILM_SWEEP_DISTANCE_PCT = 1.0   # v9.34: было 5.0
+MIN_5M_ILM_SWEEP_DISTANCE_PCT = 1.0
 
 MIN_TREND_ACTIVITY_READY = 0.35
 COUNTER_TREND_MIN_SCORE = 90
@@ -78,11 +78,10 @@ FVG_MAX_BONUS = 15
 
 ILM_TRIGGER_WINDOW = 5
 
-# v9.34: тиры подогнаны под пересчитанный _score
 READY_PROMOTE_TIERS = (
-    (92, 0.22, False),   # было (95, 0.20, False)
-    (88, 0.25, False),   # было (92, 0.25, True)
-    (85, 0.28, False),   # было (90, 0.30, True)
+    (92, 0.22, False),
+    (88, 0.25, False),
+    (85, 0.28, False),
 )
 
 ENABLE_ANTI_FOMO = True
@@ -101,7 +100,7 @@ ANTI_FOMO_STOCH_COOL_SHORT = 20.0
 EMA_PULLBACK_PERIOD = 21
 ATR_EXTENSION_MULT = 1.0
 ATR_PULLBACK_TOL_MULT = 0.30
-ANTI_FOMO_HARD_BLOCK = False       # v9.34: было True
+ANTI_FOMO_HARD_BLOCK = False
 
 ENABLE_D1_TREND_FILTER = False
 D1_EMA_PERIOD = 50
@@ -125,10 +124,10 @@ COIN_CONFIGS = {
                 "MIN_SCORE_READY": 90},
     "APTUSDT": {"ATR_SL_MULT": 1.7, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 94},   # v9.34: было 96
+                "MIN_SCORE_READY": 94},
     "SUIUSDT": {"ATR_SL_MULT": 1.8, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.5, "VOLATILITY_ATR_SPIKE_MULT": 3.0,
-                "MIN_SCORE_READY": 94},   # v9.34: было 96
+                "MIN_SCORE_READY": 94},
     "INJUSDT": {"ATR_SL_MULT": 1.6, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
                 "MIN_SCORE_READY": 92},
@@ -608,10 +607,6 @@ def _is_local_low_15m(c, i):
 
 
 def confirmation_15m(candles_15m, sweep, direction):
-    """
-    v9.34: возвращает (ok, text, time, bos, strength), где strength —
-    реальная сила подтверждения 0..1 (используется в _score).
-    """
     if not sweep or not candles_15m:
         return False, None, None, False, 0.0
     if direction not in ("LONG", "SHORT"):
@@ -817,8 +812,7 @@ def calculate_entry(ilm, price, direction):
 def find_structural_sl(candles_15m, direction, entry, ilm_ext,
                        sweep_ext=None, candles_1h=None):
     """
-    v9.34: для LONG берём max(sweep_ext, ближайший swing) — 
-    не голый sweep, иначе SL всегда слишком широкий.
+    v9.34: для LONG берём max(sweep_ext, ближайший swing).
     """
     ef = _f(entry)
     if ef is None: return ilm_ext
@@ -947,7 +941,6 @@ def check_anti_fomo(candles_15m, direction, price):
                   or k_val < ANTI_FOMO_STOCH_COOL_LONG)
         meta.update({"ob": ob, "extended": extended,
                      "pulled_back": pulled, "cooled": cooled})
-        # v9.34: в жёстком случае требуем pulled AND cooled
         if ob and extended:
             if pulled and cooled:
                 return True, "anti_fomo LONG ok", meta
@@ -995,18 +988,13 @@ def check_anti_fomo(candles_15m, direction, price):
 
 
 # ============================================================
-# SCORE (v9.34 — пересчитан под реальные 90-92)
+# SCORE (v9.34)
 # ============================================================
 
 def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
            rr, maj_str, fvg_bonus, conf_text=""):
-    """
-    v9.34: цель — 90-92 достижимо на хорошем сетапе.
-    Максимум ~100.
-    """
     score = 0
 
-    # Контекст 1H (макс 15)
     if direction == ctx_dir:
         score += 15
     elif ctx_dir == "NEUTRAL":
@@ -1014,7 +1002,6 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
     else:
         score += 3
 
-    # Глубина свипа (макс 20)
     if sweep:
         depth = sweep.get("depth_pct", 0)
         if depth >= 0.50: score += 20
@@ -1022,7 +1009,6 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
         elif depth >= 0.18: score += 10
         else: score += 5
 
-    # 15M confirmation (макс 15)
     if conf_text == "15M BOS":
         score += 15
     elif conf_str >= 0.75:
@@ -1034,7 +1020,6 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
     else:
         score += 3
 
-    # ILM (макс 15)
     if ilm:
         rec = ilm.get("recovery_ratio", 0)
         age = ilm.get("age_candles", 99)
@@ -1047,14 +1032,11 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
         elif age > 2: base -= 1
         score += max(0, base)
 
-    # RR (макс 12)
     if rr is not None and rr >= FIXED_RR:
         score += 12
 
-    # Сила уровня (макс 8)
     score += min(8, maj_str / 10.0)
 
-    # FVG бонус (макс 15)
     score += fvg_bonus
 
     return int(min(100, max(0, round(score))))
@@ -1145,12 +1127,10 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
         t = "SSL" if direction == "LONG" else "BSL"
         result["reason"] = f"Нет Major {t}."; return result
 
-    # v9.34: используем переданный sweep, если он есть и валидный
     sweep = provided_sweep
     if sweep is None or not isinstance(sweep, dict):
         sweep = find_sweep(c1h, lv, direction, config=config)
     else:
-        # валидируем, что sweep релевантен направлению и не протух
         if sweep.get("direction") != direction:
             sweep = find_sweep(c1h, lv, direction, config=config)
 
@@ -1331,5 +1311,200 @@ def analyze(candles_1h, candles_15m, candles_5m,
     if not candles_1h or not candles_15m or not candles_5m:
         base["reason"] = "Недостаточно данных."; return base
 
-    # v9.34: прокидываем переданный sweep в сценарии
-    lr = _analyze_scenario(candles_1h, candles_15m, candles_5m,
+    lr = _analyze_scenario(candles_1h, candles_15m, candles_5m, price,
+                           major_levels, "LONG", ctx_dir,
+                           d1_context=d1_context, fvgs=fvgs,
+                           symbol=symbol, config=config,
+                           provided_sweep=sweep)
+    sr = _analyze_scenario(candles_1h, candles_15m, candles_5m, price,
+                           major_levels, "SHORT", ctx_dir,
+                           d1_context=d1_context, fvgs=fvgs,
+                           symbol=symbol, config=config,
+                           provided_sweep=sweep)
+    base["long"] = lr; base["short"] = sr
+    min_score = config.get("MIN_SCORE_READY", MIN_SCORE_READY)
+
+    if ctx_dir == "NEUTRAL":
+        best = lr if lr.get("score", 0) >= sr.get("score", 0) else sr
+        stage = best.get("stage", "WAIT")
+        if stage == "READY": stage = "WAIT"
+        base.update({
+            "stage": stage, "direction": "NEUTRAL",
+            "score": best.get("score", 0),
+            "reason": "1H NEUTRAL",
+            "entry": best.get("entry"), "sl": best.get("sl"),
+            "tp": best.get("tp"), "tp_source": best.get("tp_source"),
+            "rr": best.get("rr"), "sweep": best.get("sweep"),
+            "confirmation_15m": best.get("confirmation_15m", False),
+            "confirmation_15m_time": best.get("confirmation_15m_time"),
+            "confirmation": best.get("confirmation"),
+            "bos": best.get("bos", False), "ilm": best.get("ilm"),
+            "sweep_extreme": best.get("sweep_extreme"),
+            "tp_reason": best.get("tp_reason"),
+            "geometry_valid": best.get("geometry_valid", False),
+            "trend_activity": best.get("trend_activity", 0.0),
+            "fvg_bonus": best.get("fvg_bonus", 0),
+            "fvg_sweep": best.get("fvg_sweep", False),
+            "fvg_entry": best.get("fvg_entry", False),
+            "anti_fomo": best.get("anti_fomo", {}),
+            "anti_fomo_reason": best.get("anti_fomo_reason", ""),
+            "anti_fomo_ok": best.get("anti_fomo_ok", True),
+            "d1_trend_ema": best.get("d1_trend_ema", "NEUTRAL"),
+            "d1_ema_value": best.get("d1_ema_value"),
+        })
+        return base
+
+    ready = []
+    if lr.get("stage") == "READY" and lr.get("score", 0) >= min_score:
+        ready.append(lr)
+    if sr.get("stage") == "READY" and sr.get("score", 0) >= min_score:
+        ready.append(sr)
+
+    if ready:
+        aligned = [x for x in ready if x["direction"] == ctx_dir]
+        counter = [x for x in ready if x["direction"] != ctx_dir]
+        chosen = None
+        if aligned:
+            best_sc = -1
+            for a in aligned:
+                if a["score"] > best_sc: best_sc = a["score"]; chosen = a
+        elif counter:
+            cr = [x for x in counter if x["score"] >= COUNTER_TREND_MIN_SCORE]
+            if not cr:
+                base["score"] = max(lr["score"], sr["score"])
+                base["reason"] = "Counter-тренд слаб."; return base
+            best_sc = -1
+            for x in cr:
+                if x["score"] > best_sc: best_sc = x["score"]; chosen = x
+        if chosen:
+            base.update(chosen)
+            base["context_direction"] = ctx_dir
+            base["long"] = lr; base["short"] = sr
+            return base
+
+    candidates = [lr, sr]
+
+    def stage_wt(r):
+        m = {"READY": 5, "15M_CONFIRMED": 4, "WAIT_PULLBACK": 4,
+             "SWEPT": 3, "WAIT": 1}
+        return m.get(r.get("stage"), 0)
+
+    aligned_c = [x for x in candidates if x["direction"] == ctx_dir]
+    pool = aligned_c if aligned_c else candidates
+
+    chosen = None; best_k = None
+    for x in pool:
+        k = (stage_wt(x), x.get("score", 0))
+        if best_k is None or k > best_k: best_k = k; chosen = x
+
+    if chosen is not None:
+        base.update({
+            "stage": chosen.get("stage", "WAIT"),
+            "direction": chosen.get("direction", ctx_dir),
+            "score": chosen.get("score", 0),
+            "reason": chosen.get("reason", ""),
+            "entry": chosen.get("entry"), "sl": chosen.get("sl"),
+            "tp": chosen.get("tp"), "tp_source": chosen.get("tp_source"),
+            "rr": chosen.get("rr"), "sweep": chosen.get("sweep"),
+            "confirmation_15m": chosen.get("confirmation_15m", False),
+            "confirmation_15m_time": chosen.get("confirmation_15m_time"),
+            "confirmation": chosen.get("confirmation"),
+            "bos": chosen.get("bos", False), "ilm": chosen.get("ilm"),
+            "sweep_extreme": chosen.get("sweep_extreme"),
+            "tp_reason": chosen.get("tp_reason"),
+            "geometry_valid": chosen.get("geometry_valid", False),
+            "trend_activity": chosen.get("trend_activity", 0.0),
+            "fvg_bonus": chosen.get("fvg_bonus", 0),
+            "fvg_sweep": chosen.get("fvg_sweep", False),
+            "fvg_entry": chosen.get("fvg_entry", False),
+            "anti_fomo": chosen.get("anti_fomo", {}),
+            "anti_fomo_reason": chosen.get("anti_fomo_reason", ""),
+            "anti_fomo_ok": chosen.get("anti_fomo_ok", True),
+            "d1_trend_ema": chosen.get("d1_trend_ema", "NEUTRAL"),
+            "d1_ema_value": chosen.get("d1_ema_value"),
+        })
+    base["context_direction"] = ctx_dir
+    return base
+
+
+def analyze_sol(*args, **kwargs):
+    return analyze(*args, **kwargs)
+
+
+def generate_neurobro_report(result: dict, symbol: str,
+                              risk_pct: float = 1.0) -> str:
+    stage = result.get("stage", "WAIT")
+    direction = result.get("direction", "NEUTRAL")
+    score = result.get("score", 0)
+    reason = result.get("reason", "")
+    if stage == "READY" and direction in ("LONG", "SHORT"):
+        emoji = "🟢 BUY" if direction == "LONG" else "🔴 SELL"
+        entry = result.get("entry"); sl = result.get("sl"); tp = result.get("tp")
+        if not all([entry, sl, tp]):
+            return f"⚠️ {symbol}: READY но нет entry/sl/tp"
+        risk = abs(entry - sl)
+        if direction == "LONG":
+            tp1 = entry + 1.8 * risk; tp2 = entry + 2.9 * risk
+        else:
+            tp1 = entry - 1.8 * risk; tp2 = entry - 2.9 * risk
+        risk_pct_price = (risk / entry) * 100
+        lines = [
+            f"По ${symbol} сетап: {emoji}", "",
+            f"📐 Направление: <b>{direction}</b>",
+            f"⭐ Уверенность: <b>{score}/100</b>", "",
+            f"<b>Вход:</b>  <code>{entry:.6f}</code>",
+            f"<b>Стоп:</b>  <code>{sl:.6f}</code>  "
+            f"({risk_pct_price:.2f}% риска)",
+            f"<b>TP1:</b>   <code>{tp1:.6f}</code>  (1.8R)",
+            f"<b>TP2:</b>   <code>{tp2:.6f}</code>  (2.9R)",
+            f"<b>Таймфрейм:</b> Скальп/Интрадей", "",
+            f"<b>Логика:</b> {reason}", "",
+            f"💰 При риске {risk_pct:.1f}% депозита размер позиции = "
+            f"<code>{risk_pct / risk_pct_price * 100:.1f}%</code> от депо.",
+            "", "ℹ️ <i>При TP1 — закрой 50% и переведи стоп в БУ.</i>",
+        ]
+        return "\n".join(lines)
+    if stage == "WAIT_PULLBACK":
+        meta = result.get("anti_fomo") or {}
+        lines = [f"🧲 ${symbol}: <b>СИГНАЛ ГОТОВ — ЖДЁМ ОТКАТ</b>", "",
+                 f"📐 {direction}", f"⭐ Score: {score}/100"]
+        if meta.get("rsi_15m") is not None:
+            lines.append(f"RSI 15M: <b>{meta['rsi_15m']:.1f}</b>")
+        if meta.get("stoch_k_15m") is not None:
+            lines.append(f"Stoch 15M: <b>{meta['stoch_k_15m']:.1f}</b>")
+        if meta.get("ema21_15m") is not None:
+            lines.append(f"EMA21 15M: <code>{meta['ema21_15m']:.6f}</code>")
+        if reason: lines.extend(["", f"ℹ️ {reason}"])
+        lines.extend(["", "⏳ <b>НЕ ВХОДИМ СЕЙЧАС</b>",
+                      "Ждём откат к EMA21 / остывание RSI/Stoch."])
+        return "\n".join(lines)
+    return f"⚪ ${symbol}: <b>{stage}</b> — {reason}"
+
+
+__all__ = [
+    "STRATEGY_VERSION", "ALLOW_SHORT", "MIN_SCORE_READY",
+    "REQUIRE_BOS_FOR_READY", "FIXED_RR", "SL_BUFFER_PCT",
+    "MIN_SWEEP_DEPTH_PCT", "USE_ATR_SCALING",
+    "MAX_ILM_AGE_FOR_ENTRY", "ATR_SL_MULT_SOFT",
+    "ATR_SL_MAX_MULT", "RETEST_OFFSET_PCT",
+    "ENABLE_ANTI_FOMO", "RSI_OVERBOUGHT_LONG",
+    "RSI_OVERSOLD_SHORT", "STOCH_OVERBOUGHT_LONG",
+    "STOCH_OVERSOLD_SHORT", "EMA_PULLBACK_PERIOD",
+    "ATR_EXTENSION_MULT", "ATR_PULLBACK_TOL_MULT",
+    "ANTI_FOMO_HARD_BLOCK", "ENABLE_D1_TREND_FILTER",
+    "D1_EMA_PERIOD", "D1_TREND_BAND_PCT",
+    "ENABLE_ATR_REGIME_FILTER", "ATR_REGIME_MIN",
+    "VOLUME_CONFIRMATION_ENABLED", "ENABLE_SPACE_FILTER",
+    "MIN_RR_SPACE_MULT", "ENABLE_VOLATILITY_FILTER",
+    "COIN_CONFIGS", "get_config",
+    "calculate_atr", "calculate_ema", "calculate_rsi",
+    "calculate_stochastic", "get_1h_direction",
+    "get_higher_tf_direction", "get_d1_trend_ema",
+    "measure_trend_activity", "find_sweep",
+    "confirmation_15m", "detect_5m_ilm",
+    "calculate_entry", "calculate_stop",
+    "calculate_tp_by_rr", "calculate_rr",
+    "find_structural_sl", "validate_geometry",
+    "check_anti_fomo", "check_space_to_target",
+    "analyze", "analyze_sol", "generate_neurobro_report",
+]
