@@ -1,26 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.34 (debug).
-10 пар: XRP, BCH, APT, SUI, INJ, SOL, ADA, AVAX, LINK, ARB.
-90 дней истории.
-
-v9.34 fixes:
-- sim(): правильный порядок SL/TP/trailing + средневзвешенная цена выхода
-- COOLDOWN единый источник (используется и bot.py)
-- MIN_SCORES синхронизированы со strategy.COIN_CONFIGS
-
-v9.34-debug:
-- счётчики отсечений по стадиям (WAIT/SWEPT/15M/READY)
-- статистика score/trend по дошедшим до 15M_CONFIRMED
-- CLI: --sym=XXXUSDT для прогона одной монеты
-- CLI: --max-hours=N, --research
-
-Запуск:
-  python backtest.py
-  python backtest.py --research
-  python backtest.py --max-hours=48
-  python backtest.py --sym=XRPUSDT
-  python backtest.py --sym=XRPUSDT --max-hours=24
+TradeMind backtest v9.35.
+Синхронизирован с strategy v9.35.
+- MIN_SCORES: 80-84
+- debug-счётчики отсечений
+- CLI: --sym=XRPUSDT, --max-hours=N, --research, --no-debug
 """
 
 from market import (
@@ -34,14 +18,10 @@ from market import (
 from strategy import analyze, get_1h_direction, STRATEGY_VERSION
 
 
-# ============================================================
-# CONFIG
-# ============================================================
-
 BT_D1   = 250
-BT_1H   = 2200        # ~90 дней
-BT_15M  = 8800        # ~90 дней
-BT_5M   = 26400       # ~90 дней
+BT_1H   = 2200
+BT_15M  = 8800
+BT_5M   = 26400
 BT_1M   = 500
 WARMUP  = 150
 
@@ -49,17 +29,17 @@ FEE_PCT  = 0.08
 SLIP_PCT = 0.05
 
 MIN_SCORES = {
-    "default":  90,
-    "XRPUSDT":  91,
-    "BCHUSDT":  90,
-    "APTUSDT":  94,
-    "SUIUSDT":  94,
-    "INJUSDT":  92,
-    "SOLUSDT":  91,
-    "ADAUSDT":  90,
-    "AVAXUSDT": 91,
-    "LINKUSDT": 90,
-    "ARBUSDT":  91,
+    "default":  80,
+    "XRPUSDT":  82,
+    "BCHUSDT":  80,
+    "APTUSDT":  84,
+    "SUIUSDT":  84,
+    "INJUSDT":  83,
+    "SOLUSDT":  82,
+    "ADAUSDT":  80,
+    "AVAXUSDT": 82,
+    "LINKUSDT": 80,
+    "ARBUSDT":  82,
 }
 
 BANNED = {"ETHUSDT", "DOTUSDT", "BTCUSDT"}
@@ -91,12 +71,8 @@ WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT",
              "ARBUSDT", "AVAXUSDT"}
 
 RESEARCH_MODE = False
-DEBUG_MODE = True   # v9.34-debug: печатать счётчики отсечений
+DEBUG_MODE = True
 
-
-# ============================================================
-# HELPERS
-# ============================================================
 
 def get_ms(sym):
     return MIN_SCORES.get(sym, MIN_SCORES["default"])
@@ -135,9 +111,6 @@ def pnl_p(e, x, d):
 
 
 def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
-    """
-    v9.34: возвращает (weighted_pnl_pct, weighted_exit_price).
-    """
     w1 = 0.0
     if p1d and p1e is not None:
         w1 = p1p / 100.0
@@ -213,16 +186,7 @@ class CD:
         return el >= h
 
 
-# ============================================================
-# TRADE SIMULATION
-# ============================================================
-
 def sim(trade, c5, start, max_h, cfg):
-    """
-    v9.34:
-    - Trailing обновляется ПОСЛЕ проверки SL/TP
-    - Возвращаем средневзвешенную цену выхода
-    """
     d = trade["direction"]
     e = float(trade["entry"])
     sl0 = float(trade["sl"])
@@ -352,10 +316,6 @@ def sim(trade, c5, start, max_h, cfg):
     return ("TIMEOUT", e, start, 0, 0.0, False)
 
 
-# ============================================================
-# RUN ONE SYMBOL (v9.34-debug)
-# ============================================================
-
 def run_one(sym, max_h):
     sym = _normalize_symbol(sym)
     ms = get_ms(sym)
@@ -384,12 +344,11 @@ def run_one(sym, max_h):
     cdm = CD(sym)
     log("Шагов: " + str(len(c1h) - WARMUP))
 
-    # v9.34-debug: счётчики отсечений
     stats = {
         "wait": 0, "swept": 0, "confirmed": 0, "pullback": 0,
         "ready_total": 0, "ready_pass": 0, "ready_low_score": 0,
         "score_samples": [], "trend_samples": [],
-        "score_hist": {},   # score -> count
+        "score_hist": {},
         "no_fill": 0,
     }
 
@@ -447,7 +406,6 @@ def run_one(sym, max_h):
         score = int(r.get("score", 0))
         trend = float(r.get("trend_activity", 0.0))
 
-        # --- DEBUG COUNTERS ---
         if DEBUG_MODE:
             if stage == "WAIT": stats["wait"] += 1
             elif stage == "SWEPT": stats["swept"] += 1
@@ -519,7 +477,6 @@ def run_one(sym, max_h):
                 " -> " + rtype + " " + ("%+.2f%%" % pnl))
         log(line)
 
-    # --- DEBUG SUMMARY ---
     if DEBUG_MODE:
         log("=" * 55)
         log("DEBUG " + sym)
@@ -548,22 +505,14 @@ def run_one(sym, max_h):
     return trades
 
 
-# ============================================================
-# STATS / REPORT
-# ============================================================
-
 def stats(trades):
     tp = sl = be = to = ph = 0
     for t in trades:
         rt = t["result"]
-        if rt == "TP":
-            tp += 1
-        elif rt == "SL":
-            sl += 1
-        elif rt == "BE":
-            be += 1
-        elif rt == "TIMEOUT":
-            to += 1
+        if rt == "TP": tp += 1
+        elif rt == "SL": sl += 1
+        elif rt == "BE": be += 1
+        elif rt == "TIMEOUT": to += 1
         if t.get("partial_hit"):
             ph += 1
 
@@ -697,10 +646,6 @@ def run_multi(max_h=24, syms=None):
     print("=" * 82)
 
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
 def main(max_hours=24, research=False, syms=None):
     global RESEARCH_MODE
     RESEARCH_MODE = bool(research)
@@ -726,6 +671,6 @@ if __name__ == "__main__":
             _val = _a.split("=", 1)[1].upper().strip()
             _val = _normalize_symbol(_val)
             _syms = [_val]
-        elif _a.startswith("--no-debug"):
+        elif _a == "--no-debug":
             DEBUG_MODE = False
     main(_mh, _rs, _syms)
