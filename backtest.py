@@ -1,18 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.34.
+TradeMind backtest v9.34 (debug).
 10 пар: XRP, BCH, APT, SUI, INJ, SOL, ADA, AVAX, LINK, ARB.
 90 дней истории.
 
 v9.34 fixes:
 - sim(): правильный порядок SL/TP/trailing + средневзвешенная цена выхода
-- COOLDOWN теперь единый источник (используется и в bot.py)
+- COOLDOWN единый источник (используется и bot.py)
 - MIN_SCORES синхронизированы со strategy.COIN_CONFIGS
+
+v9.34-debug:
+- счётчики отсечений по стадиям (WAIT/SWEPT/15M/READY)
+- статистика score/trend по дошедшим до 15M_CONFIRMED
+- CLI: --sym=XXXUSDT для прогона одной монеты
+- CLI: --max-hours=N, --research
 
 Запуск:
   python backtest.py
   python backtest.py --research
   python backtest.py --max-hours=48
+  python backtest.py --sym=XRPUSDT
+  python backtest.py --sym=XRPUSDT --max-hours=24
 """
 
 from market import (
@@ -40,7 +48,6 @@ WARMUP  = 150
 FEE_PCT  = 0.08
 SLIP_PCT = 0.05
 
-# v9.34: синхронизировано со strategy.COIN_CONFIGS
 MIN_SCORES = {
     "default":  90,
     "XRPUSDT":  91,
@@ -62,7 +69,6 @@ ALL_SYMS = [
     "SOLUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
 ]
 
-# v9.34: единый источник cooldown — используется и bot.py
 COOLDOWN = {
     "default":   {2: 3,  3: 6},
     "APTUSDT":   {2: 6,  3: 12},
@@ -85,6 +91,7 @@ WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT",
              "ARBUSDT", "AVAXUSDT"}
 
 RESEARCH_MODE = False
+DEBUG_MODE = True   # v9.34-debug: печатать счётчики отсечений
 
 
 # ============================================================
@@ -207,16 +214,14 @@ class CD:
 
 
 # ============================================================
-# TRADE SIMULATION (v9.34 — исправлен порядок)
+# TRADE SIMULATION
 # ============================================================
 
 def sim(trade, c5, start, max_h, cfg):
     """
     v9.34:
-    - Trailing обновляется ПОСЛЕ проверки SL/TP (как в реале на 5m баре)
+    - Trailing обновляется ПОСЛЕ проверки SL/TP
     - Возвращаем средневзвешенную цену выхода
-    - Если в одной свече и SL, и TP — консервативно SL, но с
-      учётом того, что трейлинг уже мог сдвинуться в предыдущих барах
     """
     d = trade["direction"]
     e = float(trade["entry"])
@@ -274,7 +279,6 @@ def sim(trade, c5, start, max_h, cfg):
         hi = c["high"]
         lo = c["low"]
 
-        # --- 1. Проверяем SL/TP по текущему (ещё не сдвинутому) SL
         if d == "LONG":
             htp = hi >= tp
             hsl = lo <= sl
@@ -303,7 +307,6 @@ def sim(trade, c5, start, max_h, cfg):
             f, xp = blend(e, tp, d, p1d, p1e, p1p, p2d, p2e, p2p)
             return ("TP", xp, ot, held, f, p1d or p2d)
 
-        # --- 2. Обновляем best / partials / trailing по этой свече
         if d == "LONG":
             if hi > best:
                 best = hi
@@ -350,7 +353,7 @@ def sim(trade, c5, start, max_h, cfg):
 
 
 # ============================================================
-# RUN ONE SYMBOL
+# RUN ONE SYMBOL (v9.34-debug)
 # ============================================================
 
 def run_one(sym, max_h):
@@ -380,6 +383,15 @@ def run_one(sym, max_h):
     trades = []
     cdm = CD(sym)
     log("Шагов: " + str(len(c1h) - WARMUP))
+
+    # v9.34-debug: счётчики отсечений
+    stats = {
+        "wait": 0, "swept": 0, "confirmed": 0, "pullback": 0,
+        "ready_total": 0, "ready_pass": 0, "ready_low_score": 0,
+        "score_samples": [], "trend_samples": [],
+        "score_hist": {},   # score -> count
+        "no_fill": 0,
+    }
 
     for i in range(WARMUP, len(c1h)):
         ts = c1h[i]["open_time"]
@@ -433,6 +445,31 @@ def run_one(sym, max_h):
 
         stage = r.get("stage", "WAIT")
         score = int(r.get("score", 0))
+        trend = float(r.get("trend_activity", 0.0))
+
+        # --- DEBUG COUNTERS ---
+        if DEBUG_MODE:
+            if stage == "WAIT": stats["wait"] += 1
+            elif stage == "SWEPT": stats["swept"] += 1
+            elif stage == "15M_CONFIRMED":
+                stats["confirmed"] += 1
+                stats["score_samples"].append(score)
+                stats["trend_samples"].append(trend)
+                key = (score // 5) * 5
+                stats["score_hist"][key] = \
+                    stats["score_hist"].get(key, 0) + 1
+            elif stage == "WAIT_PULLBACK": stats["pullback"] += 1
+            elif stage == "READY":
+                stats["ready_total"] += 1
+                stats["score_samples"].append(score)
+                stats["trend_samples"].append(trend)
+                key = (score // 5) * 5
+                stats["score_hist"][key] = \
+                    stats["score_hist"].get(key, 0) + 1
+                if score < ms:
+                    stats["ready_low_score"] += 1
+                else:
+                    stats["ready_pass"] += 1
 
         if stage != "READY":
             continue
@@ -459,6 +496,7 @@ def run_one(sym, max_h):
         rtype, xp, xts, held, pnl, ph = res
 
         if rtype == "NO_FILL":
+            stats["no_fill"] += 1
             log("[" + str(i) + "] NO_FILL")
             cdm.on("NO_FILL", xts)
             continue
@@ -480,6 +518,32 @@ def run_one(sym, max_h):
                 " score=" + str(score) + " " + pt +
                 " -> " + rtype + " " + ("%+.2f%%" % pnl))
         log(line)
+
+    # --- DEBUG SUMMARY ---
+    if DEBUG_MODE:
+        log("=" * 55)
+        log("DEBUG " + sym)
+        log("  WAIT:              " + str(stats["wait"]))
+        log("  SWEPT:             " + str(stats["swept"]))
+        log("  15M_CONFIRMED:     " + str(stats["confirmed"]))
+        log("  WAIT_PULLBACK:     " + str(stats["pullback"]))
+        log("  READY (any):       " + str(stats["ready_total"]))
+        log("  READY < min_score: " + str(stats["ready_low_score"]))
+        log("  READY >= min:      " + str(stats["ready_pass"]))
+        log("  NO_FILL:           " + str(stats["no_fill"]))
+        if stats["score_samples"]:
+            sc = stats["score_samples"]
+            tr = stats["trend_samples"]
+            log("  score: min=%d max=%d avg=%.1f" % (
+                min(sc), max(sc), sum(sc) / len(sc)))
+            log("  trend: min=%.2f max=%.2f avg=%.2f" % (
+                min(tr), max(tr), sum(tr) / len(tr)))
+        if stats["score_hist"]:
+            log("  score histogram (bucket=5):")
+            for k in sorted(stats["score_hist"].keys()):
+                log("    %3d-%3d: %d" % (
+                    k, k + 4, stats["score_hist"][k]))
+        log("=" * 55)
 
     return trades
 
@@ -649,6 +713,7 @@ if __name__ == "__main__":
     import sys as _sys
     _mh = 24
     _rs = False
+    _syms = None
     for _a in _sys.argv[1:]:
         if _a.startswith("--max-hours="):
             try:
@@ -657,4 +722,10 @@ if __name__ == "__main__":
                 pass
         elif _a == "--research":
             _rs = True
-    main(_mh, _rs)
+        elif _a.startswith("--sym="):
+            _val = _a.split("=", 1)[1].upper().strip()
+            _val = _normalize_symbol(_val)
+            _syms = [_val]
+        elif _a.startswith("--no-debug"):
+            DEBUG_MODE = False
+    main(_mh, _rs, _syms)
