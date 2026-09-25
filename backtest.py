@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.36.
+TradeMind backtest v9.37.
 - 30 дней истории (быстрый прогон)
-- FVG-патч: fvgs считаются в бэктесте (было пусто)
-- MIN_SCORES: 78-82
+- FVG-патч: fvgs считаются в бэктесте
+- MIN_SCORES: 78-82 (синхрон со strategy v9.37)
 - debug-счётчики отсечений
 - CLI: --sym=XRPUSDT, --max-hours=N, --research, --no-debug
 """
@@ -369,6 +369,8 @@ def run_one(sym, max_h):
         "score_hist": {},
         "no_fill": 0,
         "fvg_hits": 0,
+        "weak_level": 0,
+        "neutral_ctx": 0,
     }
 
     for i in range(WARMUP, len(c1h)):
@@ -413,7 +415,7 @@ def run_one(sym, max_h):
                 except Exception:
                     d1c = None
 
-            # v9.36: считаем FVG на текущем срезе
+            # FVG-патч
             try:
                 fvgs_now = collect_fvgs(cc5, cc15, price)
             except Exception:
@@ -431,10 +433,16 @@ def run_one(sym, max_h):
         score = int(r.get("score", 0))
         trend = float(r.get("trend_activity", 0.0))
         fvg_bonus = int(r.get("fvg_bonus", 0))
+        reason = r.get("reason", "")
 
         if DEBUG_MODE:
             if fvg_bonus > 0:
                 stats["fvg_hits"] += 1
+            if "Уровни слабые" in reason:
+                stats["weak_level"] += 1
+            if "NEUTRAL" in reason and "блок" in reason:
+                stats["neutral_ctx"] += 1
+
             if stage == "WAIT": stats["wait"] += 1
             elif stage == "SWEPT": stats["swept"] += 1
             elif stage == "15M_CONFIRMED":
@@ -517,6 +525,8 @@ def run_one(sym, max_h):
         log("  READY >= min:      " + str(stats["ready_pass"]))
         log("  NO_FILL:           " + str(stats["no_fill"]))
         log("  FVG hits:          " + str(stats["fvg_hits"]))
+        log("  Weak level blocks: " + str(stats["weak_level"]))
+        log("  NEUTRAL blocks:    " + str(stats["neutral_ctx"]))
         if stats["score_samples"]:
             sc = stats["score_samples"]
             tr = stats["trend_samples"]
