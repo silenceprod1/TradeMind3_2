@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.36.
-v9.36 fixes (от v9.35):
-- _score() пересчитан: типичный сетап ~78-85, хороший 88-95
-- MIN_SCORE_READY = 78
-- MIN_SCORE_READY в COIN_CONFIGS: 78-82
-- READY_PROMOTE_TIERS подогнаны: (88,0.25), (84,0.28), (80,0.30)
+TradeMind strategy v9.37.
+v9.37 fixes (от v9.36):
+- Жёсткий фильтр силы уровня (strength >= 55)
+- MIN_5M_RECOVERY_RATIO: 0.15 -> 0.40 (ILM только на реальном V)
+- NEUTRAL ctx = блок (сделки только при чётком 1H)
+- MIN_TREND_ACTIVITY_READY: 0.35 -> 0.45
+- MAX_SWEEP_AGE_1H: 24 -> 12
+- ENTRY_TOLERANCE_PCT: 1.0 -> 0.5
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
-STRATEGY_VERSION = "9.36"
+STRATEGY_VERSION = "9.37"
 ALLOW_SHORT = True
 MAX_ILM_AGE_FOR_ENTRY = 6
 
@@ -28,11 +30,11 @@ RETEST_OFFSET_PCT = 0.0
 MIN_SCORE_READY = 78
 REQUIRE_BOS_FOR_READY = False
 STRUCTURAL_SL_LOOKBACK_15M = 50
-ENTRY_TOLERANCE_PCT = 1.0
+ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
 
 MIN_SWEEP_DEPTH_PCT = 0.12
-MAX_SWEEP_AGE_1H = 24
+MAX_SWEEP_AGE_1H = 12
 
 USE_ATR_SCALING = True
 ATR_SL_MULT = 1.4
@@ -59,10 +61,10 @@ MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
 MAX_ILM_AGE_CANDLES_5M = 48
 
-MIN_5M_RECOVERY_RATIO = 0.15
+MIN_5M_RECOVERY_RATIO = 0.40
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 1.0
 
-MIN_TREND_ACTIVITY_READY = 0.35
+MIN_TREND_ACTIVITY_READY = 0.45
 COUNTER_TREND_MIN_SCORE = 78
 
 FVG_TOLERANCE_PCT = 0.10
@@ -73,9 +75,9 @@ FVG_MAX_BONUS = 15
 ILM_TRIGGER_WINDOW = 5
 
 READY_PROMOTE_TIERS = (
-    (88, 0.25, False),
-    (84, 0.28, False),
-    (80, 0.30, False),
+    (88, 0.30, False),
+    (84, 0.32, False),
+    (80, 0.35, False),
 )
 
 ENABLE_ANTI_FOMO = True
@@ -104,6 +106,9 @@ ATR_REGIME_MIN = 1.08
 ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.3
 
+# v9.37: минимальная сила уровня для входа
+MIN_LEVEL_STRENGTH = 55.0
+
 
 # ============================================================
 # 10 COINS
@@ -112,34 +117,34 @@ MIN_RR_SPACE_MULT = 1.3
 COIN_CONFIGS = {
     "XRPUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 3.5, "VOLATILITY_ATR_SPIKE_MULT": 2.0,
-                "MIN_SCORE_READY": 80},
+                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
     "BCHUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.12,
                 "MAX_SL_DISTANCE_PCT": 4.0, "VOLATILITY_ATR_SPIKE_MULT": 2.2,
-                "MIN_SCORE_READY": 78},
+                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 55},
     "APTUSDT": {"ATR_SL_MULT": 1.7, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 82},
+                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 60},
     "SUIUSDT": {"ATR_SL_MULT": 1.8, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.5, "VOLATILITY_ATR_SPIKE_MULT": 3.0,
-                "MIN_SCORE_READY": 82},
+                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 60},
     "INJUSDT": {"ATR_SL_MULT": 1.6, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 81},
+                "MIN_SCORE_READY": 81, "MIN_LEVEL_STRENGTH": 55},
     "SOLUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.8,
-                "MIN_SCORE_READY": 80},
+                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
     "ADAUSDT": {"ATR_SL_MULT": 1.3, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 3.5, "VOLATILITY_ATR_SPIKE_MULT": 2.3,
-                "MIN_SCORE_READY": 78},
+                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 50},
     "AVAXUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.15,
                  "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                 "MIN_SCORE_READY": 80},
+                 "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
     "LINKUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.13,
                  "MAX_SL_DISTANCE_PCT": 4.5, "VOLATILITY_ATR_SPIKE_MULT": 2.3,
-                 "MIN_SCORE_READY": 78},
+                 "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 50},
     "ARBUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 80},
+                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
 }
 
 
@@ -150,6 +155,7 @@ def get_config(symbol: str) -> dict:
         "MAX_SL_DISTANCE_PCT": MAX_SL_DISTANCE_PCT,
         "VOLATILITY_ATR_SPIKE_MULT": VOLATILITY_ATR_SPIKE_MULT,
         "MIN_SCORE_READY": MIN_SCORE_READY,
+        "MIN_LEVEL_STRENGTH": MIN_LEVEL_STRENGTH,
     }
     if symbol and symbol in COIN_CONFIGS:
         base.update(COIN_CONFIGS[symbol])
@@ -981,17 +987,13 @@ def check_anti_fomo(candles_15m, direction, price):
 
 
 # ============================================================
-# SCORE (v9.36)
+# SCORE (v9.37)
 # ============================================================
 
 def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
            rr, maj_str, fvg_bonus, conf_text=""):
-    """
-    v9.36: ещё раз пересчитано. Типичный сетап ~78-85.
-    """
     score = 0
 
-    # Контекст 1H (макс 12)
     if direction == ctx_dir:
         score += 12
     elif ctx_dir == "NEUTRAL":
@@ -999,7 +1001,6 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
     else:
         score += 3
 
-    # Sweep depth (макс 20)
     if sweep:
         depth = sweep.get("depth_pct", 0)
         if depth >= 0.35: score += 20
@@ -1007,7 +1008,6 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
         elif depth >= 0.15: score += 12
         else: score += 8
 
-    # 15M confirmation (макс 16)
     if conf_text == "15M BOS":
         score += 16
     elif conf_str >= 0.75: score += 14
@@ -1015,26 +1015,22 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
     elif conf_str >= 0.40: score += 8
     else: score += 4
 
-    # ILM (макс 20)
     if ilm:
         rec = ilm.get("recovery_ratio", 0)
         age = ilm.get("age_candles", 99)
-        if rec >= 0.60: base = 20
-        elif rec >= 0.40: base = 16
-        elif rec >= 0.25: base = 12
+        if rec >= 0.75: base = 20
+        elif rec >= 0.55: base = 17
+        elif rec >= 0.40: base = 13
         else: base = 8
         if age > 4: base -= 3
         elif age > 2: base -= 1
         score += max(0, base)
 
-    # RR (макс 12)
     if rr is not None and rr >= FIXED_RR:
         score += 12
 
-    # Maj strength (макс 10)
     score += min(10, maj_str / 6.0)
 
-    # FVG (макс 15)
     score += fvg_bonus
 
     return int(min(100, max(0, round(score))))
@@ -1054,9 +1050,9 @@ def _apply_ready_promote(result):
         if trend < tr_min: continue
         if need_bos and not bos: continue
         result["stage"] = "READY"
-        result["reason"] = (f"v9.36 promote: score={score} "
+        result["reason"] = (f"v9.37 promote: score={score} "
                             f"trend={trend:.2f} bos={bos}")
-        result["_v936_promoted"] = True
+        result["_v937_promoted"] = True
         return result
     return result
 
@@ -1124,6 +1120,15 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
         result["score"] = 20
         t = "SSL" if direction == "LONG" else "BSL"
         result["reason"] = f"Нет Major {t}."; return result
+
+    # v9.37: жёсткий фильтр по силе уровня
+    min_str = config.get("MIN_LEVEL_STRENGTH", MIN_LEVEL_STRENGTH)
+    strong_lv = [x for x in lv if _level_strength(x) >= min_str]
+    if not strong_lv:
+        result["score"] = 25
+        result["reason"] = f"Уровни слабые (strength < {min_str})."
+        return result
+    lv = strong_lv
 
     sweep = provided_sweep
     if sweep is None or not isinstance(sweep, dict):
@@ -1322,34 +1327,12 @@ def analyze(candles_1h, candles_15m, candles_5m,
     base["long"] = lr; base["short"] = sr
     min_score = config.get("MIN_SCORE_READY", MIN_SCORE_READY)
 
+    # v9.37: NEUTRAL = блок (не отдаём сетапы в боковике)
     if ctx_dir == "NEUTRAL":
         best = lr if lr.get("score", 0) >= sr.get("score", 0) else sr
-        stage = best.get("stage", "WAIT")
-        if stage == "READY": stage = "WAIT"
-        base.update({
-            "stage": stage, "direction": "NEUTRAL",
-            "score": best.get("score", 0),
-            "reason": "1H NEUTRAL",
-            "entry": best.get("entry"), "sl": best.get("sl"),
-            "tp": best.get("tp"), "tp_source": best.get("tp_source"),
-            "rr": best.get("rr"), "sweep": best.get("sweep"),
-            "confirmation_15m": best.get("confirmation_15m", False),
-            "confirmation_15m_time": best.get("confirmation_15m_time"),
-            "confirmation": best.get("confirmation"),
-            "bos": best.get("bos", False), "ilm": best.get("ilm"),
-            "sweep_extreme": best.get("sweep_extreme"),
-            "tp_reason": best.get("tp_reason"),
-            "geometry_valid": best.get("geometry_valid", False),
-            "trend_activity": best.get("trend_activity", 0.0),
-            "fvg_bonus": best.get("fvg_bonus", 0),
-            "fvg_sweep": best.get("fvg_sweep", False),
-            "fvg_entry": best.get("fvg_entry", False),
-            "anti_fomo": best.get("anti_fomo", {}),
-            "anti_fomo_reason": best.get("anti_fomo_reason", ""),
-            "anti_fomo_ok": best.get("anti_fomo_ok", True),
-            "d1_trend_ema": best.get("d1_trend_ema", "NEUTRAL"),
-            "d1_ema_value": best.get("d1_ema_value"),
-        })
+        base["score"] = best.get("score", 0)
+        base["reason"] = "1H NEUTRAL — блок"
+        base["stage"] = "WAIT"
         return base
 
     ready = []
@@ -1494,6 +1477,7 @@ __all__ = [
     "ENABLE_ATR_REGIME_FILTER", "ATR_REGIME_MIN",
     "VOLUME_CONFIRMATION_ENABLED", "ENABLE_SPACE_FILTER",
     "MIN_RR_SPACE_MULT", "ENABLE_VOLATILITY_FILTER",
+    "MIN_LEVEL_STRENGTH",
     "COIN_CONFIGS", "get_config",
     "calculate_atr", "calculate_ema", "calculate_rsi",
     "calculate_stochastic", "get_1h_direction",
