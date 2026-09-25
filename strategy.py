@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.38 (DIAGNOSTIC).
-v9.38:
-- добавлен print [SETUP] в _analyze_scenario для диагностики
-- все фильтры v9.37 сохранены
+TradeMind strategy v9.39.
+v9.39 fixes (data-driven):
+- MAX_5M_RECOVERY_RATIO = 0.95 — блок догона (было ilm_rec 1.3-3.7 → SL)
+- MAX_ILM_AGE_FOR_ENTRY = 3   (было 6, ILM старый = SL)
+- 15M engulf УБРАН — только BOS (engulf давал 100% SL)
+- MIN_LEVEL_STRENGTH = 70     (было 55)
+- MAX_SWEEP_AGE_1H = 6        (было 12)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
-STRATEGY_VERSION = "9.38"
+STRATEGY_VERSION = "9.39"
 ALLOW_SHORT = True
-MAX_ILM_AGE_FOR_ENTRY = 6
+MAX_ILM_AGE_FOR_ENTRY = 3
 
 ATR_SL_MULT_SOFT = 0.8
 SL_BUFFER_PCT = 0.20
@@ -24,13 +27,13 @@ SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 RETEST_OFFSET_PCT = 0.0
 
 MIN_SCORE_READY = 78
-REQUIRE_BOS_FOR_READY = False
+REQUIRE_BOS_FOR_READY = True    # v9.39: BOS обязателен
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
 
 MIN_SWEEP_DEPTH_PCT = 0.12
-MAX_SWEEP_AGE_1H = 12
+MAX_SWEEP_AGE_1H = 6            # v9.39: было 12
 
 USE_ATR_SCALING = True
 ATR_SL_MULT = 1.4
@@ -57,7 +60,8 @@ MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
 MAX_ILM_AGE_CANDLES_5M = 48
 
-MIN_5M_RECOVERY_RATIO = 0.40
+MIN_5M_RECOVERY_RATIO = 0.50    # v9.39: было 0.40
+MAX_5M_RECOVERY_RATIO = 0.95    # v9.39: НОВЫЙ — блок догона
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 1.0
 
 MIN_TREND_ACTIVITY_READY = 0.45
@@ -102,7 +106,7 @@ ATR_REGIME_MIN = 1.08
 ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.3
 
-MIN_LEVEL_STRENGTH = 55.0
+MIN_LEVEL_STRENGTH = 70.0       # v9.39: было 55
 
 
 # ============================================================
@@ -112,34 +116,34 @@ MIN_LEVEL_STRENGTH = 55.0
 COIN_CONFIGS = {
     "XRPUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 3.5, "VOLATILITY_ATR_SPIKE_MULT": 2.0,
-                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
+                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 70},
     "BCHUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.12,
                 "MAX_SL_DISTANCE_PCT": 4.0, "VOLATILITY_ATR_SPIKE_MULT": 2.2,
-                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 55},
+                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 70},
     "APTUSDT": {"ATR_SL_MULT": 1.7, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 60},
+                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 75},
     "SUIUSDT": {"ATR_SL_MULT": 1.8, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.5, "VOLATILITY_ATR_SPIKE_MULT": 3.0,
-                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 60},
+                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 75},
     "INJUSDT": {"ATR_SL_MULT": 1.6, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 81, "MIN_LEVEL_STRENGTH": 55},
+                "MIN_SCORE_READY": 81, "MIN_LEVEL_STRENGTH": 70},
     "SOLUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.8,
-                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
+                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 70},
     "ADAUSDT": {"ATR_SL_MULT": 1.3, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 3.5, "VOLATILITY_ATR_SPIKE_MULT": 2.3,
-                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 50},
+                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 65},
     "AVAXUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.15,
                  "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                 "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
+                 "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 70},
     "LINKUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.13,
                  "MAX_SL_DISTANCE_PCT": 4.5, "VOLATILITY_ATR_SPIKE_MULT": 2.3,
-                 "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 50},
+                 "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 65},
     "ARBUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
+                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 70},
 }
 
 
@@ -584,7 +588,7 @@ def measure_trend_activity(candles_1h, direction):
 
 
 # ============================================================
-# 15M CONFIRMATION
+# 15M CONFIRMATION (v9.39 — только BOS)
 # ============================================================
 
 def _is_local_high_15m(c, i):
@@ -602,6 +606,9 @@ def _is_local_low_15m(c, i):
 
 
 def confirmation_15m(candles_15m, sweep, direction):
+    """
+    v9.39: только BOS. Engulf убран.
+    """
     if not sweep or not candles_15m:
         return False, None, None, False, 0.0
     if direction not in ("LONG", "SHORT"):
@@ -615,15 +622,13 @@ def confirmation_15m(candles_15m, sweep, direction):
     candidates = candidates[-MAX_15M_CONFIRM_CANDLES:]
     if len(candidates) < 3:
         return False, None, None, False, 0.0
-    fallback = None
+
     for i in range(1, len(candidates)):
         c = candidates[i]
         br = _body_ratio(c)
         if br < 0.50: continue
         close = _c(c)
         if close is None: continue
-        prev = candidates[i-1]
-        prev_h = _h(prev); prev_l = _l(prev); prev_b = _body(prev)
         if direction == "LONG":
             if not _bull(c): continue
             highs = [_h(candidates[j]) for j in range(i-1)
@@ -634,12 +639,6 @@ def confirmation_15m(candles_15m, sweep, direction):
             if close > ref:
                 strength = min(1.0, br * 1.2)
                 return True, "15M BOS", _t(c), True, strength
-            engulf = (prev_h is not None and close > prev_h
-                      and _body(c) > prev_b * 1.2
-                      and br >= 0.55)
-            if engulf and fallback is None:
-                strength = min(1.0, br * 1.0)
-                fallback = (True, "15M engulf", _t(c), False, strength)
         else:
             if not _bear(c): continue
             lows = [_l(candidates[j]) for j in range(i-1)
@@ -650,14 +649,7 @@ def confirmation_15m(candles_15m, sweep, direction):
             if close < ref:
                 strength = min(1.0, br * 1.2)
                 return True, "15M BOS", _t(c), True, strength
-            engulf = (prev_l is not None and close < prev_l
-                      and _body(c) > prev_b * 1.2
-                      and br >= 0.55)
-            if engulf and fallback is None:
-                strength = min(1.0, br * 1.0)
-                fallback = (True, "15M engulf", _t(c), False, strength)
-    if fallback is not None:
-        return fallback
+
     return False, None, None, False, 0.0
 
 
@@ -707,6 +699,7 @@ def _ilm_long(candles, i, sweep_lvl, sweep_ext, min_depth):
     if tc is None: return None
     rec = (tc - ml) / m_range
     if rec < MIN_5M_RECOVERY_RATIO: return None
+    if rec > MAX_5M_RECOVERY_RATIO: return None   # v9.39
     if sweep_lvl is not None:
         d = abs(ml - sweep_lvl) / sweep_lvl * 100
         if d > MIN_5M_ILM_SWEEP_DISTANCE_PCT: return None
@@ -749,6 +742,7 @@ def _ilm_short(candles, i, sweep_lvl, sweep_ext, min_depth):
     if tc is None: return None
     rec = (mh - tc) / m_range
     if rec < MIN_5M_RECOVERY_RATIO: return None
+    if rec > MAX_5M_RECOVERY_RATIO: return None   # v9.39
     if sweep_lvl is not None:
         d = abs(mh - sweep_lvl) / sweep_lvl * 100
         if d > MIN_5M_ILM_SWEEP_DISTANCE_PCT: return None
@@ -982,7 +976,7 @@ def check_anti_fomo(candles_15m, direction, price):
 
 
 # ============================================================
-# SCORE
+# SCORE (v9.39)
 # ============================================================
 
 def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
@@ -1004,21 +998,20 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
         else: score += 8
 
     if conf_text == "15M BOS":
-        score += 16
+        score += 20
     elif conf_str >= 0.75: score += 14
     elif conf_str >= 0.55: score += 11
     elif conf_str >= 0.40: score += 8
-    else: score += 4
+    else: score += 0
 
     if ilm:
         rec = ilm.get("recovery_ratio", 0)
         age = ilm.get("age_candles", 99)
-        if rec >= 0.75: base = 20
-        elif rec >= 0.55: base = 17
-        elif rec >= 0.40: base = 13
+        if 0.60 <= rec <= 0.95: base = 20
+        elif 0.50 <= rec < 0.60: base = 15
         else: base = 8
-        if age > 4: base -= 3
-        elif age > 2: base -= 1
+        if age > 2: base -= 3
+        elif age > 1: base -= 1
         score += max(0, base)
 
     if rr is not None and rr >= FIXED_RR:
@@ -1045,9 +1038,9 @@ def _apply_ready_promote(result):
         if trend < tr_min: continue
         if need_bos and not bos: continue
         result["stage"] = "READY"
-        result["reason"] = (f"v9.38 promote: score={score} "
+        result["reason"] = (f"v9.39 promote: score={score} "
                             f"trend={trend:.2f} bos={bos}")
-        result["_v938_promoted"] = True
+        result["_v939_promoted"] = True
         return result
     return result
 
@@ -1148,7 +1141,13 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
     result["bos"] = bos
     result["confirmation_strength"] = conf_str
     if not conf_ok:
-        result["score"] = 50; result["reason"] = "Ждём 15M."; return result
+        result["score"] = 50; result["reason"] = "Ждём 15M BOS."; return result
+
+    # v9.39: только BOS
+    if not bos:
+        result["score"] = 40
+        result["reason"] = "Только BOS (engulf заблокирован)."
+        return result
 
     result["stage"] = "15M_CONFIRMED"
 
@@ -1254,7 +1253,7 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
     result["score"] = score
 
     # ============================================================
-    # v9.38 DIAGNOSTIC PRINT — каждый сетап
+    # v9.39 DIAGNOSTIC PRINT
     # ============================================================
     try:
         sweep_depth = sweep.get("depth_pct", 0) if sweep else 0
@@ -1284,7 +1283,7 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
     ready_ok = (score >= min_score and trend_ok and bos_ok)
     if ready_ok:
         result["stage"] = "READY"
-        result["reason"] = (f"Sweep→15M→5M ILM. Trend {trend:.2f}. "
+        result["reason"] = (f"Sweep→15M BOS→5M ILM. Trend {trend:.2f}. "
                             f"RR {FIXED_RR}. BOS={bos}.")
         return result
 
@@ -1343,8 +1342,7 @@ def analyze(candles_1h, candles_15m, candles_5m,
                            d1_context=d1_context, fvgs=fvgs,
                            symbol=symbol, config=config,
                            provided_sweep=sweep)
-    base["long"] = lr; base["short"] = sr
-    min_score = config.get("MIN_SCORE_READY", MIN_SCORE_READY)
+    base["long"] = lr; base["short"] = sr    min_score = config.get("MIN_SCORE_READY", MIN_SCORE_READY)
 
     if ctx_dir == "NEUTRAL":
         best = lr if lr.get("score", 0) >= sr.get("score", 0) else sr
@@ -1495,7 +1493,7 @@ __all__ = [
     "ENABLE_ATR_REGIME_FILTER", "ATR_REGIME_MIN",
     "VOLUME_CONFIRMATION_ENABLED", "ENABLE_SPACE_FILTER",
     "MIN_RR_SPACE_MULT", "ENABLE_VOLATILITY_FILTER",
-    "MIN_LEVEL_STRENGTH",
+    "MIN_LEVEL_STRENGTH", "MAX_5M_RECOVERY_RATIO",
     "COIN_CONFIGS", "get_config",
     "calculate_atr", "calculate_ema", "calculate_rsi",
     "calculate_stochastic", "get_1h_direction",
