@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.32.
-A1: MIN_SCORES синхронизированы со strategy.py
-A4: CFG_* смягчены (BE/P1/P2 сдвинуты)
-A5: INJ убран из ALL_SYMS (оставлен в COOLDOWN/MIN_SCORES для будущего)
+TradeMind backtest v9.33.
+10 пар: XRP, BCH, APT, SUI, INJ, SOL, ADA, AVAX, LINK, ARB.
+90 дней истории.
+Совместим с strategy.py v9.33 и bot.py v9.33.
+
+Запуск из бота:  /backtest
+Локально:        python backtest.py
+                 python backtest.py --research
+                 python backtest.py --max-hours=48
 """
 
 from market import (
@@ -22,52 +27,59 @@ from strategy import analyze, get_1h_direction, STRATEGY_VERSION
 # ============================================================
 
 BT_D1   = 250
-BT_1H   = 2200
-BT_15M  = 8800
-BT_5M   = 26400
+BT_1H   = 2200        # ~90 дней
+BT_15M  = 8800        # ~90 дней
+BT_5M   = 26400       # ~90 дней
 BT_1M   = 500
 WARMUP  = 150
 
 FEE_PCT  = 0.08
 SLIP_PCT = 0.05
 
-# A1: синхронизировано со strategy.COIN_CONFIGS
+# Синхронизировано со strategy.COIN_CONFIGS
 MIN_SCORES = {
     "default":  92,
     "XRPUSDT":  93,
     "BCHUSDT":  92,
     "APTUSDT":  96,
     "SUIUSDT":  96,
-    "INJUSDT":  94,   # (не используется, INJ убран из ALL_SYMS)
+    "INJUSDT":  94,
+    "SOLUSDT":  93,
+    "ADAUSDT":  92,
+    "AVAXUSDT": 93,
+    "LINKUSDT": 92,
+    "ARBUSDT":  93,
 }
 
-BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT", "LINKUSDT", "BTCUSDT"}
+BANNED = {"ETHUSDT", "DOTUSDT", "BTCUSDT"}
 
-# A5: INJ убран из активного прогона
 ALL_SYMS = [
-    "XRPUSDT",
-    "BCHUSDT",
-    "APTUSDT",
-    "SUIUSDT",
+    "XRPUSDT", "BCHUSDT", "APTUSDT", "SUIUSDT", "INJUSDT",
+    "SOLUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
 ]
 
 COOLDOWN = {
-    "default":  {2: 3,  3: 6},
-    "APTUSDT":  {2: 6,  3: 12},
-    "INJUSDT":  {2: 4,  3: 8},
-    "BCHUSDT":  {2: 4,  3: 8},
+    "default":   {2: 3,  3: 6},
+    "APTUSDT":   {2: 6,  3: 12},
+    "INJUSDT":   {2: 4,  3: 8},
+    "BCHUSDT":   {2: 4,  3: 8},
+    "SUIUSDT":   {2: 6,  3: 10},
+    "SOLUSDT":   {2: 5,  3: 10},
+    "AVAXUSDT":  {2: 5,  3: 10},
+    "ARBUSDT":   {2: 5,  3: 10},
 }
 
 TRAIL_TRIG = 1.5
 TRAIL_DIST = 0.8
 
-# A4: частички/BE сдвинуты (P1 1.0R, BE 1.0R)
+# A4b: BE между P1 и P2
 # (P1_R, P2_R, BE_R, P1_%, P2_%)
-CFG_STRONG = (1.2, 2.0, 1.3, 25, 25)
-CFG_DEF    = (1.0, 1.8, 1.0, 30, 25)
-CFG_WEAK   = (0.8, 1.5, 0.9, 35, 25)
+CFG_STRONG = (1.2, 2.0, 1.5, 30, 30)
+CFG_DEF    = (1.0, 1.8, 1.4, 40, 25)
+CFG_WEAK   = (0.8, 1.5, 1.2, 50, 25)
 
-WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
+WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT",
+             "ARBUSDT", "AVAXUSDT"}
 
 RESEARCH_MODE = False
 
