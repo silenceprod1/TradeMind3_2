@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.35.
+TradeMind bot v9.37.
 - 10 монет (XRP, BCH, APT, SUI, INJ, SOL, ADA, AVAX, LINK, ARB)
-- MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS (80-84)
+- MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS v9.37 (78-82)
 - COOLDOWN синхронизирован с backtest.COOLDOWN
 - coin_in_cooldown учитывает серию SL по монете
 """
@@ -91,7 +91,7 @@ WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT",
 
 BLOCK_CONFLICTING_TRADES = True
 
-# v9.35: cooldown синхронизирован с backtest.COOLDOWN
+# v9.37: cooldown синхронизирован с backtest.COOLDOWN
 COOLDOWN_AFTER_SL_ENABLED = True
 COOLDOWN_AFTER_TP_HOURS = 0
 try:
@@ -132,20 +132,20 @@ COINS = {
 BACKTEST_COINS = dict(COINS)
 
 MIN_SCORE_MAP = {
-    "default":  80,
-    "XRPUSDT":  82,
-    "BCHUSDT":  80,
-    "APTUSDT":  84,
-    "SUIUSDT":  84,
-    "INJUSDT":  83,
-    "SOLUSDT":  82,
-    "ADAUSDT":  80,
-    "AVAXUSDT": 82,
-    "LINKUSDT": 80,
-    "ARBUSDT":  82,
+    "default":  78,
+    "XRPUSDT":  80,
+    "BCHUSDT":  78,
+    "APTUSDT":  82,
+    "SUIUSDT":  82,
+    "INJUSDT":  81,
+    "SOLUSDT":  80,
+    "ADAUSDT":  78,
+    "AVAXUSDT": 80,
+    "LINKUSDT": 78,
+    "ARBUSDT":  80,
 }
 
-MIN_SCORE_READY = 80
+MIN_SCORE_READY = 78
 
 SUBSCRIBERS_FILE = "subscribers.json"
 TRADE_JOURNAL_FILE = "trade_journal.json"
@@ -714,7 +714,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.35</b>",
+        "🧠 <b>TRADEMIND v9.37</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -764,7 +764,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.35</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.37</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -2549,7 +2549,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.35</b>\n\n"
+        f"🎯 <b>MODEL 9.37</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
