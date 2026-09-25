@@ -3,6 +3,12 @@
 TradeMind backtest v9.31.
 5 пар: XRP, BCH, APT, SUI, INJ.
 90 дней истории.
+Совместим с strategy.py v9.31 и bot.py v9.30.3.
+
+Запуск из бота:  /backtest
+Локально:        python backtest.py
+                 python backtest.py --research
+                 python backtest.py --max-hours=48
 """
 
 from market import (
@@ -13,26 +19,31 @@ from market import (
     detect_sweep,
     _analyze_d1_context,
 )
-from strategy import analyze, get_1h_direction
+from strategy import analyze, get_1h_direction, STRATEGY_VERSION
 
 
-# --- CONFIG ---
+# ============================================================
+# CONFIG
+# ============================================================
 
-BT_D1 = 250
-BT_1H = 2200        # ~90 дней
-BT_15M = 8800       # ~90 дней
-BT_5M = 26400       # ~90 дней
-BT_1M = 500
-WARMUP = 150
+BT_D1   = 250
+BT_1H   = 2200        # ~90 дней
+BT_15M  = 8800        # ~90 дней
+BT_5M   = 26400       # ~90 дней
+BT_1M   = 500
+WARMUP  = 150
 
-FEE_PCT = 0.08
-SLIP_PCT = 0.05
+FEE_PCT  = 0.08       # тейкер Binance фьючерсы
+SLIP_PCT = 0.05       # проскальзывание на вход/выход
 
+# Пороги синхронизированы с strategy.COIN_CONFIGS
 MIN_SCORES = {
-    "default": 90,
-    "INJUSDT": 88,
-    "BCHUSDT": 92,
-    "APTUSDT": 93,
+    "default":  90,
+    "XRPUSDT":  90,
+    "BCHUSDT":  92,
+    "APTUSDT":  93,
+    "SUIUSDT":  93,
+    "INJUSDT":  88,
 }
 
 BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT", "LINKUSDT", "BTCUSDT"}
@@ -45,16 +56,18 @@ ALL_SYMS = [
     "INJUSDT",
 ]
 
+# Cooldown по кол-ву последовательных SL (в часах)
 COOLDOWN = {
-    "default": {2: 3, 3: 6},
-    "APTUSDT": {2: 6, 3: 12},
-    "INJUSDT": {2: 4, 3: 8},
-    "BCHUSDT": {2: 4, 3: 8},
+    "default":  {2: 3,  3: 6},
+    "APTUSDT":  {2: 6,  3: 12},
+    "INJUSDT":  {2: 4,  3: 8},
+    "BCHUSDT":  {2: 4,  3: 8},
 }
 
 TRAIL_TRIG = 1.5
 TRAIL_DIST = 0.8
 
+# (P1_R, P2_R, BE_R, P1_%, P2_%)
 CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
 CFG_DEF    = (0.9, 1.6, 1.1, 40, 25)
 CFG_WEAK   = (0.5, 1.1, 0.8, 50, 25)
@@ -64,7 +77,9 @@ WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
 RESEARCH_MODE = False
 
 
-# --- HELPERS ---
+# ============================================================
+# HELPERS
+# ============================================================
 
 def get_ms(sym):
     return MIN_SCORES.get(sym, MIN_SCORES["default"])
@@ -115,16 +130,18 @@ def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
 
     t = 0.0
     if w1 > 0.0:
-        t = t + pnl_p(e, p1e, d) * w1
+        t += pnl_p(e, p1e, d) * w1
     if w2 > 0.0:
-        t = t + pnl_p(e, p2e, d) * w2
+        t += pnl_p(e, p2e, d) * w2
     if rw > 0.0:
-        t = t + pnl_p(e, fx, d) * rw
+        t += pnl_p(e, fx, d) * rw
 
     return t - (FEE_PCT + SLIP_PCT)
 
 
 class CD:
+    """Per-symbol cooldown tracker по последовательным SL."""
+
     def __init__(self, sym):
         self.sym = sym
         self.n = 0
@@ -163,7 +180,9 @@ class CD:
         return el >= h
 
 
-# --- SIMULATION ---
+# ============================================================
+# TRADE SIMULATION
+# ============================================================
 
 def sim(trade, c5, start, max_h, cfg):
     d = trade["direction"]
@@ -176,6 +195,7 @@ def sim(trade, c5, start, max_h, cfg):
 
     p1r, p2r, be_r, p1p, p2p = cfg
 
+    # окно на фил (12 свечей по 5m = 1 час)
     fill_max = start + 12 * 5 * 60 * 1000
     filled = False
     fts = None
@@ -202,10 +222,8 @@ def sim(trade, c5, start, max_h, cfg):
 
     sl = sl0
     best = e
-    p1d = False
-    p1e = None
-    p2d = False
-    p2e = None
+    p1d = False; p1e = None
+    p2d = False; p2e = None
     bem = False
 
     dl = fts + max_h * 3600 * 1000
@@ -231,6 +249,7 @@ def sim(trade, c5, start, max_h, cfg):
             htp = lo <= tp
             hsl = hi >= sl
 
+        # тип выхода
         et = "SL"
         if bem:
             if abs(sl - e) < risk * 0.05:
@@ -240,6 +259,7 @@ def sim(trade, c5, start, max_h, cfg):
         elif d == "SHORT" and sl < e:
             et = "BE"
 
+        # оба в одной свече -> консервативно SL
         if hsl and htp:
             f = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
             return (et, sl, ot, held, f, p1d or p2d)
@@ -252,6 +272,7 @@ def sim(trade, c5, start, max_h, cfg):
             f = blend(e, tp, d, p1d, p1e, p1p, p2d, p2e, p2p)
             return ("TP", tp, ot, held, f, p1d or p2d)
 
+        # partials / trailing
         if d == "LONG":
             if hi > best:
                 best = hi
@@ -292,13 +313,14 @@ def sim(trade, c5, start, max_h, cfg):
     if last is not None:
         xp = last["close"]
         f = blend(e, xp, d, p1d, p1e, p1p, p2d, p2e, p2p)
-        return ("TIMEOUT", xp, last["open_time"],
-                held, f, p1d or p2d)
+        return ("TIMEOUT", xp, last["open_time"], held, f, p1d or p2d)
 
     return ("TIMEOUT", e, start, 0, 0.0, False)
 
 
-# --- RUN ONE SYMBOL ---
+# ============================================================
+# RUN ONE SYMBOL
+# ============================================================
 
 def run_one(sym, max_h):
     sym = _normalize_symbol(sym)
@@ -312,8 +334,8 @@ def run_one(sym, max_h):
     c1d = get_klines_history("1d", BT_D1, sym)
     c1h = get_klines_history("1h", BT_1H, sym)
     c15 = get_klines_history("15m", BT_15M, sym)
-    c5 = get_klines_history("5m", BT_5M, sym)
-    c1 = get_klines("1m", BT_1M, sym)
+    c5  = get_klines_history("5m", BT_5M, sym)
+    c1  = get_klines("1m", BT_1M, sym)
 
     if not c1h:
         log("Нет данных")
@@ -338,8 +360,8 @@ def run_one(sym, max_h):
 
         cc1h = c1h[:i]
         cc15 = c_until(c15, ts)
-        cc5 = c_until(c5, ts)
-        cc1 = c_until(c1, ts)
+        cc5  = c_until(c5, ts)
+        cc1  = c_until(c1, ts)
         ccd1 = c_until(c1d, ts)
 
         if len(cc15) < 60 or len(cc5) < 60:
@@ -351,8 +373,7 @@ def run_one(sym, max_h):
             price = cc1h[-1]["close"]
 
         try:
-            lv = find_major_liquidity(
-                cc1h, price, 12, cc15, cc5, cc1)
+            lv = find_major_liquidity(cc1h, price, 12, cc15, cc5, cc1)
         except Exception:
             continue
 
@@ -361,6 +382,7 @@ def run_one(sym, max_h):
             sw = None
             if d != "NEUTRAL":
                 sw = detect_sweep(cc1h, price, d, lv)
+
             d1c = None
             if len(ccd1) >= 20:
                 try:
@@ -369,10 +391,12 @@ def run_one(sym, max_h):
                         d1c["candles_d1"] = ccd1
                 except Exception:
                     d1c = None
+
             r = analyze(
                 cc1h, cc15, cc5, price, lv, sw,
                 candles_1m=cc1, d1_context=d1c,
-                fvgs=[], symbol=sym)
+                fvgs=[], symbol=sym,
+            )
         except Exception:
             continue
 
@@ -429,7 +453,9 @@ def run_one(sym, max_h):
     return trades
 
 
-# --- STATS / REPORT ---
+# ============================================================
+# STATS / REPORT
+# ============================================================
 
 def stats(trades):
     tp = sl = be = to = ph = 0
@@ -498,7 +524,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.31 [90 days] [" + mode + "]")
+    print("### MULTI v" + STRATEGY_VERSION + " [90 days] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
@@ -528,7 +554,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("=" * 82)
-    print("СВОДКА v9.31 [" + mode + "]")
+    print("СВОДКА v" + STRATEGY_VERSION + " [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
@@ -538,7 +564,7 @@ def run_multi(max_h=24, syms=None):
 
     for sym, st in summary:
         ms = get_ms(sym)
-        line = sym.ljust(11)
+        line  = sym.ljust(11)
         line += str(ms).ljust(4)
         line += str(st["n"]).ljust(4)
         line += str(st["tp"]).ljust(4)
@@ -551,18 +577,18 @@ def run_multi(max_h=24, syms=None):
         line += "%.2f" % st["mdd"]
         print(line)
 
-        t_n += st["n"]
-        t_tp += st["tp"]
-        t_sl += st["sl"]
-        t_be += st["be"]
-        t_to += st["to"]
+        t_n     += st["n"]
+        t_tp    += st["tp"]
+        t_sl    += st["sl"]
+        t_be    += st["be"]
+        t_to    += st["to"]
         t_total += st["total"]
 
     print("-" * 82)
     r = t_tp + t_sl
-    twr = (t_tp / r * 100.0) if r > 0 else 0.0
+    twr  = (t_tp / r * 100.0) if r > 0 else 0.0
     tavg = (t_total / t_n) if t_n else 0.0
-    line = "ИТОГО".ljust(15)
+    line  = "ИТОГО".ljust(15)
     line += str(t_n).ljust(4)
     line += str(t_tp).ljust(4)
     line += str(t_sl).ljust(4)
@@ -575,7 +601,9 @@ def run_multi(max_h=24, syms=None):
     print("=" * 82)
 
 
-# --- ENTRY POINT ---
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 def main(max_hours=24, research=False, syms=None):
     global RESEARCH_MODE
