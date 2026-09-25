@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.39 (FIXED).
-v9.39 fixes (data-driven):
-- MAX_5M_RECOVERY_RATIO = 0.95 — блок догона
-- MAX_ILM_AGE_FOR_ENTRY = 3
-- 15M engulf УБРАН — только BOS
-- MIN_LEVEL_STRENGTH = 70
-- MAX_SWEEP_AGE_1H = 6
-- FIX: разделены base["long"]=lr и min_score (была SyntaxError)
+TradeMind strategy v9.40.
+v9.40 fixes (КЛЮЧЕВЫЕ):
+- _ilm_long / _ilm_short: правильная формула rec (нормализация по left_ref)
+- MIN_5M_RECOVERY_RATIO = 0.30, MAX_5M_RECOVERY_RATIO = 1.30
+- engulf возвращён с br >= 0.65 и body > prev_body * 1.5
+- REQUIRE_BOS_FOR_READY = False
+- убран избыточный if not bos
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
-STRATEGY_VERSION = "9.39"
+STRATEGY_VERSION = "9.40"
 ALLOW_SHORT = True
 MAX_ILM_AGE_FOR_ENTRY = 3
 
@@ -28,7 +27,7 @@ SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 RETEST_OFFSET_PCT = 0.0
 
 MIN_SCORE_READY = 78
-REQUIRE_BOS_FOR_READY = True
+REQUIRE_BOS_FOR_READY = False
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 0.5
 FIXED_RR = 2.0
@@ -61,8 +60,8 @@ MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
 MAX_ILM_AGE_CANDLES_5M = 48
 
-MIN_5M_RECOVERY_RATIO = 0.50
-MAX_5M_RECOVERY_RATIO = 0.95
+MIN_5M_RECOVERY_RATIO = 0.30
+MAX_5M_RECOVERY_RATIO = 1.30
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 1.0
 
 MIN_TREND_ACTIVITY_READY = 0.45
@@ -589,7 +588,7 @@ def measure_trend_activity(candles_1h, direction):
 
 
 # ============================================================
-# 15M CONFIRMATION (v9.39 — только BOS)
+# 15M CONFIRMATION
 # ============================================================
 
 def _is_local_high_15m(c, i):
@@ -621,12 +620,16 @@ def confirmation_15m(candles_15m, sweep, direction):
     if len(candidates) < 3:
         return False, None, None, False, 0.0
 
+    fallback = None
+
     for i in range(1, len(candidates)):
         c = candidates[i]
         br = _body_ratio(c)
         if br < 0.50: continue
         close = _c(c)
         if close is None: continue
+        prev = candidates[i-1]
+        prev_h = _h(prev); prev_l = _l(prev); prev_b = _body(prev)
         if direction == "LONG":
             if not _bull(c): continue
             highs = [_h(candidates[j]) for j in range(i-1)
@@ -637,6 +640,12 @@ def confirmation_15m(candles_15m, sweep, direction):
             if close > ref:
                 strength = min(1.0, br * 1.2)
                 return True, "15M BOS", _t(c), True, strength
+            engulf = (prev_h is not None and close > prev_h
+                      and _body(c) > prev_b * 1.5
+                      and br >= 0.65)
+            if engulf and fallback is None:
+                strength = min(1.0, br * 1.0)
+                fallback = (True, "15M engulf", _t(c), False, strength)
         else:
             if not _bear(c): continue
             lows = [_l(candidates[j]) for j in range(i-1)
@@ -647,12 +656,20 @@ def confirmation_15m(candles_15m, sweep, direction):
             if close < ref:
                 strength = min(1.0, br * 1.2)
                 return True, "15M BOS", _t(c), True, strength
+            engulf = (prev_l is not None and close < prev_l
+                      and _body(c) > prev_b * 1.5
+                      and br >= 0.65)
+            if engulf and fallback is None:
+                strength = min(1.0, br * 1.0)
+                fallback = (True, "15M engulf", _t(c), False, strength)
 
+    if fallback is not None:
+        return fallback
     return False, None, None, False, 0.0
 
 
 # ============================================================
-# 5M ILM
+# 5M ILM (v9.40 — ФИКС ФОРМУЛЫ rec)
 # ============================================================
 
 def _is_local_high(c, i):
@@ -680,9 +697,12 @@ def _ilm_long(candles, i, sweep_lvl, sweep_ext, min_depth):
     if not bl: return None
     left_ref = min(bl)
     if left_ref <= ml: return None
-    m_range = left_ref - ml
+    # v9.40: нормализация по движению ml -> left_ref
+    target = left_ref
+    if target <= ml: return None
+    m_range = target - ml
     if m_range <= 0: return None
-    m_pct = m_range / left_ref * 100
+    m_pct = m_range / target * 100
     if m_pct < min_depth: return None
     trig_idx = None
     end = min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)
@@ -695,6 +715,7 @@ def _ilm_long(candles, i, sweep_lvl, sweep_ext, min_depth):
     if trig_idx is None: return None
     trig = candles[trig_idx]; tc = _c(trig)
     if tc is None: return None
+    # v9.40: rec = сколько откатилось от ml к target
     rec = (tc - ml) / m_range
     if rec < MIN_5M_RECOVERY_RATIO: return None
     if rec > MAX_5M_RECOVERY_RATIO: return None
@@ -723,9 +744,12 @@ def _ilm_short(candles, i, sweep_lvl, sweep_ext, min_depth):
     if not bh: return None
     left_ref = max(bh)
     if mh <= left_ref: return None
-    m_range = mh - left_ref
+    # v9.40: нормализация по движению left_ref -> mh
+    target = left_ref
+    if mh <= target: return None
+    m_range = mh - target
     if m_range <= 0: return None
-    m_pct = m_range / left_ref * 100
+    m_pct = m_range / mh * 100
     if m_pct < min_depth: return None
     trig_idx = None
     end = min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)
@@ -738,6 +762,7 @@ def _ilm_short(candles, i, sweep_lvl, sweep_ext, min_depth):
     if trig_idx is None: return None
     trig = candles[trig_idx]; tc = _c(trig)
     if tc is None: return None
+    # v9.40: rec = сколько откатилось от mh к target
     rec = (mh - tc) / m_range
     if rec < MIN_5M_RECOVERY_RATIO: return None
     if rec > MAX_5M_RECOVERY_RATIO: return None
@@ -1005,9 +1030,9 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
     if ilm:
         rec = ilm.get("recovery_ratio", 0)
         age = ilm.get("age_candles", 99)
-        if 0.60 <= rec <= 0.95: base = 20
-        elif 0.50 <= rec < 0.60: base = 15
-        else: base = 8
+        if 0.50 <= rec <= 1.10: base = 20
+        elif 0.30 <= rec < 0.50: base = 15
+        else: base = 10
         if age > 2: base -= 3
         elif age > 1: base -= 1
         score += max(0, base)
@@ -1036,9 +1061,9 @@ def _apply_ready_promote(result):
         if trend < tr_min: continue
         if need_bos and not bos: continue
         result["stage"] = "READY"
-        result["reason"] = (f"v9.39 promote: score={score} "
+        result["reason"] = (f"v9.40 promote: score={score} "
                             f"trend={trend:.2f} bos={bos}")
-        result["_v939_promoted"] = True
+        result["_v940_promoted"] = True
         return result
     return result
 
@@ -1139,12 +1164,7 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
     result["bos"] = bos
     result["confirmation_strength"] = conf_str
     if not conf_ok:
-        result["score"] = 50; result["reason"] = "Ждём 15M BOS."; return result
-
-    if not bos:
-        result["score"] = 40
-        result["reason"] = "Только BOS (engulf заблокирован)."
-        return result
+        result["score"] = 50; result["reason"] = "Ждём 15M."; return result
 
     result["stage"] = "15M_CONFIRMED"
 
@@ -1276,7 +1296,7 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
     ready_ok = (score >= min_score and trend_ok and bos_ok)
     if ready_ok:
         result["stage"] = "READY"
-        result["reason"] = (f"Sweep→15M BOS→5M ILM. Trend {trend:.2f}. "
+        result["reason"] = (f"Sweep→15M→5M ILM. Trend {trend:.2f}. "
                             f"RR {FIXED_RR}. BOS={bos}.")
         return result
 
