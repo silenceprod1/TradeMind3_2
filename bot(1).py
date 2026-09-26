@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.39.
-- 10 монет (XRP, BCH, APT, SUI, INJ, SOL, ADA, AVAX, LINK, ARB)
-- MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS v9.39 (78-82)
+TradeMind bot v9.43.
+- 8 монет (XRP, APT, SUI, INJ, ADA, AVAX, LINK, ARB)
+- MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS v9.43
 - COOLDOWN синхронизирован с backtest.COOLDOWN
 - coin_in_cooldown учитывает серию SL по монете
 """
@@ -86,11 +86,11 @@ SCORE_STRONG = 95
 CFG_STRONG = (1.2, 2.0, 1.5, 30, 30)
 CFG_DEF    = (1.0, 1.8, 1.4, 40, 25)
 CFG_WEAK   = (0.8, 1.5, 1.2, 50, 25)
-WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT",
-             "ARBUSDT", "AVAXUSDT"}
+WEAK_SYMS = {"SUIUSDT", "APTUSDT", "ARBUSDT", "AVAXUSDT"}
 
 BLOCK_CONFLICTING_TRADES = True
 
+# v9.43: cooldown синхронизирован с backtest.COOLDOWN
 COOLDOWN_AFTER_SL_ENABLED = True
 COOLDOWN_AFTER_TP_HOURS = 0
 try:
@@ -100,13 +100,11 @@ except Exception:
         "default":   {2: 3,  3: 6},
         "APTUSDT":   {2: 6,  3: 12},
         "INJUSDT":   {2: 4,  3: 8},
-        "BCHUSDT":   {2: 4,  3: 8},
         "SUIUSDT":   {2: 6,  3: 10},
-        "SOLUSDT":   {2: 5,  3: 10},
         "AVAXUSDT":  {2: 5,  3: 10},
         "ARBUSDT":   {2: 5,  3: 10},
     }
-COOLDOWN_AFTER_SL_HOURS = 3  # legacy для /status
+COOLDOWN_AFTER_SL_HOURS = 3
 COOLDOWN_AFTER_SL_MAP = _BT_COOLDOWN
 
 NOTIFICATION_DEDUP_HOURS = 3
@@ -115,13 +113,12 @@ NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
 PULLBACK_NOTIF_ENABLED = True
 PULLBACK_NOTIF_DEDUP_HOURS = 1
 
+# v9.43: 8 монет
 COINS = {
     "XRP":  "XRPUSDT",
-    "BCH":  "BCHUSDT",
     "APT":  "APTUSDT",
     "SUI":  "SUIUSDT",
     "INJ":  "INJUSDT",
-    "SOL":  "SOLUSDT",
     "ADA":  "ADAUSDT",
     "AVAX": "AVAXUSDT",
     "LINK": "LINKUSDT",
@@ -130,14 +127,13 @@ COINS = {
 
 BACKTEST_COINS = dict(COINS)
 
+# v9.43: синхронизировано со strategy.COIN_CONFIGS
 MIN_SCORE_MAP = {
     "default":  78,
-    "XRPUSDT":  80,
-    "BCHUSDT":  78,
-    "APTUSDT":  82,
+    "XRPUSDT":  82,
+    "APTUSDT":  85,
     "SUIUSDT":  82,
-    "INJUSDT":  81,
-    "SOLUSDT":  80,
+    "INJUSDT":  83,
     "ADAUSDT":  78,
     "AVAXUSDT": 80,
     "LINKUSDT": 78,
@@ -713,7 +709,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.39</b>",
+        "🧠 <b>TRADEMIND v9.43</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -763,11 +759,12 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.39</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.43</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
         "TP = RR 1:2",
+        "⏰ Session: 2-7 UTC blocked",
         "",
         f"💰 P1: {PARTIAL_TP_TRIGGER_R}R"
         f"/{PARTIAL_TP_PERCENT}%",
@@ -884,7 +881,7 @@ def checklist_text(result):
             ])
     elif stage == "SWEPT":
         lines.append("")
-        lines.append("🎯 Ждём 15M BOS")
+        lines.append("🎯 Ждём 15M")
     elif stage == "15M_CONFIRMED":
         if ilm:
             lines.extend([
@@ -1982,8 +1979,8 @@ async def backtest_cmd(update, context):
 
     await update.message.reply_text(
         f"⏳ <b>ЗАПУСК БЭКТЕСТА</b>\n\n"
-        f"💠 Пары: XRP, BCH, APT, SUI, INJ, "
-        f"SOL, ADA, AVAX, LINK, ARB\n\n"
+        f"💠 Пары: XRP, APT, SUI, INJ, "
+        f"ADA, AVAX, LINK, ARB\n\n"
         f"Ход прогона — в логах BotHost.\n"
         f"Отчёт придёт <b>.txt-файлом</b>.",
         parse_mode="HTML")
@@ -2066,8 +2063,8 @@ async def backtest_cmd(update, context):
 
     header = (
         "✅ <b>БЭКТЕСТ ЗАВЕРШЁН</b>\n"
-        "💠 10 монет: XRP, BCH, APT, SUI, INJ, "
-        "SOL, ADA, AVAX, LINK, ARB\n"
+        "💠 8 монет: XRP, APT, SUI, INJ, "
+        "ADA, AVAX, LINK, ARB\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
     )
 
@@ -2488,7 +2485,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.39</b>\n\n"
+        f"🎯 <b>MODEL 9.43</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2496,6 +2493,7 @@ async def status_cmd(update, context):
         f" ({PARTIAL_TP_2_PERCENT}%)\n"
         f"🛡 BE: <b>{BREAKEVEN_TRIGGER_R}R</b>"
         f" (после P1)\n\n"
+        f"⏰ Session: <b>2-7 UTC blocked</b>\n"
         f"🧲 Anti-FOMO: <b>ON</b>\n"
         f"⚡ Pullback-увед: <b>ON</b>\n"
         f"🎯 Trailing: <b>{tr}</b>\n"
@@ -2959,6 +2957,7 @@ async def callbacks(update, context):
             f"P2: <b>{PARTIAL_TP_2_TRIGGER_R}R</b>\n"
             f"BE: <b>{BREAKEVEN_TRIGGER_R}R</b>\n"
             f"BE после P1\n"
+            f"Session: <b>2-7 UTC blocked</b>\n"
             f"Anti-FOMO: <b>ON</b>\n"
             f"Pullback-увед: <b>ON</b>\n"
             f"Trail: <b>{tr}</b>\n"
