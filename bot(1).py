@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.30.1.
-Совместим со strategy v9.30.1 (ОТТ-фильтр) и backtest v9.30.
+TradeMind bot v9.30.1-FIXED.
+Совместим со strategy v9.30.1 (+71.48R).
+Добавлены debug-логи монитора.
 """
 
 import asyncio
@@ -1435,6 +1436,16 @@ async def monitor_active_trades(app, results):
     if not active:
         return
 
+    print(f"[MONITOR-DEBUG] active trades: {len(active)}", flush=True)
+    for t in active:
+        print(
+            f"[MONITOR-DEBUG]   {t.get('coin')} "
+            f"{t.get('direction')} status={t.get('status')} "
+            f"chat_id={t.get('chat_id')} "
+            f"last_price={t.get('last_price')}",
+            flush=True,
+        )
+
     print(
         f"[MONITOR] processing {len(active)} active trade(s)",
         flush=True)
@@ -1995,9 +2006,7 @@ async def backtest_cmd(update, context):
                         st.write(s)
                         st.flush()
                     except Exception:
-                        pass
-
-            def flush(self):
+                        pass            def flush(self):
                 for st in self.streams:
                     try:
                         st.flush()
@@ -2530,7 +2539,9 @@ async def monitor(app):
         started = asyncio.get_running_loop().time()
 
         try:
+            print("[MONITOR-LOOP] start scan", flush=True)
             results = await asyncio.to_thread(scan_all)
+            print(f"[MONITOR-LOOP] scan done: {len(results)} results", flush=True)
 
             try:
                 await monitor_active_trades(app, results)
@@ -2551,9 +2562,12 @@ async def monitor(app):
 
             for coin, result in results.items():
                 if result.get("error"):
+                    print(f"[MONITOR-LOOP] {coin} ERROR", flush=True)
                     continue
 
                 stage = result.get("stage")
+                score = result.get("score", 0)
+                print(f"[MONITOR-LOOP] {coin} stage={stage} score={score}", flush=True)
 
                 if (stage == "WAIT_PULLBACK"
                         and PULLBACK_NOTIF_ENABLED):
