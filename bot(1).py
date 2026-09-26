@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.43.
+TradeMind bot v9.44.
 - 8 монет (XRP, APT, SUI, INJ, ADA, AVAX, LINK, ARB)
-- MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS v9.43
+- MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS v9.44
 - COOLDOWN синхронизирован с backtest.COOLDOWN
 - coin_in_cooldown учитывает серию SL по монете
 """
@@ -90,7 +90,6 @@ WEAK_SYMS = {"SUIUSDT", "APTUSDT", "ARBUSDT", "AVAXUSDT"}
 
 BLOCK_CONFLICTING_TRADES = True
 
-# v9.43: cooldown синхронизирован с backtest.COOLDOWN
 COOLDOWN_AFTER_SL_ENABLED = True
 COOLDOWN_AFTER_TP_HOURS = 0
 try:
@@ -113,7 +112,6 @@ NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
 PULLBACK_NOTIF_ENABLED = True
 PULLBACK_NOTIF_DEDUP_HOURS = 1
 
-# v9.43: 8 монет
 COINS = {
     "XRP":  "XRPUSDT",
     "APT":  "APTUSDT",
@@ -127,7 +125,6 @@ COINS = {
 
 BACKTEST_COINS = dict(COINS)
 
-# v9.43: синхронизировано со strategy.COIN_CONFIGS
 MIN_SCORE_MAP = {
     "default":  78,
     "XRPUSDT":  82,
@@ -709,7 +706,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.43</b>",
+        "🧠 <b>TRADEMIND v9.44</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -759,7 +756,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.43</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.44</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -2485,7 +2482,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.43</b>\n\n"
+        f"🎯 <b>MODEL 9.44</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
