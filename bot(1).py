@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.44.
-- 8 монет (XRP, APT, SUI, INJ, ADA, AVAX, LINK, ARB)
-- MIN_SCORE_MAP синхронизирован со strategy.COIN_CONFIGS v9.44
-- COOLDOWN синхронизирован с backtest.COOLDOWN
-- coin_in_cooldown учитывает серию SL по монете
+TradeMind bot v9.30.3.
+Совместим со strategy v9.30 и backtest v9.30 (+51.72R).
+Fix: fallback цены + symbol из coin + диагностика монитора.
 """
 
 import asyncio
@@ -74,37 +72,25 @@ TRAILING_ENABLED = True
 TRAILING_TRIGGER_R = 1.5
 TRAILING_DISTANCE_R = 0.8
 
-BREAKEVEN_TRIGGER_R = 1.4
+BREAKEVEN_TRIGGER_R = 1.1
 PARTIAL_TP_ENABLED = True
-PARTIAL_TP_TRIGGER_R = 1.0
+PARTIAL_TP_TRIGGER_R = 0.9
 PARTIAL_TP_PERCENT = 40
 PARTIAL_TP_2_ENABLED = True
-PARTIAL_TP_2_TRIGGER_R = 1.8
+PARTIAL_TP_2_TRIGGER_R = 1.6
 PARTIAL_TP_2_PERCENT = 25
 
 SCORE_STRONG = 95
-CFG_STRONG = (1.2, 2.0, 1.5, 30, 30)
-CFG_DEF    = (1.0, 1.8, 1.4, 40, 25)
-CFG_WEAK   = (0.8, 1.5, 1.2, 50, 25)
-WEAK_SYMS = {"SUIUSDT", "APTUSDT", "ARBUSDT", "AVAXUSDT"}
+CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
+CFG_DEF = (0.9, 1.6, 1.1, 40, 25)
+CFG_WEAK = (0.5, 1.1, 0.8, 50, 25)
+WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
 
 BLOCK_CONFLICTING_TRADES = True
 
 COOLDOWN_AFTER_SL_ENABLED = True
-COOLDOWN_AFTER_TP_HOURS = 0
-try:
-    from backtest import COOLDOWN as _BT_COOLDOWN
-except Exception:
-    _BT_COOLDOWN = {
-        "default":   {2: 3,  3: 6},
-        "APTUSDT":   {2: 6,  3: 12},
-        "INJUSDT":   {2: 4,  3: 8},
-        "SUIUSDT":   {2: 6,  3: 10},
-        "AVAXUSDT":  {2: 5,  3: 10},
-        "ARBUSDT":   {2: 5,  3: 10},
-    }
 COOLDOWN_AFTER_SL_HOURS = 3
-COOLDOWN_AFTER_SL_MAP = _BT_COOLDOWN
+COOLDOWN_AFTER_TP_HOURS = 0
 
 NOTIFICATION_DEDUP_HOURS = 3
 NOTIFICATION_ENTRY_TOLERANCE_PCT = 0.5
@@ -113,31 +99,23 @@ PULLBACK_NOTIF_ENABLED = True
 PULLBACK_NOTIF_DEDUP_HOURS = 1
 
 COINS = {
-    "XRP":  "XRPUSDT",
-    "APT":  "APTUSDT",
-    "SUI":  "SUIUSDT",
-    "INJ":  "INJUSDT",
-    "ADA":  "ADAUSDT",
-    "AVAX": "AVAXUSDT",
-    "LINK": "LINKUSDT",
-    "ARB":  "ARBUSDT",
+    "XRP": "XRPUSDT",
+    "BCH": "BCHUSDT",
+    "APT": "APTUSDT",
+    "SUI": "SUIUSDT",
+    "INJ": "INJUSDT",
 }
 
 BACKTEST_COINS = dict(COINS)
 
 MIN_SCORE_MAP = {
-    "default":  78,
-    "XRPUSDT":  82,
-    "APTUSDT":  85,
-    "SUIUSDT":  82,
-    "INJUSDT":  83,
-    "ADAUSDT":  78,
-    "AVAXUSDT": 80,
-    "LINKUSDT": 78,
-    "ARBUSDT":  80,
+    "default": 90,
+    "INJUSDT": 88,
+    "BCHUSDT": 92,
+    "APTUSDT": 93,
 }
 
-MIN_SCORE_READY = 78
+MIN_SCORE_READY = 90
 
 SUBSCRIBERS_FILE = "subscribers.json"
 TRADE_JOURNAL_FILE = "trade_journal.json"
@@ -541,43 +519,17 @@ def _recent_result_ms(coin, rtype):
     return latest
 
 
-def _count_recent_consecutive_sl(coin):
-    journal = load_journal()
-    n = 0
-    for t in reversed(journal):
-        if t.get("coin") != coin:
-            continue
-        if t.get("result") == "SL":
-            n += 1
-            if n >= 3:
-                break
-        else:
-            break
-    return n
-
-
-def _cooldown_hours_for(coin):
-    sym = coin if coin.endswith("USDT") else f"{coin}USDT"
-    cfg = COOLDOWN_AFTER_SL_MAP.get(sym) or COOLDOWN_AFTER_SL_MAP.get("default")
-    n = _count_recent_consecutive_sl(coin)
-    if n < 2:
-        return 0
-    h = None
-    for k in sorted(cfg.keys()):
-        if n >= k:
-            h = cfg[k]
-    if h is None:
-        h = max(cfg.values())
-    return h
-
-
 def coin_in_cooldown(coin):
     if not COOLDOWN_AFTER_SL_ENABLED:
         return False, None
-    hours = _cooldown_hours_for(coin)
-    if hours <= 0:
-        return False, None
     cur = now_ms()
+    if COOLDOWN_AFTER_SL_HOURS > 0:
+        last_sl = _recent_result_ms(coin, "SL")
+        if last_sl is not None:
+            eh = (cur - last_sl) / 3600000
+            if eh < COOLDOWN_AFTER_SL_HOURS:
+                rem = COOLDOWN_AFTER_SL_HOURS - eh
+                return True, f"SL {eh:.1f}h ago ({rem:.1f}h left)"
     if COOLDOWN_AFTER_TP_HOURS > 0:
         last_tp = _recent_result_ms(coin, "TP")
         if last_tp is not None:
@@ -585,13 +537,6 @@ def coin_in_cooldown(coin):
             if eh < COOLDOWN_AFTER_TP_HOURS:
                 rem = COOLDOWN_AFTER_TP_HOURS - eh
                 return True, f"TP {eh:.1f}h ago ({rem:.1f}h left)"
-    last_sl = _recent_result_ms(coin, "SL")
-    if last_sl is None:
-        return False, None
-    eh = (cur - last_sl) / 3600000
-    if eh < hours:
-        rem = hours - eh
-        return True, f"SL {eh:.1f}h ago ({rem:.1f}h left)"
     return False, None
 
 
@@ -706,7 +651,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.44</b>",
+        "🧠 <b>TRADEMIND v9.30.3</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -719,7 +664,8 @@ def dashboard_message(results, chat_id=None):
         f"⏳ WAIT: <b>{waiting}</b>",
         f"📌 ACTIVE: <b>{active}</b>",
         "",
-        f"❄️ Cooldown: <b>{cd_label}</b>",
+        f"❄️ Cooldown: <b>{cd_label} "
+        f"{COOLDOWN_AFTER_SL_HOURS}h</b>",
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
@@ -756,12 +702,11 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.44</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.30.3</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
         "TP = RR 1:2",
-        "⏰ Session: 2-7 UTC blocked",
         "",
         f"💰 P1: {PARTIAL_TP_TRIGGER_R}R"
         f"/{PARTIAL_TP_PERCENT}%",
@@ -774,7 +719,8 @@ def dashboard_message(results, chat_id=None):
         "",
         f"🎯 Trail: <b>{tr_label}</b>",
         f"📈 SHORT: <b>{sh_label}</b>",
-        f"❄️ Cooldown: <b>{cd_label}</b>",
+        f"❄️ Cooldown: <b>{cd_label} "
+        f"{COOLDOWN_AFTER_SL_HOURS}h</b>",
     ])
     return "\n".join(lines)
 
@@ -1438,12 +1384,9 @@ def trade_close_message(trade):
 
     cd_notice = ""
     if rt == "SL" and COOLDOWN_AFTER_SL_ENABLED:
-        coin = trade.get("coin")
-        h = _cooldown_hours_for(coin)
-        if h > 0:
-            cd_notice = (
-                f"\n\n❄️ <b>{coin} в cooldown "
-                f"на {h}h</b>")
+        cd_notice = (
+            f"\n\n❄️ <b>{trade.get('coin')} в cooldown "
+            f"на {COOLDOWN_AFTER_SL_HOURS}h</b>")
 
     lines = [
         f"{icon} <b>TRADEMIND — {title}</b>", "",
@@ -1519,6 +1462,12 @@ async def monitor_active_trades(app, results):
                 except Exception:
                     cur = None
 
+        print(
+            f"[MONITOR] {coin} status=OPEN "
+            f"scan_ok={bool(result and not result.get('error'))} "
+            f"cur_from_scan={cur}",
+            flush=True)
+
         if cur is None:
             sym = trade.get("symbol")
             if not sym:
@@ -1526,7 +1475,13 @@ async def monitor_active_trades(app, results):
                 if coin_c:
                     sym = f"{coin_c}USDT"
             if not sym:
+                print(
+                    f"[MONITOR] {coin} no symbol, skip",
+                    flush=True)
                 continue
+            print(
+                f"[MONITOR] {coin} fallback fetch {sym}",
+                flush=True)
             try:
                 cur = await asyncio.to_thread(
                     get_current_price, sym)
@@ -1535,10 +1490,19 @@ async def monitor_active_trades(app, results):
                         cur = float(cur)
                     except Exception:
                         cur = None
-            except Exception:
+                print(
+                    f"[MONITOR] {coin} fallback got {cur}",
+                    flush=True)
+            except Exception as exc:
+                print(
+                    f"[MONITOR] {coin} price fetch failed: "
+                    f"{exc}", flush=True)
                 continue
 
         if cur is None:
+            print(
+                f"[MONITOR] {coin} cur price None, skip",
+                flush=True)
             continue
 
         cms = now_ms()
@@ -1547,8 +1511,16 @@ async def monitor_active_trades(app, results):
             sl = float(trade["sl"])
             tp = float(trade["tp"])
             d = trade["direction"]
-        except Exception:
+        except Exception as exc:
+            print(
+                f"[MONITOR] {coin} bad sl/tp/dir: {exc}",
+                flush=True)
             continue
+
+        print(
+            f"[MONITOR] {coin} {d} cur={cur} "
+            f"sl={sl} tp={tp}",
+            flush=True)
 
         hit = None
         if d == "LONG":
@@ -1564,6 +1536,10 @@ async def monitor_active_trades(app, results):
 
         if hit is not None:
             rtype, exp = hit
+            print(
+                f"[MONITOR] {coin} {d} HIT {rtype} "
+                f"@ {exp}",
+                flush=True)
             to_close.append((trade, rtype, exp))
             continue
 
@@ -1583,6 +1559,15 @@ async def monitor_active_trades(app, results):
         if t.get("status") == "OPEN":
             still_open.append(t)
 
+    if still_open:
+        try:
+            info = ", ".join(
+                f"{t.get('coin')}@{t.get('last_price')}"
+                for t in still_open)
+            print(f"[MONITOR] open: {info}", flush=True)
+        except Exception:
+            pass
+
     save_active_trades(still_open)
 
     for chat_id, ev_type, ev_price, tr_snap in to_notify:
@@ -1595,15 +1580,30 @@ async def monitor_active_trades(app, results):
                     app, chat_id, msg,
                     parse_mode="HTML",
                     reply_markup=active_keyboard(chat_id))
+                print(
+                    f"[EVENT {ev_type}] {tr_snap.get('coin')} "
+                    f"@ {ev_price}", flush=True)
         except Exception as exc:
             print("EVENT NOTIFY ERR:", exc)
 
     for trade, rtype, exp in to_close:
+        print(
+            f"[MONITOR] closing {trade.get('coin')} "
+            f"{trade.get('direction')} {rtype} @ {exp}",
+            flush=True)
         closed = close_trade(trade, exp, rtype)
         if closed is None:
+            print(
+                f"[MONITOR] close_trade returned None for "
+                f"{trade.get('id')}",
+                flush=True)
             continue
         chat_id = closed.get("chat_id")
         if not chat_id:
+            print(
+                f"[MONITOR] no chat_id for closed "
+                f"{closed.get('coin')}",
+                flush=True)
             continue
         coin = closed.get("coin")
         result = results.get(coin)
@@ -1614,6 +1614,9 @@ async def monitor_active_trades(app, results):
                 trade_close_message(closed),
                 parse_mode="HTML",
                 reply_markup=trade_close_keyboard(closed))
+            print(
+                f"[CLOSE NOTIFY] {coin} {rtype} sent",
+                flush=True)
         except Exception as exc:
             print("CLOSE MSG ERR:", exc)
 
@@ -1976,8 +1979,7 @@ async def backtest_cmd(update, context):
 
     await update.message.reply_text(
         f"⏳ <b>ЗАПУСК БЭКТЕСТА</b>\n\n"
-        f"💠 Пары: XRP, APT, SUI, INJ, "
-        f"ADA, AVAX, LINK, ARB\n\n"
+        f"💠 Пары: XRP, BCH, APT, SUI, INJ\n\n"
         f"Ход прогона — в логах BotHost.\n"
         f"Отчёт придёт <b>.txt-файлом</b>.",
         parse_mode="HTML")
@@ -2060,8 +2062,7 @@ async def backtest_cmd(update, context):
 
     header = (
         "✅ <b>БЭКТЕСТ ЗАВЕРШЁН</b>\n"
-        "💠 8 монет: XRP, APT, SUI, INJ, "
-        "ADA, AVAX, LINK, ARB\n"
+        "💠 Пары: XRP, BCH, APT, SUI, INJ\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
     )
 
@@ -2466,7 +2467,7 @@ async def status_cmd(update, context):
     pt = "ON" if PARTIAL_TP_ENABLED else "OFF"
     sh = "ON" if ALLOW_SHORT else "OFF"
     if COOLDOWN_AFTER_SL_ENABLED:
-        cd = "MAP"
+        cd = f"{COOLDOWN_AFTER_SL_HOURS}h"
     else:
         cd = "OFF"
 
@@ -2482,7 +2483,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.44</b>\n\n"
+        f"🎯 <b>MODEL 9.30.3</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2490,7 +2491,6 @@ async def status_cmd(update, context):
         f" ({PARTIAL_TP_2_PERCENT}%)\n"
         f"🛡 BE: <b>{BREAKEVEN_TRIGGER_R}R</b>"
         f" (после P1)\n\n"
-        f"⏰ Session: <b>2-7 UTC blocked</b>\n"
         f"🧲 Anti-FOMO: <b>ON</b>\n"
         f"⚡ Pullback-увед: <b>ON</b>\n"
         f"🎯 Trailing: <b>{tr}</b>\n"
@@ -2803,6 +2803,11 @@ async def callbacks(update, context):
                 f"💠 {setup.get('coin')}",
                 active_keyboard(chat_id))
             return
+        print(
+            f"[ENTER] {coin} {trade.get('direction')} "
+            f"entry={trade.get('entry')} "
+            f"chat_id={chat_id}",
+            flush=True)
         await edit_query(
             query,
             (f"🟢 <b>ПРИНЯТА</b>\n\n"
@@ -2909,6 +2914,10 @@ async def callbacks(update, context):
             if chat_id not in d:
                 d.append(chat_id)
                 save_subscribers(d)
+        print(
+            f"[SUBSCRIBE] chat_id={chat_id} "
+            f"total={len(subscribers())}",
+            flush=True)
         await edit_query(
             query,
             "🔔 <b>УВЕД ON</b>",
@@ -2939,7 +2948,7 @@ async def callbacks(update, context):
         pt = "ON" if PARTIAL_TP_ENABLED else "OFF"
         sh = "ON" if ALLOW_SHORT else "OFF"
         if COOLDOWN_AFTER_SL_ENABLED:
-            cd = "MAP"
+            cd = f"{COOLDOWN_AFTER_SL_HOURS}h"
         else:
             cd = "OFF"
         mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
@@ -2954,7 +2963,6 @@ async def callbacks(update, context):
             f"P2: <b>{PARTIAL_TP_2_TRIGGER_R}R</b>\n"
             f"BE: <b>{BREAKEVEN_TRIGGER_R}R</b>\n"
             f"BE после P1\n"
-            f"Session: <b>2-7 UTC blocked</b>\n"
             f"Anti-FOMO: <b>ON</b>\n"
             f"Pullback-увед: <b>ON</b>\n"
             f"Trail: <b>{tr}</b>\n"
@@ -2971,10 +2979,16 @@ async def callbacks(update, context):
 async def post_init(application):
     if RUN_BACKTEST_ON_START:
         try:
+            print("=" * 70, flush=True)
+            print("BACKTEST start", flush=True)
+            print("=" * 70, flush=True)
             import backtest
             if BACKTEST_MULTI:
                 backtest.run_multi(
                     BACKTEST_MAX_HOURS)
+            print("=" * 70, flush=True)
+            print("BACKTEST done", flush=True)
+            print("=" * 70, flush=True)
         except Exception as exc:
             import traceback
             print("BACKTEST ERR:", exc, flush=True)
@@ -3176,7 +3190,7 @@ def main():
         f"[BOOT] Monitoring {len(COINS)} coins",
         flush=True)
     print(
-        f"[BOOT] Cooldown: MAP (см. backtest.COOLDOWN)",
+        f"[BOOT] Cooldown: {COOLDOWN_AFTER_SL_HOURS}h",
         flush=True)
 
     if USE_WEBHOOK:
