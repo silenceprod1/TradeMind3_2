@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.43.
+TradeMind backtest v9.44.
 - 30 дней истории
-- FVG-патч: fvgs считаются в бэктесте
-- MIN_SCORES: 78-85 (синхрон со strategy v9.43)
-- 8 монет (убраны BCHUSDT и SOLUSDT)
-- [SETUP] и [RESULT] для диагностики
-- CLI: --sym=XRPUSDT, --max-hours=N, --research, --no-debug
+- v9.44: добавлен entry_time и exit_time в UTC для поиска сделок на TradingView
+- MIN_SCORES синхронизированы со strategy v9.44
+- 8 монет
 """
 
 from market import (
@@ -21,10 +19,6 @@ from market import (
 from strategy import analyze, get_1h_direction, STRATEGY_VERSION
 
 
-# ============================================================
-# CONFIG
-# ============================================================
-
 BT_D1   = 250
 BT_1H   = 750
 BT_15M  = 3000
@@ -35,7 +29,6 @@ WARMUP  = 100
 FEE_PCT  = 0.08
 SLIP_PCT = 0.05
 
-# v9.43: 8 монет, BCH и SOL убраны
 MIN_SCORES = {
     "default":  78,
     "XRPUSDT":  82,
@@ -50,13 +43,11 @@ MIN_SCORES = {
 
 BANNED = {"ETHUSDT", "DOTUSDT", "BTCUSDT", "BCHUSDT", "SOLUSDT"}
 
-# v9.43: убраны BCHUSDT и SOLUSDT
 ALL_SYMS = [
     "XRPUSDT", "APTUSDT", "SUIUSDT", "INJUSDT",
     "ADAUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
 ]
 
-# v9.43: убраны BCH и SOL
 COOLDOWN = {
     "default":   {2: 3,  3: 6},
     "APTUSDT":   {2: 6,  3: 12},
@@ -78,10 +69,6 @@ WEAK_SYMS = {"SUIUSDT", "APTUSDT", "ARBUSDT", "AVAXUSDT"}
 RESEARCH_MODE = False
 DEBUG_MODE = True
 
-
-# ============================================================
-# HELPERS
-# ============================================================
 
 def get_ms(sym):
     return MIN_SCORES.get(sym, MIN_SCORES["default"])
@@ -194,10 +181,6 @@ class CD:
         el = (ts - self.last) / 3600000.0
         return el >= h
 
-
-# ============================================================
-# TRADE SIMULATION
-# ============================================================
 
 def sim(trade, c5, start, max_h, cfg):
     d = trade["direction"]
@@ -329,10 +312,6 @@ def sim(trade, c5, start, max_h, cfg):
     return ("TIMEOUT", e, start, 0, 0.0, False)
 
 
-# ============================================================
-# RUN ONE SYMBOL
-# ============================================================
-
 def run_one(sym, max_h):
     sym = _normalize_symbol(sym)
     ms = get_ms(sym)
@@ -372,6 +351,8 @@ def run_one(sym, max_h):
         "neutral_ctx": 0,
         "ott_block": 0,
     }
+
+    import time as _tm
 
     for i in range(WARMUP, len(c1h)):
         ts = c1h[i]["open_time"]
@@ -503,15 +484,24 @@ def run_one(sym, max_h):
             "pnl": pnl,
             "partial_hit": ph,
             "held_bars": held,
+            "entry_ts": ts,
         })
 
         trades.append(trade)
         cdm.on(rtype, xts)
 
+        entry_dt = _tm.strftime(
+            "%Y-%m-%d %H:%M", _tm.gmtime(ts / 1000))
+        exit_dt = _tm.strftime(
+            "%Y-%m-%d %H:%M", _tm.gmtime(xts / 1000))
         pt = "P" if ph else " "
-        line = ("[" + str(i) + "] " + trade["direction"] +
-                " score=" + str(score) + " " + pt +
-                " -> " + rtype + " " + ("%+.2f%%" % pnl))
+        line = (f"[{i}] {trade['direction']} score={score} {pt} "
+                f"entry_time={entry_dt} UTC "
+                f"entry={trade['entry']:.6f} "
+                f"sl={trade['sl']:.6f} "
+                f"tp={trade['tp']:.6f} "
+                f"-> {rtype} exit_time={exit_dt} "
+                f"pnl={pnl:+.2f}%")
         log(line)
 
         try:
@@ -519,7 +509,9 @@ def run_one(sym, max_h):
                 f"[RESULT] {sym} {trade['direction']} "
                 f"score={score} result={rtype} "
                 f"pnl={pnl:+.2f}% held={held} "
-                f"ph={int(bool(ph))}",
+                f"ph={int(bool(ph))} "
+                f"entry_time={entry_dt} UTC "
+                f"exit_time={exit_dt} UTC",
                 flush=True,
             )
         except Exception:
@@ -556,10 +548,6 @@ def run_one(sym, max_h):
 
     return trades
 
-
-# ============================================================
-# STATS / REPORT
-# ============================================================
 
 def stats(trades):
     tp = sl = be = to = ph = 0
@@ -702,10 +690,6 @@ def run_multi(max_h=24, syms=None):
     print(line)
     print("=" * 82)
 
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 def main(max_hours=24, research=False, syms=None):
     global RESEARCH_MODE
