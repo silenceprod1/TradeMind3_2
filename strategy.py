@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.43.
-v9.43 fixes:
-- ENABLE_SESSION_FILTER = True (блок 2:00-7:00 UTC)
-- Убраны BCHUSDT и SOLUSDT (токсичные: WR 0%)
-- MIN_SCORE_READY: XRP 80->82, APT 82->85, INJ 81->83
-- Остальное как в v9.42 (MAX_SWEEP_AGE_1H=6, FIXED_RR=2.0, MIN_LEVEL_STRENGTH=55)
+TradeMind strategy v9.44.
+v9.44 fixes:
+- ДИАГНОСТИКА detect_5m_ilm: подробные причины отказа
+  [ILM-FAIL] с разбивкой по причинам (no_local/left_ref/range/min_depth/no_trigger/rec_low/rec_high/sweep_lvl/sweep_ext)
+- Остальное как в v9.43
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
-STRATEGY_VERSION = "9.43"
+STRATEGY_VERSION = "9.44"
 ALLOW_SHORT = True
 MAX_ILM_AGE_FOR_ENTRY = 3
 
@@ -18,7 +17,6 @@ ATR_SL_MULT_SOFT = 0.8
 SL_BUFFER_PCT = 0.20
 ATR_SL_MAX_MULT = 3.5
 
-# v9.43: session filter ON
 ENABLE_SESSION_FILTER = True
 SESSION_BLOCK_START_HOUR = 2
 SESSION_BLOCK_END_HOUR = 7
@@ -699,23 +697,24 @@ def _is_local_low(c, i):
     return cur <= l and cur < r
 
 
-def _ilm_long(candles, i, sweep_lvl, sweep_ext, min_depth):
+def _ilm_long_diag(candles, i, sweep_lvl, sweep_ext, min_depth):
+    """v9.44: с диагностикой причины отказа."""
     m = candles[i]
-    if not _is_local_low(candles, i): return None
+    if not _is_local_low(candles, i): return None, "no_local"
     ml = _l(m); mh = _h(m)
-    if ml is None or mh is None: return None
+    if ml is None or mh is None: return None, "no_local"
     before = candles[max(0, i-2):i]
-    if not before: return None
+    if not before: return None, "left_ref_fail"
     bl = [_l(x) for x in before if _l(x) is not None]
-    if not bl: return None
+    if not bl: return None, "left_ref_fail"
     left_ref = min(bl)
-    if left_ref <= ml: return None
+    if left_ref <= ml: return None, "left_ref_fail"
     target = left_ref
-    if target <= ml: return None
+    if target <= ml: return None, "range_fail"
     m_range = target - ml
-    if m_range <= 0: return None
+    if m_range <= 0: return None, "range_fail"
     m_pct = m_range / target * 100
-    if m_pct < min_depth: return None
+    if m_pct < min_depth: return None, "min_depth_fail"
     trig_idx = None
     end = min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)
     for j in range(i + 1, end):
@@ -731,43 +730,46 @@ def _ilm_long(candles, i, sweep_lvl, sweep_ext, min_depth):
         if upper_wick / rng > 0.35: continue
         if tc > mh:
             trig_idx = j; break
-    if trig_idx is None: return None
+    if trig_idx is None: return None, "no_trigger"
     trig = candles[trig_idx]; tc = _c(trig)
-    if tc is None: return None
+    if tc is None: return None, "no_trigger"
     rec = (tc - ml) / m_range
-    if rec < MIN_5M_RECOVERY_RATIO: return None
-    if rec > MAX_5M_RECOVERY_RATIO: return None
+    if rec < MIN_5M_RECOVERY_RATIO: return None, "rec_low"
+    if rec > MAX_5M_RECOVERY_RATIO: return None, "rec_high"
     if sweep_lvl is not None:
         d = abs(ml - sweep_lvl) / sweep_lvl * 100
-        if d > MIN_5M_ILM_SWEEP_DISTANCE_PCT: return None
+        if d > MIN_5M_ILM_SWEEP_DISTANCE_PCT: return None, "sweep_lvl_fail"
     if sweep_ext is not None:
         lim = sweep_ext * (1 + MIN_5M_ILM_SWEEP_DISTANCE_PCT / 100)
-        if ml > lim: return None
-    return {"direction": "LONG", "extreme": ml,
-            "trigger_time": _t(trig), "trigger_price": tc,
-            "reason": "5M V-ILM", "recovery_ratio": rec,
-            "manipulation_pct": m_pct,
-            "age_candles": len(candles) - 1 - trig_idx,
-            "_score": rec * 30 + _body_ratio(trig) * 20 + m_pct * 5}
+        if ml > lim: return None, "sweep_ext_fail"
+    return {
+        "direction": "LONG", "extreme": ml,
+        "trigger_time": _t(trig), "trigger_price": tc,
+        "reason": "5M V-ILM", "recovery_ratio": rec,
+        "manipulation_pct": m_pct,
+        "age_candles": len(candles) - 1 - trig_idx,
+        "_score": rec * 30 + _body_ratio(trig) * 20 + m_pct * 5,
+    }, None
 
 
-def _ilm_short(candles, i, sweep_lvl, sweep_ext, min_depth):
+def _ilm_short_diag(candles, i, sweep_lvl, sweep_ext, min_depth):
+    """v9.44: с диагностикой причины отказа."""
     m = candles[i]
-    if not _is_local_high(candles, i): return None
+    if not _is_local_high(candles, i): return None, "no_local"
     mh = _h(m); ml = _l(m)
-    if mh is None or ml is None: return None
+    if mh is None or ml is None: return None, "no_local"
     before = candles[max(0, i-2):i]
-    if not before: return None
+    if not before: return None, "left_ref_fail"
     bh = [_h(x) for x in before if _h(x) is not None]
-    if not bh: return None
+    if not bh: return None, "left_ref_fail"
     left_ref = max(bh)
-    if mh <= left_ref: return None
+    if mh <= left_ref: return None, "left_ref_fail"
     target = left_ref
-    if mh <= target: return None
+    if mh <= target: return None, "range_fail"
     m_range = mh - target
-    if m_range <= 0: return None
+    if m_range <= 0: return None, "range_fail"
     m_pct = m_range / mh * 100
-    if m_pct < min_depth: return None
+    if m_pct < min_depth: return None, "min_depth_fail"
     trig_idx = None
     end = min(len(candles), i + 1 + ILM_TRIGGER_WINDOW)
     for j in range(i + 1, end):
@@ -783,24 +785,26 @@ def _ilm_short(candles, i, sweep_lvl, sweep_ext, min_depth):
         if lower_wick / rng > 0.35: continue
         if tc < ml:
             trig_idx = j; break
-    if trig_idx is None: return None
+    if trig_idx is None: return None, "no_trigger"
     trig = candles[trig_idx]; tc = _c(trig)
-    if tc is None: return None
+    if tc is None: return None, "no_trigger"
     rec = (mh - tc) / m_range
-    if rec < MIN_5M_RECOVERY_RATIO: return None
-    if rec > MAX_5M_RECOVERY_RATIO: return None
+    if rec < MIN_5M_RECOVERY_RATIO: return None, "rec_low"
+    if rec > MAX_5M_RECOVERY_RATIO: return None, "rec_high"
     if sweep_lvl is not None:
         d = abs(mh - sweep_lvl) / sweep_lvl * 100
-        if d > MIN_5M_ILM_SWEEP_DISTANCE_PCT: return None
+        if d > MIN_5M_ILM_SWEEP_DISTANCE_PCT: return None, "sweep_lvl_fail"
     if sweep_ext is not None:
         lim = sweep_ext * (1 - MIN_5M_ILM_SWEEP_DISTANCE_PCT / 100)
-        if mh < lim: return None
-    return {"direction": "SHORT", "extreme": mh,
-            "trigger_time": _t(trig), "trigger_price": tc,
-            "reason": "5M L-ILM", "recovery_ratio": rec,
-            "manipulation_pct": m_pct,
-            "age_candles": len(candles) - 1 - trig_idx,
-            "_score": rec * 30 + _body_ratio(trig) * 20 + m_pct * 5}
+        if mh < lim: return None, "sweep_ext_fail"
+    return {
+        "direction": "SHORT", "extreme": mh,
+        "trigger_time": _t(trig), "trigger_price": tc,
+        "reason": "5M L-ILM", "recovery_ratio": rec,
+        "manipulation_pct": m_pct,
+        "age_candles": len(candles) - 1 - trig_idx,
+        "_score": rec * 30 + _body_ratio(trig) * 20 + m_pct * 5,
+    }, None
 
 
 def detect_5m_ilm(candles_5m, sweep, direction, conf_time=None, config=None):
@@ -818,18 +822,27 @@ def detect_5m_ilm(candles_5m, sweep, direction, conf_time=None, config=None):
     if len(candles) < 5:
         return False, None
     sl = _f(sweep.get("level")); se = _f(sweep.get("extreme"))
+
+    diag = {}
     cands = []
     for i in range(2, len(candles) - 2):
-        if direction == "LONG": ilm = _ilm_long(candles, i, sl, se, min_depth)
-        else: ilm = _ilm_short(candles, i, sl, se, min_depth)
-        if ilm: cands.append(ilm)
+        if direction == "LONG":
+            ilm, reason = _ilm_long_diag(candles, i, sl, se, min_depth)
+        else:
+            ilm, reason = _ilm_short_diag(candles, i, sl, se, min_depth)
+        if ilm:
+            cands.append(ilm)
+        elif reason:
+            diag[reason] = diag.get(reason, 0) + 1
+
     if not cands:
-        if len(candles) >= 5:
-            print(
-                f"[ILM-FAIL] dir={direction} n={len(candles)} "
-                f"sl={sl} se={se} min_depth={min_depth}",
-                flush=True,
-            )
+        # v9.44: подробный лог отказа
+        parts = " ".join(f"{k}={v}" for k, v in sorted(diag.items()))
+        print(
+            f"[ILM-FAIL] dir={direction} n={len(candles)} "
+            f"sl={sl} se={se} min_depth={min_depth} | {parts}",
+            flush=True,
+        )
         return False, None
     best = None; best_score = -1e9
     for cand in cands:
@@ -1094,9 +1107,9 @@ def _apply_ready_promote(result):
         if trend < tr_min: continue
         if need_bos and not bos: continue
         result["stage"] = "READY"
-        result["reason"] = (f"v9.43 promote: score={score} "
+        result["reason"] = (f"v9.44 promote: score={score} "
                             f"trend={trend:.2f} bos={bos}")
-        result["_v943_promoted"] = True
+        result["_v944_promoted"] = True
         return result
     return result
 
