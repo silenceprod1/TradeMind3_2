@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.38 (DIAGNOSTIC).
+TradeMind backtest v9.43.
 - 30 дней истории
 - FVG-патч: fvgs считаются в бэктесте
-- MIN_SCORES: 78-82 (синхрон со strategy v9.38)
-- [SETUP] print из strategy
-- [RESULT] print — результат каждой сделки
+- MIN_SCORES: 78-85 (синхрон со strategy v9.43)
+- 8 монет (убраны BCHUSDT и SOLUSDT)
+- [SETUP] и [RESULT] для диагностики
 - CLI: --sym=XRPUSDT, --max-hours=N, --research, --no-debug
 """
 
@@ -26,43 +26,42 @@ from strategy import analyze, get_1h_direction, STRATEGY_VERSION
 # ============================================================
 
 BT_D1   = 250
-BT_1H   = 750         # 30 дней
-BT_15M  = 3000        # 30 дней
-BT_5M   = 8800        # 30 дней
+BT_1H   = 750
+BT_15M  = 3000
+BT_5M   = 8800
 BT_1M   = 500
 WARMUP  = 100
 
 FEE_PCT  = 0.08
 SLIP_PCT = 0.05
 
+# v9.43: 8 монет, BCH и SOL убраны
 MIN_SCORES = {
     "default":  78,
-    "XRPUSDT":  80,
-    "BCHUSDT":  78,
-    "APTUSDT":  82,
+    "XRPUSDT":  82,
+    "APTUSDT":  85,
     "SUIUSDT":  82,
-    "INJUSDT":  81,
-    "SOLUSDT":  80,
+    "INJUSDT":  83,
     "ADAUSDT":  78,
     "AVAXUSDT": 80,
     "LINKUSDT": 78,
     "ARBUSDT":  80,
 }
 
-BANNED = {"ETHUSDT", "DOTUSDT", "BTCUSDT"}
+BANNED = {"ETHUSDT", "DOTUSDT", "BTCUSDT", "BCHUSDT", "SOLUSDT"}
 
+# v9.43: убраны BCHUSDT и SOLUSDT
 ALL_SYMS = [
-    "XRPUSDT", "BCHUSDT", "APTUSDT", "SUIUSDT", "INJUSDT",
-    "SOLUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
+    "XRPUSDT", "APTUSDT", "SUIUSDT", "INJUSDT",
+    "ADAUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
 ]
 
+# v9.43: убраны BCH и SOL
 COOLDOWN = {
     "default":   {2: 3,  3: 6},
     "APTUSDT":   {2: 6,  3: 12},
     "INJUSDT":   {2: 4,  3: 8},
-    "BCHUSDT":   {2: 4,  3: 8},
     "SUIUSDT":   {2: 6,  3: 10},
-    "SOLUSDT":   {2: 5,  3: 10},
     "AVAXUSDT":  {2: 5,  3: 10},
     "ARBUSDT":   {2: 5,  3: 10},
 }
@@ -74,8 +73,7 @@ CFG_STRONG = (1.2, 2.0, 1.5, 30, 30)
 CFG_DEF    = (1.0, 1.8, 1.4, 40, 25)
 CFG_WEAK   = (0.8, 1.5, 1.2, 50, 25)
 
-WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT",
-             "ARBUSDT", "AVAXUSDT"}
+WEAK_SYMS = {"SUIUSDT", "APTUSDT", "ARBUSDT", "AVAXUSDT"}
 
 RESEARCH_MODE = False
 DEBUG_MODE = True
@@ -372,6 +370,7 @@ def run_one(sym, max_h):
         "fvg_hits": 0,
         "weak_level": 0,
         "neutral_ctx": 0,
+        "ott_block": 0,
     }
 
     for i in range(WARMUP, len(c1h)):
@@ -442,6 +441,8 @@ def run_one(sym, max_h):
                 stats["weak_level"] += 1
             if "NEUTRAL" in reason and "блок" in reason:
                 stats["neutral_ctx"] += 1
+            if "OTT block" in reason:
+                stats["ott_block"] += 1
 
             if stage == "WAIT": stats["wait"] += 1
             elif stage == "SWEPT": stats["swept"] += 1
@@ -513,7 +514,6 @@ def run_one(sym, max_h):
                 " -> " + rtype + " " + ("%+.2f%%" % pnl))
         log(line)
 
-        # v9.38: [RESULT] print — итог сделки
         try:
             print(
                 f"[RESULT] {sym} {trade['direction']} "
@@ -539,6 +539,7 @@ def run_one(sym, max_h):
         log("  FVG hits:          " + str(stats["fvg_hits"]))
         log("  Weak level blocks: " + str(stats["weak_level"]))
         log("  NEUTRAL blocks:    " + str(stats["neutral_ctx"]))
+        log("  OTT blocks:        " + str(stats["ott_block"]))
         if stats["score_samples"]:
             sc = stats["score_samples"]
             tr = stats["trend_samples"]
@@ -635,6 +636,7 @@ def run_multi(max_h=24, syms=None):
     print("### CFG_WEAK:   " + str(CFG_WEAK))
     print("### COOLDOWN:   " + str(COOLDOWN))
     print("### HISTORY:    30 days (1H=750, 5M=8800)")
+    print("### SESSION:    block 2:00-7:00 UTC")
     print("#" * 70)
 
     summary = []
