@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.30.3.
-Совместим со strategy v9.30 и backtest v9.30 (+51.72R).
-Fix: fallback цены + symbol из coin + диагностика монитора.
+TradeMind bot v9.30.1.
+Совместим со strategy v9.30.1 (ОТТ-фильтр) и backtest v9.30.
 """
 
 import asyncio
@@ -651,7 +650,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.30.3</b>",
+        "🧠 <b>TRADEMIND v9.30.1</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -702,11 +701,12 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.30.3</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.30.1</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
         "TP = RR 1:2",
+        "⏰ ОТТ: 2-7 UTC blocked",
         "",
         f"💰 P1: {PARTIAL_TP_TRIGGER_R}R"
         f"/{PARTIAL_TP_PERCENT}%",
@@ -2483,7 +2483,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.30.3</b>\n\n"
+        f"🎯 <b>MODEL 9.30.1</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2491,6 +2491,7 @@ async def status_cmd(update, context):
         f" ({PARTIAL_TP_2_PERCENT}%)\n"
         f"🛡 BE: <b>{BREAKEVEN_TRIGGER_R}R</b>"
         f" (после P1)\n\n"
+        f"⏰ ОТТ: <b>2-7 UTC blocked</b>\n"
         f"🧲 Anti-FOMO: <b>ON</b>\n"
         f"⚡ Pullback-увед: <b>ON</b>\n"
         f"🎯 Trailing: <b>{tr}</b>\n"
@@ -2963,6 +2964,7 @@ async def callbacks(update, context):
             f"P2: <b>{PARTIAL_TP_2_TRIGGER_R}R</b>\n"
             f"BE: <b>{BREAKEVEN_TRIGGER_R}R</b>\n"
             f"BE после P1\n"
+            f"ОТТ: <b>2-7 UTC blocked</b>\n"
             f"Anti-FOMO: <b>ON</b>\n"
             f"Pullback-увед: <b>ON</b>\n"
             f"Trail: <b>{tr}</b>\n"
