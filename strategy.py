@@ -1,20 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.42.
-v9.42 fixes (диагностика ILM):
-- MIN_BODY_RATIO_TRIGGER_5M: 0.55 -> 0.45
-- MIN_5M_RECOVERY_RATIO: 0.30 -> 0.20
-- MAX_5M_RECOVERY_RATIO: 1.30 -> 2.50
-- MIN_5M_ILM_SWEEP_DISTANCE_PCT: 1.0 -> 5.0
-- MIN_LEVEL_STRENGTH: 70 -> 55
-- ENABLE_SESSION_FILTER: True -> False (отладка)
-- V-trigger: убран tc > max(prev 2 highs), добавлен upper_wick check
-- ДОБАВЛЕН debug print [ILM-FAIL] для диагностики
+TradeMind strategy v9.43.
+v9.43 fixes:
+- ENABLE_SESSION_FILTER = True (блок 2:00-7:00 UTC)
+- Убраны BCHUSDT и SOLUSDT (токсичные: WR 0%)
+- MIN_SCORE_READY: XRP 80->82, APT 82->85, INJ 81->83
+- Остальное как в v9.42 (MAX_SWEEP_AGE_1H=6, FIXED_RR=2.0, MIN_LEVEL_STRENGTH=55)
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
-STRATEGY_VERSION = "9.42"
+STRATEGY_VERSION = "9.43"
 ALLOW_SHORT = True
 MAX_ILM_AGE_FOR_ENTRY = 3
 
@@ -22,7 +18,8 @@ ATR_SL_MULT_SOFT = 0.8
 SL_BUFFER_PCT = 0.20
 ATR_SL_MAX_MULT = 3.5
 
-ENABLE_SESSION_FILTER = False
+# v9.43: session filter ON
+ENABLE_SESSION_FILTER = True
 SESSION_BLOCK_START_HOUR = 2
 SESSION_BLOCK_END_HOUR = 7
 SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
@@ -50,7 +47,7 @@ ENABLE_D1_BLOCK = False
 SL_USE_1H_SWINGS = True
 SL_USE_SWEEP_EXTREME = True
 MIN_SL_ATR_MULT = 1.2
-MIN_BODY_RATIO_TRIGGER_5M = 0.45   # было 0.55
+MIN_BODY_RATIO_TRIGGER_5M = 0.45
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = False
 
@@ -63,9 +60,9 @@ MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
 MAX_ILM_AGE_CANDLES_5M = 48
 
-MIN_5M_RECOVERY_RATIO = 0.20       # было 0.30
-MAX_5M_RECOVERY_RATIO = 2.50       # было 1.30
-MIN_5M_ILM_SWEEP_DISTANCE_PCT = 5.0  # было 1.0
+MIN_5M_RECOVERY_RATIO = 0.20
+MAX_5M_RECOVERY_RATIO = 2.50
+MIN_5M_ILM_SWEEP_DISTANCE_PCT = 5.0
 
 MIN_TREND_ACTIVITY_READY = 0.45
 COUNTER_TREND_MIN_SCORE = 78
@@ -109,32 +106,26 @@ ATR_REGIME_MIN = 1.08
 ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.3
 
-MIN_LEVEL_STRENGTH = 55.0          # было 70
+MIN_LEVEL_STRENGTH = 55.0
 
 
 # ============================================================
-# 10 COINS
+# 8 COINS (v9.43: убраны BCH и SOL)
 # ============================================================
 
 COIN_CONFIGS = {
     "XRPUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 3.5, "VOLATILITY_ATR_SPIKE_MULT": 2.0,
-                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
-    "BCHUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.12,
-                "MAX_SL_DISTANCE_PCT": 4.0, "VOLATILITY_ATR_SPIKE_MULT": 2.2,
-                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 55},
+                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 55},
     "APTUSDT": {"ATR_SL_MULT": 1.7, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 60},
+                "MIN_SCORE_READY": 85, "MIN_LEVEL_STRENGTH": 60},
     "SUIUSDT": {"ATR_SL_MULT": 1.8, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.5, "VOLATILITY_ATR_SPIKE_MULT": 3.0,
                 "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 60},
     "INJUSDT": {"ATR_SL_MULT": 1.6, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 81, "MIN_LEVEL_STRENGTH": 55},
-    "SOLUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.14,
-                "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.8,
-                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
+                "MIN_SCORE_READY": 83, "MIN_LEVEL_STRENGTH": 55},
     "ADAUSDT": {"ATR_SL_MULT": 1.3, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 3.5, "VOLATILITY_ATR_SPIKE_MULT": 2.3,
                 "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 50},
@@ -591,7 +582,7 @@ def measure_trend_activity(candles_1h, direction):
 
 
 # ============================================================
-# v9.42: ИНВЕРСИЯ FVG
+# FVG INVERSION
 # ============================================================
 
 def _check_fvg_inversion_15m(c15, direction, from_idx):
@@ -732,7 +723,6 @@ def _ilm_long(candles, i, sweep_lvl, sweep_ext, min_depth):
         if tc is None or not _bull(trig): continue
         br = _body_ratio(trig)
         if br < MIN_BODY_RATIO_TRIGGER_5M: continue
-        # v9.42: upper_wick check (не V-образный если длинный верхний wick)
         o = _o(trig); h = _h(trig); l = _l(trig)
         if o is None or h is None or l is None: continue
         rng = h - l
@@ -834,7 +824,6 @@ def detect_5m_ilm(candles_5m, sweep, direction, conf_time=None, config=None):
         else: ilm = _ilm_short(candles, i, sl, se, min_depth)
         if ilm: cands.append(ilm)
     if not cands:
-        # v9.42: DEBUG
         if len(candles) >= 5:
             print(
                 f"[ILM-FAIL] dir={direction} n={len(candles)} "
@@ -1105,9 +1094,9 @@ def _apply_ready_promote(result):
         if trend < tr_min: continue
         if need_bos and not bos: continue
         result["stage"] = "READY"
-        result["reason"] = (f"v9.42 promote: score={score} "
+        result["reason"] = (f"v9.43 promote: score={score} "
                             f"trend={trend:.2f} bos={bos}")
-        result["_v942_promoted"] = True
+        result["_v943_promoted"] = True
         return result
     return result
 
