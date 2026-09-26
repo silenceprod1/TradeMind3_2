@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.41.
-v9.41 fixes (по модели ILM из видео):
-- Инверсия FVG как триггер подтверждения (альтернатива BOS)
-- V-образный trigger: body_ratio >= 0.55, close > max(prev 2 highs)
-- ОТТ-фильтр: блок азиатской сессии 2:00-7:00 UTC (для крипты)
+TradeMind strategy v9.42.
+v9.42 fixes (диагностика ILM):
+- MIN_BODY_RATIO_TRIGGER_5M: 0.55 -> 0.45
+- MIN_5M_RECOVERY_RATIO: 0.30 -> 0.20
+- MAX_5M_RECOVERY_RATIO: 1.30 -> 2.50
+- MIN_5M_ILM_SWEEP_DISTANCE_PCT: 1.0 -> 5.0
+- MIN_LEVEL_STRENGTH: 70 -> 55
+- ENABLE_SESSION_FILTER: True -> False (отладка)
+- V-trigger: убран tc > max(prev 2 highs), добавлен upper_wick check
+- ДОБАВЛЕН debug print [ILM-FAIL] для диагностики
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
-STRATEGY_VERSION = "9.41"
+STRATEGY_VERSION = "9.42"
 ALLOW_SHORT = True
 MAX_ILM_AGE_FOR_ENTRY = 3
 
@@ -17,10 +22,9 @@ ATR_SL_MULT_SOFT = 0.8
 SL_BUFFER_PCT = 0.20
 ATR_SL_MAX_MULT = 3.5
 
-# v9.41: ОТТ — оптимальное торговое время
-ENABLE_SESSION_FILTER = True       # было False
-SESSION_BLOCK_START_HOUR = 2       # блок с 2:00 UTC
-SESSION_BLOCK_END_HOUR = 7         # до 7:00 UTC (Лондон открытие)
+ENABLE_SESSION_FILTER = False
+SESSION_BLOCK_START_HOUR = 2
+SESSION_BLOCK_END_HOUR = 7
 SESSION_FILTER_EXEMPT = {"BTCUSDT", "ETHUSDT"}
 
 RETEST_OFFSET_PCT = 0.0
@@ -46,10 +50,7 @@ ENABLE_D1_BLOCK = False
 SL_USE_1H_SWINGS = True
 SL_USE_SWEEP_EXTREME = True
 MIN_SL_ATR_MULT = 1.2
-
-# v9.41: V-образный trigger
-MIN_BODY_RATIO_TRIGGER_5M = 0.55   # было 0.40
-
+MIN_BODY_RATIO_TRIGGER_5M = 0.45   # было 0.55
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = False
 
@@ -62,9 +63,9 @@ MAX_5M_ILM_CANDLES = 60
 MAX_15M_CONFIRM_CANDLES = 24
 MAX_ILM_AGE_CANDLES_5M = 48
 
-MIN_5M_RECOVERY_RATIO = 0.30
-MAX_5M_RECOVERY_RATIO = 1.30
-MIN_5M_ILM_SWEEP_DISTANCE_PCT = 1.0
+MIN_5M_RECOVERY_RATIO = 0.20       # было 0.30
+MAX_5M_RECOVERY_RATIO = 2.50       # было 1.30
+MIN_5M_ILM_SWEEP_DISTANCE_PCT = 5.0  # было 1.0
 
 MIN_TREND_ACTIVITY_READY = 0.45
 COUNTER_TREND_MIN_SCORE = 78
@@ -108,7 +109,7 @@ ATR_REGIME_MIN = 1.08
 ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.3
 
-MIN_LEVEL_STRENGTH = 70.0
+MIN_LEVEL_STRENGTH = 55.0          # было 70
 
 
 # ============================================================
@@ -118,34 +119,34 @@ MIN_LEVEL_STRENGTH = 70.0
 COIN_CONFIGS = {
     "XRPUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 3.5, "VOLATILITY_ATR_SPIKE_MULT": 2.0,
-                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 70},
+                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
     "BCHUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.12,
                 "MAX_SL_DISTANCE_PCT": 4.0, "VOLATILITY_ATR_SPIKE_MULT": 2.2,
-                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 70},
+                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 55},
     "APTUSDT": {"ATR_SL_MULT": 1.7, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 75},
+                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 60},
     "SUIUSDT": {"ATR_SL_MULT": 1.8, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.5, "VOLATILITY_ATR_SPIKE_MULT": 3.0,
-                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 75},
+                "MIN_SCORE_READY": 82, "MIN_LEVEL_STRENGTH": 60},
     "INJUSDT": {"ATR_SL_MULT": 1.6, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 81, "MIN_LEVEL_STRENGTH": 70},
+                "MIN_SCORE_READY": 81, "MIN_LEVEL_STRENGTH": 55},
     "SOLUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.8,
-                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 70},
+                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
     "ADAUSDT": {"ATR_SL_MULT": 1.3, "MIN_SWEEP_DEPTH_PCT": 0.14,
                 "MAX_SL_DISTANCE_PCT": 3.5, "VOLATILITY_ATR_SPIKE_MULT": 2.3,
-                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 65},
+                "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 50},
     "AVAXUSDT": {"ATR_SL_MULT": 1.5, "MIN_SWEEP_DEPTH_PCT": 0.15,
                  "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                 "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 70},
+                 "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
     "LINKUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.13,
                  "MAX_SL_DISTANCE_PCT": 4.5, "VOLATILITY_ATR_SPIKE_MULT": 2.3,
-                 "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 65},
+                 "MIN_SCORE_READY": 78, "MIN_LEVEL_STRENGTH": 50},
     "ARBUSDT": {"ATR_SL_MULT": 1.4, "MIN_SWEEP_DEPTH_PCT": 0.15,
                 "MAX_SL_DISTANCE_PCT": 5.0, "VOLATILITY_ATR_SPIKE_MULT": 2.5,
-                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 70},
+                "MIN_SCORE_READY": 80, "MIN_LEVEL_STRENGTH": 55},
 }
 
 
@@ -590,15 +591,10 @@ def measure_trend_activity(candles_1h, direction):
 
 
 # ============================================================
-# v9.41: ИНВЕРСИЯ FVG
+# v9.42: ИНВЕРСИЯ FVG
 # ============================================================
 
 def _check_fvg_inversion_15m(c15, direction, from_idx):
-    """
-    v9.41: Инверсия FVG.
-    Для LONG: цена закрылась ТЕЛОМ ВЫШЕ верхней границы bearish FVG.
-    Для SHORT: цена закрылась ТЕЛОМ НИЖЕ нижней границы bullish FVG.
-    """
     if not c15 or len(c15) < 5: return False, None
     lookback = c15[max(0, from_idx - 5):from_idx + 1]
     if len(lookback) < 3: return False, None
@@ -609,16 +605,13 @@ def _check_fvg_inversion_15m(c15, direction, from_idx):
         h3 = _h(c3); l3 = _l(c3)
         if h1 is None or l1 is None or h3 is None or l3 is None: continue
         if l3 > h1:
-            # bullish FVG -> ищем инверсию вниз (для SHORT)
             if direction == "SHORT":
-                # ищем свечу после c3, которая закрылась телом НИЖЕ h1
                 for j in range(i + 2, len(lookback)):
                     cj = lookback[j]
                     cl = _c(cj)
                     if cl is not None and cl < h1:
                         return True, "FVG inv (bear)"
         if h3 < l1:
-            # bearish FVG -> ищем инверсию вверх (для LONG)
             if direction == "LONG":
                 for j in range(i + 2, len(lookback)):
                     cj = lookback[j]
@@ -629,7 +622,7 @@ def _check_fvg_inversion_15m(c15, direction, from_idx):
 
 
 # ============================================================
-# 15M CONFIRMATION (v9.41)
+# 15M CONFIRMATION
 # ============================================================
 
 def _is_local_high_15m(c, i):
@@ -647,11 +640,6 @@ def _is_local_low_15m(c, i):
 
 
 def confirmation_15m(candles_15m, sweep, direction):
-    """
-    v9.41:
-    - BOS (пробой референса)
-    - ИЛИ инверсия FVG
-    """
     if not sweep or not candles_15m:
         return False, None, None, False, 0.0
     if direction not in ("LONG", "SHORT"):
@@ -666,7 +654,6 @@ def confirmation_15m(candles_15m, sweep, direction):
     if len(candidates) < 3:
         return False, None, None, False, 0.0
 
-    # v9.41: сначала проверяем BOS
     for i in range(1, len(candidates)):
         c = candidates[i]
         br = _body_ratio(c)
@@ -694,7 +681,6 @@ def confirmation_15m(candles_15m, sweep, direction):
                 strength = min(1.0, br * 1.2)
                 return True, "15M BOS", _t(c), True, strength
 
-    # v9.41: если BOS не найден — ищем инверсию FVG
     inv_ok, inv_reason = _check_fvg_inversion_15m(
         candidates, direction, len(candidates) - 1)
     if inv_ok:
@@ -705,7 +691,7 @@ def confirmation_15m(candles_15m, sweep, direction):
 
 
 # ============================================================
-# 5M ILM (v9.41 — V-образный trigger)
+# 5M ILM
 # ============================================================
 
 def _is_local_high(c, i):
@@ -744,12 +730,15 @@ def _ilm_long(candles, i, sweep_lvl, sweep_ext, min_depth):
     for j in range(i + 1, end):
         trig = candles[j]; tc = _c(trig)
         if tc is None or not _bull(trig): continue
-        if _body_ratio(trig) < MIN_BODY_RATIO_TRIGGER_5M: continue
-        # v9.41: V-образный trigger — close выше max(prev 2 highs)
-        if j >= 2:
-            h1 = _h(candles[j-1]); h2 = _h(candles[j-2])
-            if h1 is not None and h2 is not None:
-                if tc <= max(h1, h2): continue
+        br = _body_ratio(trig)
+        if br < MIN_BODY_RATIO_TRIGGER_5M: continue
+        # v9.42: upper_wick check (не V-образный если длинный верхний wick)
+        o = _o(trig); h = _h(trig); l = _l(trig)
+        if o is None or h is None or l is None: continue
+        rng = h - l
+        if rng <= 0: continue
+        upper_wick = h - max(o, tc)
+        if upper_wick / rng > 0.35: continue
         if tc > mh:
             trig_idx = j; break
     if trig_idx is None: return None
@@ -794,12 +783,14 @@ def _ilm_short(candles, i, sweep_lvl, sweep_ext, min_depth):
     for j in range(i + 1, end):
         trig = candles[j]; tc = _c(trig)
         if tc is None or not _bear(trig): continue
-        if _body_ratio(trig) < MIN_BODY_RATIO_TRIGGER_5M: continue
-        # v9.41: V-образный trigger — close ниже min(prev 2 lows)
-        if j >= 2:
-            l1 = _l(candles[j-1]); l2 = _l(candles[j-2])
-            if l1 is not None and l2 is not None:
-                if tc >= min(l1, l2): continue
+        br = _body_ratio(trig)
+        if br < MIN_BODY_RATIO_TRIGGER_5M: continue
+        o = _o(trig); h = _h(trig); l = _l(trig)
+        if o is None or h is None or l is None: continue
+        rng = h - l
+        if rng <= 0: continue
+        lower_wick = min(o, tc) - l
+        if lower_wick / rng > 0.35: continue
         if tc < ml:
             trig_idx = j; break
     if trig_idx is None: return None
@@ -834,14 +825,23 @@ def detect_5m_ilm(candles_5m, sweep, direction, conf_time=None, config=None):
         if start is None: candles.append(c)
         elif t is not None and t > start: candles.append(c)
     candles = candles[-MAX_5M_ILM_CANDLES:]
-    if len(candles) < 5: return False, None
+    if len(candles) < 5:
+        return False, None
     sl = _f(sweep.get("level")); se = _f(sweep.get("extreme"))
     cands = []
     for i in range(2, len(candles) - 2):
         if direction == "LONG": ilm = _ilm_long(candles, i, sl, se, min_depth)
         else: ilm = _ilm_short(candles, i, sl, se, min_depth)
         if ilm: cands.append(ilm)
-    if not cands: return False, None
+    if not cands:
+        # v9.42: DEBUG
+        if len(candles) >= 5:
+            print(
+                f"[ILM-FAIL] dir={direction} n={len(candles)} "
+                f"sl={sl} se={se} min_depth={min_depth}",
+                flush=True,
+            )
+        return False, None
     best = None; best_score = -1e9
     for cand in cands:
         sc = cand["_score"]
@@ -1034,8 +1034,8 @@ def check_anti_fomo(candles_15m, direction, price):
         if extended:
             if pulled or cooled:
                 return True, "anti_fomo SHORT ok (ext)", meta
-            return False, (f"Anti-FOMO SHORT: price extended > "
-                           f"{ATR_EXTENSION_MULT}*ATR no cool."), meta
+            return False, (f"Anti-FOMO SHORT: цена растянута > "
+                           f"{ATR_EXTENSION_MULT}*ATR без остывания."), meta
         return True, "anti_fomo SHORT passed", meta
     return True, "anti_fomo: no direction", meta
 
@@ -1062,7 +1062,6 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
         elif depth >= 0.15: score += 12
         else: score += 8
 
-    # v9.41: BOS +3, FVG inv +3
     if conf_text == "15M BOS":
         score += 20
     elif "FVG inv" in (conf_text or ""):
@@ -1075,8 +1074,8 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm,
     if ilm:
         rec = ilm.get("recovery_ratio", 0)
         age = ilm.get("age_candles", 99)
-        if 0.50 <= rec <= 1.10: base = 20
-        elif 0.30 <= rec < 0.50: base = 15
+        if 0.50 <= rec <= 1.50: base = 20
+        elif 0.20 <= rec < 0.50: base = 15
         else: base = 10
         if age > 2: base -= 3
         elif age > 1: base -= 1
@@ -1106,9 +1105,9 @@ def _apply_ready_promote(result):
         if trend < tr_min: continue
         if need_bos and not bos: continue
         result["stage"] = "READY"
-        result["reason"] = (f"v9.41 promote: score={score} "
+        result["reason"] = (f"v9.42 promote: score={score} "
                             f"trend={trend:.2f} bos={bos}")
-        result["_v941_promoted"] = True
+        result["_v942_promoted"] = True
         return result
     return result
 
@@ -1144,7 +1143,6 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction,
     if price is None or not c1h or not c15 or not c5:
         result["reason"] = "Недостаточно данных."; return result
 
-    # v9.41: ОТТ-фильтр (сессия)
     if ENABLE_SESSION_FILTER:
         _sym = symbol or ""
         if _sym not in SESSION_FILTER_EXEMPT:
