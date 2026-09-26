@@ -1,73 +1,59 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.44.
-- 30 дней истории
-- v9.44: добавлен entry_time и exit_time в UTC для поиска сделок на TradingView
-- MIN_SCORES синхронизированы со strategy v9.44
-- 8 монет
+TradeMind backtest v9.30.
+5 пар: XRP, BCH, APT, SUI, INJ.
 """
 
 from market import (
-    get_klines,
-    get_klines_history,
-    _normalize_symbol,
-    find_major_liquidity,
-    detect_sweep,
-    _analyze_d1_context,
-    collect_fvgs,
+    get_klines, get_klines_history,
+    _normalize_symbol, find_major_liquidity,
+    detect_sweep, _analyze_d1_context,
 )
-from strategy import analyze, get_1h_direction, STRATEGY_VERSION
+from strategy import analyze, get_1h_direction
 
 
-BT_D1   = 250
-BT_1H   = 750
-BT_15M  = 3000
-BT_5M   = 8800
-BT_1M   = 500
-WARMUP  = 100
+BT_D1 = 250
+BT_1H = 1200
+BT_15M = 4800
+BT_5M = 14400
+BT_1M = 500
+WARMUP = 150
 
-FEE_PCT  = 0.08
+FEE_PCT = 0.08
 SLIP_PCT = 0.05
 
 MIN_SCORES = {
-    "default":  78,
-    "XRPUSDT":  82,
-    "APTUSDT":  85,
-    "SUIUSDT":  82,
-    "INJUSDT":  83,
-    "ADAUSDT":  78,
-    "AVAXUSDT": 80,
-    "LINKUSDT": 78,
-    "ARBUSDT":  80,
+    "default": 90,
+    "INJUSDT": 88,
+    "BCHUSDT": 92,
+    "APTUSDT": 93,
 }
 
-BANNED = {"ETHUSDT", "DOTUSDT", "BTCUSDT", "BCHUSDT", "SOLUSDT"}
+BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT",
+          "LINKUSDT", "BTCUSDT"}
 
 ALL_SYMS = [
-    "XRPUSDT", "APTUSDT", "SUIUSDT", "INJUSDT",
-    "ADAUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT",
+    "XRPUSDT", "BCHUSDT", "APTUSDT",
+    "SUIUSDT", "INJUSDT",
 ]
 
 COOLDOWN = {
-    "default":   {2: 3,  3: 6},
-    "APTUSDT":   {2: 6,  3: 12},
-    "INJUSDT":   {2: 4,  3: 8},
-    "SUIUSDT":   {2: 6,  3: 10},
-    "AVAXUSDT":  {2: 5,  3: 10},
-    "ARBUSDT":   {2: 5,  3: 10},
+    "default": {2: 3, 3: 6},
+    "APTUSDT": {2: 6, 3: 12},
+    "INJUSDT": {2: 4, 3: 8},
+    "BCHUSDT": {2: 4, 3: 8},
 }
 
 TRAIL_TRIG = 1.5
 TRAIL_DIST = 0.8
 
-CFG_STRONG = (1.2, 2.0, 1.5, 30, 30)
-CFG_DEF    = (1.0, 1.8, 1.4, 40, 25)
-CFG_WEAK   = (0.8, 1.5, 1.2, 50, 25)
+CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
+CFG_DEF    = (0.9, 1.6, 1.1, 40, 25)
+CFG_WEAK   = (0.5, 1.1, 0.8, 50, 25)
 
-WEAK_SYMS = {"SUIUSDT", "APTUSDT", "ARBUSDT", "AVAXUSDT"}
+WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
 
 RESEARCH_MODE = False
-DEBUG_MODE = True
 
 
 def get_ms(sym):
@@ -87,11 +73,7 @@ def log(m):
 
 
 def c_until(cs, ts):
-    out = []
-    for c in cs:
-        if c["close_time"] < ts:
-            out.append(c)
-    return out
+    return [c for c in cs if c["close_time"] < ts]
 
 
 def is_active(trades, ts):
@@ -107,40 +89,17 @@ def pnl_p(e, x, d):
 
 
 def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
-    w1 = 0.0
-    if p1d and p1e is not None:
-        w1 = p1p / 100.0
-    w2 = 0.0
-    if p2d and p2e is not None:
-        w2 = p2p / 100.0
-    rw = 1.0 - w1 - w2
-    if rw < 0.0:
-        rw = 0.0
-
+    w1 = p1p / 100.0 if p1d and p1e is not None else 0.0
+    w2 = p2p / 100.0 if p2d and p2e is not None else 0.0
+    rw = max(0.0, 1.0 - w1 - w2)
     t = 0.0
-    weighted_exit = 0.0
-    total_w = 0.0
-
     if w1 > 0.0:
         t += pnl_p(e, p1e, d) * w1
-        weighted_exit += p1e * w1
-        total_w += w1
     if w2 > 0.0:
         t += pnl_p(e, p2e, d) * w2
-        weighted_exit += p2e * w2
-        total_w += w2
     if rw > 0.0:
         t += pnl_p(e, fx, d) * rw
-        weighted_exit += fx * rw
-        total_w += rw
-
-    if total_w > 0.0:
-        weighted_exit = weighted_exit / total_w
-    else:
-        weighted_exit = fx
-
-    t -= (FEE_PCT + SLIP_PCT)
-    return t, weighted_exit
+    return t - (FEE_PCT + SLIP_PCT)
 
 
 class CD:
@@ -219,8 +178,10 @@ def sim(trade, c5, start, max_h, cfg):
 
     sl = sl0
     best = e
-    p1d = False; p1e = None
-    p2d = False; p2e = None
+    p1d = False
+    p1e = None
+    p2d = False
+    p2e = None
     bem = False
 
     dl = fts + max_h * 3600 * 1000
@@ -256,16 +217,14 @@ def sim(trade, c5, start, max_h, cfg):
             et = "BE"
 
         if hsl and htp:
-            f, xp = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
-            return (et, xp, ot, held, f, p1d or p2d)
-
+            f = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
+            return (et, sl, ot, held, f, p1d or p2d)
         if hsl:
-            f, xp = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
-            return (et, xp, ot, held, f, p1d or p2d)
-
+            f = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
+            return (et, sl, ot, held, f, p1d or p2d)
         if htp:
-            f, xp = blend(e, tp, d, p1d, p1e, p1p, p2d, p2e, p2p)
-            return ("TP", xp, ot, held, f, p1d or p2d)
+            f = blend(e, tp, d, p1d, p1e, p1p, p2d, p2e, p2p)
+            return ("TP", tp, ot, held, f, p1d or p2d)
 
         if d == "LONG":
             if hi > best:
@@ -279,7 +238,6 @@ def sim(trade, c5, start, max_h, cfg):
         if not p1d and mr >= p1r:
             p1e = e + risk * p1r if d == "LONG" else e - risk * p1r
             p1d = True
-
         if p1d and not p2d and mr >= p2r:
             p2e = e + risk * p2r if d == "LONG" else e - risk * p2r
             p2d = True
@@ -305,9 +263,10 @@ def sim(trade, c5, start, max_h, cfg):
                     sl = ns
 
     if last is not None:
-        xp_in = last["close"]
-        f, xp = blend(e, xp_in, d, p1d, p1e, p1p, p2d, p2e, p2p)
-        return ("TIMEOUT", xp, last["open_time"], held, f, p1d or p2d)
+        xp = last["close"]
+        f = blend(e, xp, d, p1d, p1e, p1p, p2d, p2e, p2p)
+        return ("TIMEOUT", xp, last["open_time"],
+                held, f, p1d or p2d)
 
     return ("TIMEOUT", e, start, 0, 0.0, False)
 
@@ -324,8 +283,8 @@ def run_one(sym, max_h):
     c1d = get_klines_history("1d", BT_D1, sym)
     c1h = get_klines_history("1h", BT_1H, sym)
     c15 = get_klines_history("15m", BT_15M, sym)
-    c5  = get_klines_history("5m", BT_5M, sym)
-    c1  = get_klines("1m", BT_1M, sym)
+    c5 = get_klines_history("5m", BT_5M, sym)
+    c1 = get_klines("1m", BT_1M, sym)
 
     if not c1h:
         log("Нет данных")
@@ -340,20 +299,6 @@ def run_one(sym, max_h):
     cdm = CD(sym)
     log("Шагов: " + str(len(c1h) - WARMUP))
 
-    stats = {
-        "wait": 0, "swept": 0, "confirmed": 0, "pullback": 0,
-        "ready_total": 0, "ready_pass": 0, "ready_low_score": 0,
-        "score_samples": [], "trend_samples": [],
-        "score_hist": {},
-        "no_fill": 0,
-        "fvg_hits": 0,
-        "weak_level": 0,
-        "neutral_ctx": 0,
-        "ott_block": 0,
-    }
-
-    import time as _tm
-
     for i in range(WARMUP, len(c1h)):
         ts = c1h[i]["open_time"]
 
@@ -364,20 +309,18 @@ def run_one(sym, max_h):
 
         cc1h = c1h[:i]
         cc15 = c_until(c15, ts)
-        cc5  = c_until(c5, ts)
-        cc1  = c_until(c1, ts)
+        cc5 = c_until(c5, ts)
+        cc1 = c_until(c1, ts)
         ccd1 = c_until(c1d, ts)
 
         if len(cc15) < 60 or len(cc5) < 60:
             continue
 
-        if cc1:
-            price = cc1[-1]["close"]
-        else:
-            price = cc1h[-1]["close"]
+        price = cc1[-1]["close"] if cc1 else cc1h[-1]["close"]
 
         try:
-            lv = find_major_liquidity(cc1h, price, 12, cc15, cc5, cc1)
+            lv = find_major_liquidity(
+                cc1h, price, 12, cc15, cc5, cc1)
         except Exception:
             continue
 
@@ -386,7 +329,6 @@ def run_one(sym, max_h):
             sw = None
             if d != "NEUTRAL":
                 sw = detect_sweep(cc1h, price, d, lv)
-
             d1c = None
             if len(ccd1) >= 20:
                 try:
@@ -395,57 +337,15 @@ def run_one(sym, max_h):
                         d1c["candles_d1"] = ccd1
                 except Exception:
                     d1c = None
-
-            try:
-                fvgs_now = collect_fvgs(cc5, cc15, price)
-            except Exception:
-                fvgs_now = []
-
             r = analyze(
                 cc1h, cc15, cc5, price, lv, sw,
                 candles_1m=cc1, d1_context=d1c,
-                fvgs=fvgs_now, symbol=sym,
-            )
+                fvgs=[], symbol=sym)
         except Exception:
             continue
 
         stage = r.get("stage", "WAIT")
         score = int(r.get("score", 0))
-        trend = float(r.get("trend_activity", 0.0))
-        fvg_bonus = int(r.get("fvg_bonus", 0))
-        reason = r.get("reason", "")
-
-        if DEBUG_MODE:
-            if fvg_bonus > 0:
-                stats["fvg_hits"] += 1
-            if "Уровни слабые" in reason:
-                stats["weak_level"] += 1
-            if "NEUTRAL" in reason and "блок" in reason:
-                stats["neutral_ctx"] += 1
-            if "OTT block" in reason:
-                stats["ott_block"] += 1
-
-            if stage == "WAIT": stats["wait"] += 1
-            elif stage == "SWEPT": stats["swept"] += 1
-            elif stage == "15M_CONFIRMED":
-                stats["confirmed"] += 1
-                stats["score_samples"].append(score)
-                stats["trend_samples"].append(trend)
-                key = (score // 5) * 5
-                stats["score_hist"][key] = \
-                    stats["score_hist"].get(key, 0) + 1
-            elif stage == "WAIT_PULLBACK": stats["pullback"] += 1
-            elif stage == "READY":
-                stats["ready_total"] += 1
-                stats["score_samples"].append(score)
-                stats["trend_samples"].append(trend)
-                key = (score // 5) * 5
-                stats["score_hist"][key] = \
-                    stats["score_hist"].get(key, 0) + 1
-                if score < ms:
-                    stats["ready_low_score"] += 1
-                else:
-                    stats["ready_pass"] += 1
 
         if stage != "READY":
             continue
@@ -472,7 +372,6 @@ def run_one(sym, max_h):
         rtype, xp, xts, held, pnl, ph = res
 
         if rtype == "NO_FILL":
-            stats["no_fill"] += 1
             log("[" + str(i) + "] NO_FILL")
             cdm.on("NO_FILL", xts)
             continue
@@ -484,67 +383,15 @@ def run_one(sym, max_h):
             "pnl": pnl,
             "partial_hit": ph,
             "held_bars": held,
-            "entry_ts": ts,
         })
 
         trades.append(trade)
         cdm.on(rtype, xts)
 
-        entry_dt = _tm.strftime(
-            "%Y-%m-%d %H:%M", _tm.gmtime(ts / 1000))
-        exit_dt = _tm.strftime(
-            "%Y-%m-%d %H:%M", _tm.gmtime(xts / 1000))
         pt = "P" if ph else " "
-        line = (f"[{i}] {trade['direction']} score={score} {pt} "
-                f"entry_time={entry_dt} UTC "
-                f"entry={trade['entry']:.6f} "
-                f"sl={trade['sl']:.6f} "
-                f"tp={trade['tp']:.6f} "
-                f"-> {rtype} exit_time={exit_dt} "
-                f"pnl={pnl:+.2f}%")
-        log(line)
-
-        try:
-            print(
-                f"[RESULT] {sym} {trade['direction']} "
-                f"score={score} result={rtype} "
-                f"pnl={pnl:+.2f}% held={held} "
-                f"ph={int(bool(ph))} "
-                f"entry_time={entry_dt} UTC "
-                f"exit_time={exit_dt} UTC",
-                flush=True,
-            )
-        except Exception:
-            pass
-
-    if DEBUG_MODE:
-        log("=" * 55)
-        log("DEBUG " + sym)
-        log("  WAIT:              " + str(stats["wait"]))
-        log("  SWEPT:             " + str(stats["swept"]))
-        log("  15M_CONFIRMED:     " + str(stats["confirmed"]))
-        log("  WAIT_PULLBACK:     " + str(stats["pullback"]))
-        log("  READY (any):       " + str(stats["ready_total"]))
-        log("  READY < min_score: " + str(stats["ready_low_score"]))
-        log("  READY >= min:      " + str(stats["ready_pass"]))
-        log("  NO_FILL:           " + str(stats["no_fill"]))
-        log("  FVG hits:          " + str(stats["fvg_hits"]))
-        log("  Weak level blocks: " + str(stats["weak_level"]))
-        log("  NEUTRAL blocks:    " + str(stats["neutral_ctx"]))
-        log("  OTT blocks:        " + str(stats["ott_block"]))
-        if stats["score_samples"]:
-            sc = stats["score_samples"]
-            tr = stats["trend_samples"]
-            log("  score: min=%d max=%d avg=%.1f" % (
-                min(sc), max(sc), sum(sc) / len(sc)))
-            log("  trend: min=%.2f max=%.2f avg=%.2f" % (
-                min(tr), max(tr), sum(tr) / len(tr)))
-        if stats["score_hist"]:
-            log("  score histogram (bucket=5):")
-            for k in sorted(stats["score_hist"].keys()):
-                log("    %3d-%3d: %d" % (
-                    k, k + 4, stats["score_hist"][k]))
-        log("=" * 55)
+        log("[" + str(i) + "] " + trade["direction"] +
+            " score=" + str(score) + " " + pt +
+            " -> " + rtype + " " + ("%+.2f%%" % pnl))
 
     return trades
 
@@ -553,10 +400,14 @@ def stats(trades):
     tp = sl = be = to = ph = 0
     for t in trades:
         rt = t["result"]
-        if rt == "TP": tp += 1
-        elif rt == "SL": sl += 1
-        elif rt == "BE": be += 1
-        elif rt == "TIMEOUT": to += 1
+        if rt == "TP":
+            tp += 1
+        elif rt == "SL":
+            sl += 1
+        elif rt == "BE":
+            be += 1
+        elif rt == "TIMEOUT":
+            to += 1
         if t.get("partial_hit"):
             ph += 1
 
@@ -564,9 +415,7 @@ def stats(trades):
     wr = (tp / r * 100.0) if r > 0 else 0.0
     total = sum(t["pnl"] for t in trades)
 
-    eq = 0.0
-    peak = 0.0
-    mdd = 0.0
+    eq = peak = mdd = 0.0
     for t in trades:
         eq += t["pnl"]
         peak = max(peak, eq)
@@ -574,11 +423,9 @@ def stats(trades):
 
     avg = (total / len(trades)) if trades else 0.0
 
-    return {
-        "n": len(trades),
-        "tp": tp, "sl": sl, "be": be, "to": to, "ph": ph,
-        "wr": wr, "total": total, "avg": avg, "mdd": mdd,
-    }
+    return {"n": len(trades), "tp": tp, "sl": sl,
+            "be": be, "to": to, "ph": ph, "wr": wr,
+            "total": total, "avg": avg, "mdd": mdd}
 
 
 def rep(sym, trades):
@@ -612,7 +459,7 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v" + STRATEGY_VERSION + " [30 days] [" + mode + "]")
+    print("### MULTI v9.30 [final] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
@@ -622,9 +469,6 @@ def run_multi(max_h=24, syms=None):
     print("### CFG_STRONG: " + str(CFG_STRONG))
     print("### CFG_DEF:    " + str(CFG_DEF))
     print("### CFG_WEAK:   " + str(CFG_WEAK))
-    print("### COOLDOWN:   " + str(COOLDOWN))
-    print("### HISTORY:    30 days (1H=750, 5M=8800)")
-    print("### SESSION:    block 2:00-7:00 UTC")
     print("#" * 70)
 
     summary = []
@@ -637,14 +481,13 @@ def run_multi(max_h=24, syms=None):
         except Exception as ex:
             print("[BT] " + sym + " FAILED: " + str(ex))
             summary.append((sym, {
-                "n": 0, "tp": 0, "sl": 0, "be": 0, "to": 0,
-                "ph": 0, "wr": 0.0, "total": 0.0,
-                "avg": 0.0, "mdd": 0.0,
-            }))
+                "n": 0, "tp": 0, "sl": 0, "be": 0,
+                "to": 0, "ph": 0, "wr": 0.0,
+                "total": 0.0, "avg": 0.0, "mdd": 0.0}))
 
     print("")
     print("=" * 82)
-    print("СВОДКА v" + STRATEGY_VERSION + " [" + mode + "]")
+    print("СВОДКА v9.30 [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
@@ -654,7 +497,7 @@ def run_multi(max_h=24, syms=None):
 
     for sym, st in summary:
         ms = get_ms(sym)
-        line  = sym.ljust(11)
+        line = sym.ljust(11)
         line += str(ms).ljust(4)
         line += str(st["n"]).ljust(4)
         line += str(st["tp"]).ljust(4)
@@ -667,18 +510,18 @@ def run_multi(max_h=24, syms=None):
         line += "%.2f" % st["mdd"]
         print(line)
 
-        t_n     += st["n"]
-        t_tp    += st["tp"]
-        t_sl    += st["sl"]
-        t_be    += st["be"]
-        t_to    += st["to"]
+        t_n += st["n"]
+        t_tp += st["tp"]
+        t_sl += st["sl"]
+        t_be += st["be"]
+        t_to += st["to"]
         t_total += st["total"]
 
     print("-" * 82)
     r = t_tp + t_sl
-    twr  = (t_tp / r * 100.0) if r > 0 else 0.0
+    twr = (t_tp / r * 100.0) if r > 0 else 0.0
     tavg = (t_total / t_n) if t_n else 0.0
-    line  = "ИТОГО".ljust(15)
+    line = "ИТОГО".ljust(15)
     line += str(t_n).ljust(4)
     line += str(t_tp).ljust(4)
     line += str(t_sl).ljust(4)
@@ -703,7 +546,6 @@ if __name__ == "__main__":
     import sys as _sys
     _mh = 24
     _rs = False
-    _syms = None
     for _a in _sys.argv[1:]:
         if _a.startswith("--max-hours="):
             try:
@@ -712,10 +554,4 @@ if __name__ == "__main__":
                 pass
         elif _a == "--research":
             _rs = True
-        elif _a.startswith("--sym="):
-            _val = _a.split("=", 1)[1].upper().strip()
-            _val = _normalize_symbol(_val)
-            _syms = [_val]
-        elif _a == "--no-debug":
-            DEBUG_MODE = False
-    main(_mh, _rs, _syms)
+    main(_mh, _rs)
