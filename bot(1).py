@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.30.1-FIXED.
-Совместим со strategy v9.30.1 (+71.48R).
-Debug-логи монитора + исправлен синтаксис Tee.
+TradeMind bot v9.30.1-FIX2.
+- Монитор запускается ЯВНО в _run_polling_forever (гарантированно)
+- _ensure_monitor_started защищает от двойного запуска
+- Debug-логи монитора
+- Совместим со strategy v9.30.1 (+71.48R)
 """
 
 import asyncio
@@ -2517,6 +2519,35 @@ async def status_cmd(update, context):
         reply_markup=dashboard_keyboard())
 
 
+def _ensure_monitor_started(app, source="unknown"):
+    """v9.30.1-FIX2: единая точка запуска монитора.
+    Безопасно вызывать из post_init И из _run_polling_forever —
+    второй вызов видит флаг monitor_started и выходит."""
+    if app.bot_data.get("monitor_started"):
+        print(
+            f"[MONITOR] already started "
+            f"(source={source}), skip",
+            flush=True)
+        return
+    try:
+        task = asyncio.create_task(
+            _safe_monitor(app),
+            name="trademind-monitor")
+        app.bot_data["monitor_task"] = task
+        app.bot_data["monitor_started"] = True
+        print(
+            f"[MONITOR] task created via {source}: "
+            f"{task.get_name()}",
+            flush=True)
+    except Exception as e:
+        import traceback
+        print(
+            f"[MONITOR] create_task FAILED "
+            f"(source={source}): {e}",
+            flush=True)
+        traceback.print_exc()
+
+
 async def _safe_monitor(app):
     while True:
         try:
@@ -3032,24 +3063,7 @@ async def post_init(application):
         f"time={time.strftime('%Y-%m-%d %H:%M:%S')}",
         flush=True)
 
-    async def _starter():
-        await asyncio.sleep(1)
-        try:
-            await _safe_monitor(application)
-        except asyncio.CancelledError:
-            print("[MONITOR] starter cancelled", flush=True)
-            raise
-        except Exception as e:
-            import traceback
-            print("MONITOR DIE:", e, flush=True)
-            traceback.print_exc()
-
-    task = asyncio.create_task(
-        _starter(), name="trademind-monitor")
-    application.bot_data["monitor_task"] = task
-    print(
-        f"[BOOT] monitor task created: "
-        f"{task.get_name()}", flush=True)
+    _ensure_monitor_started(application, "post_init")
 
 
 async def post_shutdown(application):
@@ -3095,6 +3109,11 @@ async def _run_polling_forever(app):
     except Exception as e:
         print(f"[POLLING] updater patch warn: {e}",
               flush=True)
+
+    # v9.30.1-FIX2: явный запуск монитора в рабочем loop
+    print("[POLLING] starting monitor task explicitly",
+          flush=True)
+    _ensure_monitor_started(app, "_run_polling_forever")
 
     offset = None
     conflict_count = 0
