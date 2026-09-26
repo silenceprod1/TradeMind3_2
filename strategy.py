@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.30.
-Финальная версия: широкий SL (v9.19-c), RR 2.0,
-space/ATR-regime/D1/volume — отключены, anti-FOMO включён.
+TradeMind strategy v9.30.1.
+ОТТ-фильтр включён (блок 2:00-7:00 UTC).
+Всё остальное как в v9.30 (+51.72R).
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.30"
+STRATEGY_VERSION = "9.30.1"
 
 ALLOW_SHORT = True
 
@@ -18,7 +18,8 @@ ATR_SL_MULT_SOFT = 0.8
 SL_BUFFER_PCT = 0.20
 ATR_SL_MAX_MULT = 3.0
 
-ENABLE_SESSION_FILTER = False
+# v9.30.1: ОТТ-фильтр ВКЛЮЧЁН
+ENABLE_SESSION_FILTER = True
 SESSION_BLOCK_START_HOUR = 2
 SESSION_BLOCK_END_HOUR = 7
 SESSION_FILTER_EXEMPT = set()
@@ -1437,7 +1438,7 @@ def _apply_ready_promote(result):
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.30 promote: score={score} "
+            f"v9.30.1 promote: score={score} "
             f"trend={trend:.2f} bos={bos}"
         )
         result["_v910_promoted"] = True
@@ -1495,6 +1496,23 @@ def _analyze_scenario(c1h, c15, c5, price,
     if price is None or not c1h or not c15 or not c5:
         result["reason"] = "Недостаточно данных."
         return result
+
+    # v9.30.1: ОТТ-фильтр (блок 2:00-7:00 UTC)
+    if ENABLE_SESSION_FILTER:
+        _sym = symbol or ""
+        if _sym not in SESSION_FILTER_EXEMPT:
+            last_c = c1h[-1] if c1h else None
+            t_ms = _t(last_c) if last_c else None
+            if t_ms is not None:
+                try:
+                    import time as _tm
+                    hour_utc = _tm.gmtime(t_ms / 1000.0).tm_hour
+                    if SESSION_BLOCK_START_HOUR <= hour_utc < SESSION_BLOCK_END_HOUR:
+                        result["score"] = 0
+                        result["reason"] = f"OTT block ({hour_utc}h UTC)"
+                        return result
+                except Exception:
+                    pass
 
     if ENABLE_ATR_REGIME_FILTER:
         atr_fast = calculate_atr(c1h, 14)
@@ -1990,6 +2008,8 @@ __all__ = [
     "D1_TREND_BAND_PCT", "ENABLE_ATR_REGIME_FILTER",
     "ATR_REGIME_MIN", "VOLUME_CONFIRMATION_ENABLED",
     "ENABLE_SPACE_FILTER", "MIN_RR_SPACE_MULT",
+    "ENABLE_SESSION_FILTER", "SESSION_BLOCK_START_HOUR",
+    "SESSION_BLOCK_END_HOUR", "SESSION_FILTER_EXEMPT",
     "calculate_atr", "calculate_ema", "calculate_rsi",
     "calculate_stochastic", "get_1h_direction",
     "get_higher_tf_direction", "get_d1_trend_ema",
