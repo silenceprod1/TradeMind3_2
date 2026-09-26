@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.30.2.
-- ОТТ-фильтр (2:00-7:00 UTC)
-- TP на структуре (swing / major level / FVG), min RR 1.5
-- SL на структуре (ближайший swing за sweep_ext)
-- Всё остальное как v9.30.1 (+71.48R)
+TradeMind strategy v9.30.1.
+ОТТ-фильтр (2:00-7:00 UTC). Всё остальное как v9.30 (+71.48R).
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 
-STRATEGY_VERSION = "9.30.2"
+STRATEGY_VERSION = "9.30.1"
 
 ALLOW_SHORT = True
 
@@ -34,7 +31,6 @@ REQUIRE_BOS_FOR_READY = True
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 1.0
 FIXED_RR = 2.0
-MIN_STRUCTURAL_RR = 1.5
 
 MIN_SWEEP_DEPTH_PCT = 0.12
 MAX_SWEEP_AGE_1H = 24
@@ -1123,150 +1119,59 @@ def calculate_entry(ilm, price, direction):
 def find_structural_sl(candles_15m, direction, entry,
                         ilm_ext, sweep_ext=None,
                         candles_1h=None):
-    """
-    v9.30.2: SL за структурой.
-    LONG: если sweep_ext ниже entry — берём БЛИЖАЙШИЙ swing ВЫШЕ sweep_ext.
-          Иначе — максимальный swing ниже entry.
-    SHORT: симметрично.
-    """
     ef = _f(entry)
     if ef is None:
         return ilm_ext
-
     cands = []
 
-    if candles_15m and len(candles_15m) >= 10:
-        w = candles_15m[-STRUCTURAL_SL_LOOKBACK_15M:]
-        if direction == "LONG":
-            for _, p in _swing_lows(w):
-                cands.append(p)
-        elif direction == "SHORT":
-            for _, p in _swing_highs(w):
-                cands.append(p)
+    if candles_15m:
+        if len(candles_15m) >= 10:
+            w = candles_15m[-STRUCTURAL_SL_LOOKBACK_15M:]
+            if direction == "LONG":
+                for _, p in _swing_lows(w):
+                    cands.append(p)
+            elif direction == "SHORT":
+                for _, p in _swing_highs(w):
+                    cands.append(p)
 
-    if SL_USE_1H_SWINGS and candles_1h and len(candles_1h) >= 20:
-        w1 = candles_1h[-60:]
-        if direction == "LONG":
-            for _, p in _swing_lows(w1):
-                cands.append(p)
-        elif direction == "SHORT":
-            for _, p in _swing_highs(w1):
-                cands.append(p)
+    if SL_USE_1H_SWINGS and candles_1h:
+        if len(candles_1h) >= 20:
+            w1 = candles_1h[-60:]
+            if direction == "LONG":
+                for _, p in _swing_lows(w1):
+                    cands.append(p)
+            elif direction == "SHORT":
+                for _, p in _swing_highs(w1):
+                    cands.append(p)
 
     se = None
     if SL_USE_SWEEP_EXTREME:
         se = _f(sweep_ext)
+        if se is not None:
+            cands.append(se)
     ie = _f(ilm_ext)
-
-    cands = [c for c in cands if c is not None]
     if ie is not None:
         cands.append(ie)
 
+    cands = [c for c in cands if c is not None]
+    if not cands:
+        return ilm_ext
+
     if direction == "LONG":
         if se is not None and se < ef:
-            above_se = [c for c in cands if se < c < ef]
-            if above_se:
-                return max(above_se)
             return se
         below = [c for c in cands if c < ef]
         if not below:
             return ilm_ext
         return max(below)
-
     if direction == "SHORT":
         if se is not None and se > ef:
-            below_se = [c for c in cands if ef < c < se]
-            if below_se:
-                return min(below_se)
             return se
         above = [c for c in cands if c > ef]
         if not above:
             return ilm_ext
         return min(above)
-
     return ilm_ext
-
-
-def find_structural_tp(candles_15m, candles_1h, levels, direction,
-                        entry, sl, min_rr=1.5):
-    """
-    v9.30.2: TP на структуре.
-    Ищет ближайший swing / major level в сторону сделки,
-    который даёт RR >= min_rr.
-    Возвращает (tp, reason) или (None, None).
-    """
-    ef = _f(entry)
-    slf = _f(sl)
-    if ef is None or slf is None:
-        return None, None
-
-    risk = abs(ef - slf)
-    if risk <= 0:
-        return None, None
-
-    candidates = []
-
-    if direction == "LONG":
-        if candles_15m and len(candles_15m) >= 10:
-            w = candles_15m[-60:]
-            for _, p in _swing_highs(w):
-                if p is not None and p > ef:
-                    candidates.append(("swing_15m", p))
-
-        if candles_1h and len(candles_1h) >= 20:
-            w1 = candles_1h[-60:]
-            for _, p in _swing_highs(w1):
-                if p is not None and p > ef:
-                    candidates.append(("swing_1h", p))
-
-        for lv in _opposite_levels(levels or [], "LONG"):
-            lp = _level_price(lv)
-            if lp is not None and lp > ef:
-                candidates.append(("level", lp))
-
-        if not candidates:
-            return None, None
-
-        candidates.sort(key=lambda x: x[1])
-
-        for name, tp in candidates:
-            rr = (tp - ef) / risk
-            if rr >= min_rr:
-                return round(tp, 8), f"structural ({name}, RR {rr:.2f})"
-
-        return None, None
-
-    if direction == "SHORT":
-        if candles_15m and len(candles_15m) >= 10:
-            w = candles_15m[-60:]
-            for _, p in _swing_lows(w):
-                if p is not None and p < ef:
-                    candidates.append(("swing_15m", p))
-
-        if candles_1h and len(candles_1h) >= 20:
-            w1 = candles_1h[-60:]
-            for _, p in _swing_lows(w1):
-                if p is not None and p < ef:
-                    candidates.append(("swing_1h", p))
-
-        for lv in _opposite_levels(levels or [], "SHORT"):
-            lp = _level_price(lv)
-            if lp is not None and lp < ef:
-                candidates.append(("level", lp))
-
-        if not candidates:
-            return None, None
-
-        candidates.sort(key=lambda x: -x[1])
-
-        for name, tp in candidates:
-            rr = (ef - tp) / risk
-            if rr >= min_rr:
-                return round(tp, 8), f"structural ({name}, RR {rr:.2f})"
-
-        return None, None
-
-    return None, None
 
 
 def calculate_stop(entry, struct_level, direction, atr=None):
@@ -1386,23 +1291,32 @@ def check_anti_fomo(candles_15m, direction, price):
 
         if ob and extended:
             if pulled or cooled:
-                return True, "anti_fomo LONG ok (ob+ext)", meta
+                return True, (
+                    "anti_fomo LONG ok (ob+ext, pullback/cool)"
+                ), meta
             return False, (
-                f"Anti-FOMO LONG: RSI {rsi:.1f} + Stoch {k_val:.1f} "
-                f"перекуплены, цена >EMA21+ATR — ждём откат."
+                f"Anti-FOMO LONG: RSI {rsi:.1f} >= "
+                f"{RSI_OVERBOUGHT_LONG} и Stoch {k_val:.1f} >= "
+                f"{STOCH_OVERBOUGHT_LONG}, цена >EMA21+"
+                f"{ATR_EXTENSION_MULT}*ATR — ждём откат."
             ), meta
         if ob:
             if pulled or cooled:
-                return True, "anti_fomo LONG ok (ob)", meta
+                return True, (
+                    "anti_fomo LONG ok (ob, pullback/cool)"
+                ), meta
             return False, (
-                f"Anti-FOMO LONG: RSI {rsi:.1f}/Stoch {k_val:.1f} "
-                f"без остывания."
+                f"Anti-FOMO LONG: перекупленность RSI "
+                f"{rsi:.1f}/Stoch {k_val:.1f} без остывания/отката."
             ), meta
         if extended:
             if pulled or cooled:
-                return True, "anti_fomo LONG ok (ext)", meta
+                return True, (
+                    "anti_fomo LONG ok (ext, cool)"
+                ), meta
             return False, (
-                f"Anti-FOMO LONG: цена растянута от EMA21 — ждём."
+                f"Anti-FOMO LONG: цена растянута от EMA21 > "
+                f"{ATR_EXTENSION_MULT}*ATR без остывания."
             ), meta
         return True, "anti_fomo LONG passed", meta
 
@@ -1419,23 +1333,32 @@ def check_anti_fomo(candles_15m, direction, price):
 
         if os_ and extended:
             if pulled or cooled:
-                return True, "anti_fomo SHORT ok (os+ext)", meta
+                return True, (
+                    "anti_fomo SHORT ok (os+ext, pullback/cool)"
+                ), meta
             return False, (
-                f"Anti-FOMO SHORT: RSI {rsi:.1f} + Stoch {k_val:.1f} "
-                f"перепроданы, цена <EMA21-ATR — ждём."
+                f"Anti-FOMO SHORT: RSI {rsi:.1f} <= "
+                f"{RSI_OVERSOLD_SHORT} и Stoch {k_val:.1f} <= "
+                f"{STOCH_OVERSOLD_SHORT}, цена <EMA21-"
+                f"{ATR_EXTENSION_MULT}*ATR — ждём откат."
             ), meta
         if os_:
             if pulled or cooled:
-                return True, "anti_fomo SHORT ok (os)", meta
+                return True, (
+                    "anti_fomo SHORT ok (os, pullback/cool)"
+                ), meta
             return False, (
-                f"Anti-FOMO SHORT: RSI {rsi:.1f}/Stoch {k_val:.1f} "
-                f"без остывания."
+                f"Anti-FOMO SHORT: перепроданность RSI "
+                f"{rsi:.1f}/Stoch {k_val:.1f} без остывания/отката."
             ), meta
         if extended:
             if pulled or cooled:
-                return True, "anti_fomo SHORT ok (ext)", meta
+                return True, (
+                    "anti_fomo SHORT ok (ext, cool)"
+                ), meta
             return False, (
-                f"Anti-FOMO SHORT: цена растянута от EMA21 — ждём."
+                f"Anti-FOMO SHORT: цена растянута от EMA21 > "
+                f"{ATR_EXTENSION_MULT}*ATR без остывания."
             ), meta
         return True, "anti_fomo SHORT passed", meta
 
@@ -1513,10 +1436,10 @@ def _apply_ready_promote(result):
             continue
         result["stage"] = "READY"
         result["reason"] = (
-            f"v9.30.2 promote: score={score} "
+            f"v9.30.1 promote: score={score} "
             f"trend={trend:.2f} bos={bos}"
         )
-        result["_v9302_promoted"] = True
+        result["_v910_promoted"] = True
         return result
     return result
 
@@ -1572,7 +1495,6 @@ def _analyze_scenario(c1h, c15, c5, price,
         result["reason"] = "Недостаточно данных."
         return result
 
-    # ОТТ-фильтр
     if ENABLE_SESSION_FILTER:
         _sym = symbol or ""
         if _sym not in SESSION_FILTER_EXEMPT:
@@ -1740,25 +1662,7 @@ def _analyze_scenario(c1h, c15, c5, price,
         )
         return result
 
-    # v9.30.2: структурный TP
-    tp_fixed = calculate_tp_by_rr(entry, sl, direction, FIXED_RR)
-    tp_struct, tp_struct_reason = find_structural_tp(
-        c15, c1h, levels, direction, entry, sl,
-        min_rr=MIN_STRUCTURAL_RR,
-    )
-
-    if tp_struct is not None:
-        rr_struct = calculate_rr(entry, sl, tp_struct)
-        if rr_struct is not None and rr_struct >= MIN_STRUCTURAL_RR:
-            tp = tp_struct
-            tp_source = tp_struct_reason or "structural"
-        else:
-            tp = tp_fixed
-            tp_source = f"fixed_rr 1:{FIXED_RR}"
-    else:
-        tp = tp_fixed
-        tp_source = f"fixed_rr 1:{FIXED_RR}"
-
+    tp = calculate_tp_by_rr(entry, sl, direction, FIXED_RR)
     if tp is None:
         result["score"] = 70
         result["reason"] = "Нет TP."
@@ -1787,8 +1691,7 @@ def _analyze_scenario(c1h, c15, c5, price,
         "sl": round(sl, 8),
         "tp": round(tp, 8),
         "rr": round(calculate_rr(entry, sl, tp) or 0.0, 3),
-        "tp_source": tp_source,
-        "tp_reason": tp_source,
+        "tp_reason": f"Fixed RR 1:{FIXED_RR}",
     })
 
     rr = _f(result.get("rr"))
@@ -1842,8 +1745,7 @@ def _analyze_scenario(c1h, c15, c5, price,
         result["stage"] = "READY"
         result["reason"] = (
             f"Sweep→15M→5M ILM. "
-            f"Trend {trend:.2f}. RR {rr}. BOS. "
-            f"TP: {tp_source}"
+            f"Trend {trend:.2f}. RR {FIXED_RR}. BOS."
         )
         return result
 
@@ -2105,14 +2007,13 @@ __all__ = [
     "ENABLE_SPACE_FILTER", "MIN_RR_SPACE_MULT",
     "ENABLE_SESSION_FILTER", "SESSION_BLOCK_START_HOUR",
     "SESSION_BLOCK_END_HOUR", "SESSION_FILTER_EXEMPT",
-    "MIN_STRUCTURAL_RR",
     "calculate_atr", "calculate_ema", "calculate_rsi",
     "calculate_stochastic", "get_1h_direction",
     "get_higher_tf_direction", "get_d1_trend_ema",
     "measure_trend_activity", "find_sweep",
     "confirmation_15m", "detect_5m_ilm", "calculate_entry",
     "calculate_stop", "calculate_tp_by_rr", "calculate_rr",
-    "find_structural_sl", "find_structural_tp",
-    "validate_geometry", "check_anti_fomo",
-    "check_space_to_target", "analyze", "analyze_sol",
+    "find_structural_sl", "validate_geometry",
+    "check_anti_fomo", "check_space_to_target",
+    "analyze", "analyze_sol",
 ]
