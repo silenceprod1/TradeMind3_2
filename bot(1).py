@@ -2,7 +2,7 @@
 """
 TradeMind bot v9.30.1-FIXED.
 Совместим со strategy v9.30.1 (+71.48R).
-Добавлены debug-логи монитора.
+Debug-логи монитора + исправлен синтаксис Tee.
 """
 
 import asyncio
@@ -2006,7 +2006,9 @@ async def backtest_cmd(update, context):
                         st.write(s)
                         st.flush()
                     except Exception:
-                        pass            def flush(self):
+                        pass
+
+            def flush(self):
                 for st in self.streams:
                     try:
                         st.flush()
