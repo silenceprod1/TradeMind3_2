@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind backtest v9.30.
-5 пар: XRP, BCH, APT, SUI, INJ.
+TradeMind backtest v9.30-fix.
+- Корректная классификация SL/BE/positive-exit (fix)
+- WEAK_SYMS отключены — CFG_DEF для всех
+- APT убран из ALL_SYMS
+4 пары: XRP, BCH, SUI, INJ.
 """
 
 from market import (
@@ -32,8 +35,9 @@ MIN_SCORES = {
 BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT",
           "LINKUSDT", "BTCUSDT"}
 
+# v9.30-fix: APT убран
 ALL_SYMS = [
-    "XRPUSDT", "BCHUSDT", "APTUSDT",
+    "XRPUSDT", "BCHUSDT",
     "SUIUSDT", "INJUSDT",
 ]
 
@@ -51,7 +55,8 @@ CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
 CFG_DEF    = (0.9, 1.6, 1.1, 40, 25)
 CFG_WEAK   = (0.5, 1.1, 0.8, 50, 25)
 
-WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
+# v9.30-fix: отключено, все идут по CFG_DEF/CFG_STRONG
+WEAK_SYMS = set()
 
 RESEARCH_MODE = False
 
@@ -207,13 +212,16 @@ def sim(trade, c5, start, max_h, cfg):
             htp = lo <= tp
             hsl = hi >= sl
 
+        # v9.30-fix: правильная классификация
+        # 1) SL в плюс (выше entry для LONG, ниже для SHORT) → BE
+        # 2) был BE-триггер → BE
+        # 3) иначе — SL
         et = "SL"
-        if bem:
-            if abs(sl - e) < risk * 0.05:
-                et = "BE"
-        elif d == "LONG" and sl > e:
+        if d == "LONG" and sl > e:
             et = "BE"
         elif d == "SHORT" and sl < e:
+            et = "BE"
+        elif bem:
             et = "BE"
 
         if hsl and htp:
@@ -398,14 +406,23 @@ def run_one(sym, max_h):
 
 def stats(trades):
     tp = sl = be = to = ph = 0
+    be_pos = be_zero = be_neg = 0    # v9.30-fix
     for t in trades:
         rt = t["result"]
+        pnl = t.get("pnl", 0.0)
         if rt == "TP":
             tp += 1
         elif rt == "SL":
             sl += 1
         elif rt == "BE":
             be += 1
+            # v9.30-fix: разбивка BE
+            if pnl > 0.1:
+                be_pos += 1
+            elif pnl < -0.1:
+                be_neg += 1
+            else:
+                be_zero += 1
         elif rt == "TIMEOUT":
             to += 1
         if t.get("partial_hit"):
@@ -425,7 +442,9 @@ def stats(trades):
 
     return {"n": len(trades), "tp": tp, "sl": sl,
             "be": be, "to": to, "ph": ph, "wr": wr,
-            "total": total, "avg": avg, "mdd": mdd}
+            "total": total, "avg": avg, "mdd": mdd,
+            "be_pos": be_pos, "be_zero": be_zero,
+            "be_neg": be_neg}
 
 
 def rep(sym, trades):
@@ -443,6 +462,11 @@ def rep(sym, trades):
     print("  TP:      " + str(st["tp"]))
     print("  SL:      " + str(st["sl"]))
     print("  BE:      " + str(st["be"]))
+    if st["be"] > 0:
+        print("    BE+ (плюс): " + str(st["be_pos"]))
+        print("    BE0 (ноль): " + str(st["be_zero"]))
+        if st["be_neg"] > 0:
+            print("    BE- (минус): " + str(st["be_neg"]))
     print("  Timeout: " + str(st["to"]))
     print("  Partial: " + str(st["ph"]))
     print("Win rate: " + ("%.1f%%" % st["wr"]))
@@ -459,13 +483,15 @@ def run_multi(max_h=24, syms=None):
 
     print("")
     print("#" * 70)
-    print("### MULTI v9.30 [final] [" + mode + "]")
+    print("### MULTI v9.30-fix [final] [" + mode + "]")
     print("#" * 70)
     print("### MIN_SCORE: " + str(MIN_SCORES))
     print("### BANNED:   " + str(sorted(BANNED)))
     print("### FEES:     " + ("%.3f%%" % FEE_PCT) +
           " + SLIP " + ("%.3f%%" % SLIP_PCT))
     print("### FIXED_RR: 2.0")
+    print("### WEAK_SYMS: " + str(sorted(WEAK_SYMS)) +
+          " (v9.30-fix: off)")
     print("### CFG_STRONG: " + str(CFG_STRONG))
     print("### CFG_DEF:    " + str(CFG_DEF))
     print("### CFG_WEAK:   " + str(CFG_WEAK))
@@ -483,11 +509,12 @@ def run_multi(max_h=24, syms=None):
             summary.append((sym, {
                 "n": 0, "tp": 0, "sl": 0, "be": 0,
                 "to": 0, "ph": 0, "wr": 0.0,
-                "total": 0.0, "avg": 0.0, "mdd": 0.0}))
+                "total": 0.0, "avg": 0.0, "mdd": 0.0,
+                "be_pos": 0, "be_zero": 0, "be_neg": 0}))
 
     print("")
     print("=" * 82)
-    print("СВОДКА v9.30 [" + mode + "]")
+    print("СВОДКА v9.30-fix [" + mode + "]")
     print("=" * 82)
     print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
     print("-" * 82)
