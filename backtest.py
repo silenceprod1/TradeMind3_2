@@ -1,144 +1,318 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind walk-forward backtest v1.0.
-
-Идея: разбить историю на N окон по W дней,
-прогнать стратегию на каждом окне отдельно,
-показать стабильность метрик.
-
-Использование:
-    python backtest_wf.py
-    python backtest_wf.py --days=60 --windows=6
+TradeMind backtest v9.30-fix.
+- Корректная классификация SL/BE/positive-exit (fix)
+- WEAK_SYMS отключены — CFG_DEF для всех
+- APT убран из ALL_SYMS
+4 пары: XRP, BCH, SUI, INJ.
 """
 
-import sys
-import time
-from statistics import mean, stdev
-
 from market import (
-    get_klines_history,
+    get_klines, get_klines_history,
     _normalize_symbol, find_major_liquidity,
     detect_sweep, _analyze_d1_context,
 )
 from strategy import analyze, get_1h_direction
 
-from backtest import (
-    sim, get_cfg, get_ms, c_until,
-    CFG_STRONG, CFG_DEF, CFG_WEAK,
-    FEE_PCT, SLIP_PCT, WEAK_SYMS,
-    MIN_SCORES,
-)
 
+BT_D1 = 250
+BT_1H = 1200
+BT_15M = 4800
+BT_5M = 14400
+BT_1M = 500
+WARMUP = 150
 
-# ============================================================
-# КОНФИГ WF
-# ============================================================
+FEE_PCT = 0.08
+SLIP_PCT = 0.05
 
-WF_DAYS = 60           # сколько дней истории всего тянем
-WF_WINDOWS = 6         # на сколько окон делим
-WF_WARMUP_HOURS = 200  # сколько 1H-свечей нужно для прогрева
-WF_MAX_HOURS = 24      # макс. время удержания сделки
+MIN_SCORES = {
+    "default": 90,
+    "INJUSDT": 88,
+    "BCHUSDT": 92,
+    "APTUSDT": 93,
+}
 
-SYMS = [
-    "XRPUSDT", "BCHUSDT", "SUIUSDT", "INJUSDT",
-    # "APTUSDT",  # убран — убыточный
+BANNED = {"ETHUSDT", "SOLUSDT", "DOTUSDT",
+          "LINKUSDT", "BTCUSDT"}
+
+ALL_SYMS = [
+    "XRPUSDT", "BCHUSDT",
+    "SUIUSDT", "INJUSDT",
 ]
 
+COOLDOWN = {
+    "default": {2: 3, 3: 6},
+    "APTUSDT": {2: 6, 3: 12},
+    "INJUSDT": {2: 4, 3: 8},
+    "BCHUSDT": {2: 4, 3: 8},
+}
 
-# ============================================================
-# ХЕЛПЕРЫ
-# ============================================================
+TRAIL_TRIG = 1.5
+TRAIL_DIST = 0.8
 
-def tf_hours_to_ms(h):
-    return int(h * 3600 * 1000)
+CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
+CFG_DEF    = (0.9, 1.6, 1.1, 40, 25)
+CFG_WEAK   = (0.5, 1.1, 0.8, 50, 25)
+
+WEAK_SYMS = set()
+
+RESEARCH_MODE = False
 
 
-def get_window_slice(candles, start_ms, end_ms):
-    return [c for c in candles
-            if start_ms <= c["open_time"] <= end_ms]
+def get_ms(sym):
+    return MIN_SCORES.get(sym, MIN_SCORES["default"])
 
 
-def compute_stats(trades):
-    """Считает WR, Total R, Avg R, MDD, BE+."""
+def get_cfg(sym, score):
+    if score >= 95:
+        return CFG_STRONG
+    if sym in WEAK_SYMS:
+        return CFG_WEAK
+    return CFG_DEF
+
+
+def log(m):
+    print("[BT] " + str(m), flush=True)
+
+
+def c_until(cs, ts):
+    return [c for c in cs if c["close_time"] < ts]
+
+
+def is_active(trades, ts):
     if not trades:
-        return {
-            "n": 0, "tp": 0, "sl": 0, "be": 0,
-            "be_pos": 0, "to": 0,
-            "wr": 0.0, "total": 0.0, "avg": 0.0,
-            "mdd": 0.0,
-        }
+        return False
+    return trades[-1]["exit_ts"] > ts
 
-    tp = sl = be = be_pos = to = 0
-    for t in trades:
-        rt = t["result"]
-        pnl = t.get("pnl", 0.0)
-        if rt == "TP":
-            tp += 1
+
+def pnl_p(e, x, d):
+    if d == "LONG":
+        return (x - e) / e * 100.0
+    return (e - x) / e * 100.0
+
+
+def blend(e, fx, d, p1d, p1e, p1p, p2d, p2e, p2p):
+    w1 = p1p / 100.0 if p1d and p1e is not None else 0.0
+    w2 = p2p / 100.0 if p2d and p2e is not None else 0.0
+    rw = max(0.0, 1.0 - w1 - w2)
+    t = 0.0
+    if w1 > 0.0:
+        t += pnl_p(e, p1e, d) * w1
+    if w2 > 0.0:
+        t += pnl_p(e, p2e, d) * w2
+    if rw > 0.0:
+        t += pnl_p(e, fx, d) * rw
+    return t - (FEE_PCT + SLIP_PCT)
+
+
+class CD:
+    def __init__(self, sym):
+        self.sym = sym
+        self.n = 0
+        self.last = None
+        self.cfg = COOLDOWN.get(sym, COOLDOWN["default"])
+
+    def reset(self):
+        self.n = 0
+        self.last = None
+
+    def on(self, rt, ts):
+        if self.last is not None:
+            gap = (ts - self.last) / 3600000.0
+            if gap > 24.0 and self.n > 0:
+                self.reset()
+        if rt in ("TP", "BE"):
+            self.reset()
         elif rt == "SL":
-            sl += 1
-        elif rt == "BE":
-            be += 1
-            if pnl > 0.1:
-                be_pos += 1
-        elif rt == "TIMEOUT":
-            to += 1
+            self.n += 1
+            if self.n > 5:
+                self.n = 5
+            self.last = ts
 
-    r = tp + sl
-    wr = (tp / r * 100.0) if r > 0 else 0.0
-    total = sum(t["pnl"] for t in trades)
-
-    eq = peak = mdd = 0.0
-    for t in trades:
-        eq += t["pnl"]
-        peak = max(peak, eq)
-        mdd = max(mdd, peak - eq)
-
-    avg = total / len(trades) if trades else 0.0
-
-    return {
-        "n": len(trades),
-        "tp": tp, "sl": sl, "be": be, "be_pos": be_pos,
-        "to": to, "wr": wr, "total": total,
-        "avg": avg, "mdd": mdd,
-    }
+    def ok(self, ts):
+        if self.n < 2:
+            return True
+        if self.last is None:
+            return True
+        h = None
+        for k in sorted(self.cfg.keys()):
+            if self.n >= k:
+                h = self.cfg[k]
+        if h is None:
+            h = max(self.cfg.values())
+        el = (ts - self.last) / 3600000.0
+        return el >= h
 
 
-# ============================================================
-# ПРОГОН ОДНОГО ОКНА
-# ============================================================
+def sim(trade, c5, start, max_h, cfg):
+    d = trade["direction"]
+    e = float(trade["entry"])
+    sl0 = float(trade["sl"])
+    tp = float(trade["tp"])
+    risk = abs(e - sl0)
+    if risk <= 0.0:
+        return ("ERROR", e, start, 0, 0.0, False)
 
-def run_window(sym, c1h, c15, c5, c1m, c1d,
-               win_start_ms, win_end_ms,
-               warmup_ms):
-    """
-    Прогоняет стратегию на конкретном окне [win_start, win_end].
-    Для прогрева берёт данные ДО win_start (warmup_ms).
-    """
-    sym_n = _normalize_symbol(sym)
-    ms = get_ms(sym_n)
+    p1r, p2r, be_r, p1p, p2p = cfg
 
-    trades = []
-    cooldown_until_ms = 0
+    fill_max = start + 12 * 5 * 60 * 1000
+    filled = False
+    fts = None
 
-    for i in range(len(c1h)):
-        ts = c1h[i]["open_time"]
-
-        # Начало окна — пропускаем
-        if ts < win_start_ms:
+    for c in c5:
+        ot = c["open_time"]
+        if ot < start:
             continue
-        # Конец окна — стоп
-        if ts > win_end_ms:
+        if ot > fill_max:
+            break
+        if d == "LONG":
+            if c["low"] <= e:
+                filled = True
+                fts = ot
+                break
+        else:
+            if c["high"] >= e:
+                filled = True
+                fts = ot
+                break
+
+    if not filled:
+        return ("NO_FILL", e, fill_max, 0, 0.0, False)
+
+    sl = sl0
+    best = e
+    p1d = False
+    p1e = None
+    p2d = False
+    p2e = None
+    bem = False
+
+    dl = fts + max_h * 3600 * 1000
+    last = None
+    held = 0
+
+    for c in c5:
+        ot = c["open_time"]
+        if ot < fts:
+            continue
+        if ot > dl:
             break
 
-        # Cooldown
-        if ts < cooldown_until_ms:
+        held += 1
+        last = c
+        hi = c["high"]
+        lo = c["low"]
+
+        if d == "LONG":
+            htp = hi >= tp
+            hsl = lo <= sl
+        else:
+            htp = lo <= tp
+            hsl = hi >= sl
+
+        et = "SL"
+        if d == "LONG" and sl > e:
+            et = "BE"
+        elif d == "SHORT" and sl < e:
+            et = "BE"
+        elif bem:
+            et = "BE"
+
+        if hsl and htp:
+            f = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
+            return (et, sl, ot, held, f, p1d or p2d)
+        if hsl:
+            f = blend(e, sl, d, p1d, p1e, p1p, p2d, p2e, p2p)
+            return (et, sl, ot, held, f, p1d or p2d)
+        if htp:
+            f = blend(e, tp, d, p1d, p1e, p1p, p2d, p2e, p2p)
+            return ("TP", tp, ot, held, f, p1d or p2d)
+
+        if d == "LONG":
+            if hi > best:
+                best = hi
+            mr = (best - e) / risk
+        else:
+            if lo < best:
+                best = lo
+            mr = (e - best) / risk
+
+        if not p1d and mr >= p1r:
+            p1e = e + risk * p1r if d == "LONG" else e - risk * p1r
+            p1d = True
+        if p1d and not p2d and mr >= p2r:
+            p2e = e + risk * p2r if d == "LONG" else e - risk * p2r
+            p2d = True
+
+        if not bem and mr >= be_r:
+            if d == "LONG":
+                if e > sl:
+                    sl = e
+                    bem = True
+            else:
+                if e < sl:
+                    sl = e
+                    bem = True
+
+        if mr >= TRAIL_TRIG:
+            if d == "LONG":
+                ns = best - risk * TRAIL_DIST
+                if ns > sl:
+                    sl = ns
+            else:
+                ns = best + risk * TRAIL_DIST
+                if ns < sl:
+                    sl = ns
+
+    if last is not None:
+        xp = last["close"]
+        f = blend(e, xp, d, p1d, p1e, p1p, p2d, p2e, p2p)
+        return ("TIMEOUT", xp, last["open_time"],
+                held, f, p1d or p2d)
+
+    return ("TIMEOUT", e, start, 0, 0.0, False)
+
+
+def run_one(sym, max_h):
+    sym = _normalize_symbol(sym)
+    ms = get_ms(sym)
+    log("Символ: " + sym + "  min_score=" + str(ms))
+
+    if not RESEARCH_MODE and sym in BANNED:
+        log("SKIP banned: " + sym)
+        return []
+
+    c1d = get_klines_history("1d", BT_D1, sym)
+    c1h = get_klines_history("1h", BT_1H, sym)
+    c15 = get_klines_history("15m", BT_15M, sym)
+    c5 = get_klines_history("5m", BT_5M, sym)
+    c1 = get_klines("1m", BT_1M, sym)
+
+    if not c1h:
+        log("Нет данных")
+        return []
+
+    log("1H=" + str(len(c1h)) + " 5M=" + str(len(c5)))
+
+    if len(c1h) <= WARMUP:
+        return []
+
+    trades = []
+    cdm = CD(sym)
+    log("Шагов: " + str(len(c1h) - WARMUP))
+
+    for i in range(WARMUP, len(c1h)):
+        ts = c1h[i]["open_time"]
+
+        if is_active(trades, ts):
+            continue
+        if not cdm.ok(ts):
             continue
 
-        # Собираем контекст
         cc1h = c1h[:i]
         cc15 = c_until(c15, ts)
         cc5 = c_until(c5, ts)
-        cc1 = c_until(c1m, ts)
+        cc1 = c_until(c1, ts)
         ccd1 = c_until(c1d, ts)
 
         if len(cc15) < 60 or len(cc5) < 60:
@@ -146,14 +320,12 @@ def run_window(sym, c1h, c15, c5, c1m, c1d,
 
         price = cc1[-1]["close"] if cc1 else cc1h[-1]["close"]
 
-        # Ликвидность
         try:
             lv = find_major_liquidity(
                 cc1h, price, 12, cc15, cc5, cc1)
         except Exception:
             continue
 
-        # Анализ
         try:
             d = get_1h_direction(cc1h)
             sw = None
@@ -170,7 +342,7 @@ def run_window(sym, c1h, c15, c5, c1m, c1d,
             r = analyze(
                 cc1h, cc15, cc5, price, lv, sw,
                 candles_1m=cc1, d1_context=d1c,
-                fvgs=[], symbol=sym_n)
+                fvgs=[], symbol=sym)
         except Exception:
             continue
 
@@ -189,7 +361,7 @@ def run_window(sym, c1h, c15, c5, c1m, c1d,
             continue
 
         trade = {
-            "coin": sym_n,
+            "coin": sym,
             "direction": r["direction"],
             "entry": float(e),
             "sl": float(s),
@@ -197,11 +369,13 @@ def run_window(sym, c1h, c15, c5, c1m, c1d,
             "score": score,
         }
 
-        cfg = get_cfg(sym_n, score)
-        rtype, xp, xts, held, pnl, ph = sim(
-            trade, c5, ts, WF_MAX_HOURS, cfg)
+        cfg = get_cfg(sym, score)
+        res = sim(trade, c5, ts, max_h, cfg)
+        rtype, xp, xts, held, pnl, ph = res
 
         if rtype == "NO_FILL":
+            log("[" + str(i) + "] NO_FILL")
+            cdm.on("NO_FILL", xts)
             continue
 
         trade.update({
@@ -212,236 +386,191 @@ def run_window(sym, c1h, c15, c5, c1m, c1d,
             "partial_hit": ph,
             "held_bars": held,
         })
-        trades.append(trade)
 
-        # Cooldown после SL: 3ч, после 2 SL подряд — 6ч
-        if rtype == "SL":
-            cooldown_until_ms = xts + 3 * 3600 * 1000
+        trades.append(trade)
+        cdm.on(rtype, xts)
+
+        pt = "P" if ph else " "
+        log("[" + str(i) + "] " + trade["direction"] +
+            " score=" + str(score) + " " + pt +
+            " -> " + rtype + " " + ("%+.2f%%" % pnl))
 
     return trades
 
 
-# ============================================================
-# MAIN
-# ============================================================
+def stats(trades):
+    tp = sl = be = to = ph = 0
+    be_pos = be_zero = be_neg = 0
+    for t in trades:
+        rt = t["result"]
+        pnl = t.get("pnl", 0.0)
+        if rt == "TP":
+            tp += 1
+        elif rt == "SL":
+            sl += 1
+        elif rt == "BE":
+            be += 1
+            if pnl > 0.1:
+                be_pos += 1
+            elif pnl < -0.1:
+                be_neg += 1
+            else:
+                be_zero += 1
+        elif rt == "TIMEOUT":
+            to += 1
+        if t.get("partial_hit"):
+            ph += 1
 
-def main():
-    total_days = WF_DAYS
-    n_windows = WF_WINDOWS
+    r = tp + sl
+    wr = (tp / r * 100.0) if r > 0 else 0.0
+    total = sum(t["pnl"] for t in trades)
 
-    # Парсим аргументы
-    for a in sys.argv[1:]:
-        if a.startswith("--days="):
-            try:
-                total_days = int(a.split("=", 1)[1])
-            except Exception:
-                pass
-        elif a.startswith("--windows="):
-            try:
-                n_windows = int(a.split("=", 1)[1])
-            except Exception:
-                pass
+    eq = peak = mdd = 0.0
+    for t in trades:
+        eq += t["pnl"]
+        peak = max(peak, eq)
+        mdd = max(mdd, peak - eq)
+
+    avg = (total / len(trades)) if trades else 0.0
+
+    return {"n": len(trades), "tp": tp, "sl": sl,
+            "be": be, "to": to, "ph": ph, "wr": wr,
+            "total": total, "avg": avg, "mdd": mdd,
+            "be_pos": be_pos, "be_zero": be_zero,
+            "be_neg": be_neg}
+
+
+def rep(sym, trades):
+    print("")
+    print("=" * 60)
+    print("ОТЧЁТ - " + sym)
+    print("=" * 60)
+
+    if not trades:
+        print("Нет сделок.")
+        return
+
+    st = stats(trades)
+    print("Всего сделок: " + str(st["n"]))
+    print("  TP:      " + str(st["tp"]))
+    print("  SL:      " + str(st["sl"]))
+    print("  BE:      " + str(st["be"]))
+    if st["be"] > 0:
+        print("    BE+ (плюс): " + str(st["be_pos"]))
+        print("    BE0 (ноль): " + str(st["be_zero"]))
+        if st["be_neg"] > 0:
+            print("    BE- (минус): " + str(st["be_neg"]))
+    print("  Timeout: " + str(st["to"]))
+    print("  Partial: " + str(st["ph"]))
+    print("Win rate: " + ("%.1f%%" % st["wr"]))
+    print("Avg PnL:  " + ("%+.3f%%" % st["avg"]))
+    print("Total PnL:" + (" %+.2f%%" % st["total"]))
+    print("MDD:      " + ("%.2f%%" % st["mdd"]))
+
+
+def run_multi(max_h=24, syms=None):
+    if syms is None:
+        syms = list(ALL_SYMS)
+
+    mode = "RESEARCH" if RESEARCH_MODE else "PROD"
 
     print("")
-    print("#" * 78)
-    print(f"### WALK-FORWARD BACKTEST v1.0")
-    print(f"### History: {total_days} days | Windows: {n_windows}")
-    print(f"### Symbols: {SYMS}")
-    print("#" * 78)
+    print("#" * 70)
+    print("### MULTI v9.30-fix [final] [" + mode + "]")
+    print("#" * 70)
+    print("### MIN_SCORE: " + str(MIN_SCORES))
+    print("### BANNED:   " + str(sorted(BANNED)))
+    print("### FEES:     " + ("%.3f%%" % FEE_PCT) +
+          " + SLIP " + ("%.3f%%" % SLIP_PCT))
+    print("### FIXED_RR: 2.0")
+    print("### WEAK_SYMS: " + str(sorted(WEAK_SYMS)))
+    print("### CFG_STRONG: " + str(CFG_STRONG))
+    print("### CFG_DEF:    " + str(CFG_DEF))
+    print("### CFG_WEAK:   " + str(CFG_WEAK))
+    print("#" * 70)
 
-    # Тянем историю
-    need_1h = int(total_days * 24) + WF_WARMUP_HOURS + 50
-    need_15m = int(total_days * 96) + 200
-    need_5m = int(total_days * 288) + 500
-    need_d1 = 250
-
-    print("")
-    print(">>> Loading history...")
-
-    all_data = {}
-    for sym in SYMS:
+    summary = []
+    for sym in syms:
         try:
-            c1d = get_klines_history("1d", need_d1, sym)
-            c1h = get_klines_history("1h", need_1h, sym)
-            c15 = get_klines_history("15m", need_15m, sym)
-            c5 = get_klines_history("5m", need_5m, sym)
-            all_data[sym] = (c1d, c1h, c15, c5)
-            print(f"  {sym}: 1H={len(c1h)} 15M={len(c15)} 5M={len(c5)}")
-        except Exception as e:
-            print(f"  {sym}: ERROR {e}")
-
-    if not all_data:
-        print("Нет данных.")
-        return
-
-    # Определяем общий диапазон
-    min_ts = None
-    max_ts = None
-    for sym, (_, c1h, _, _) in all_data.items():
-        if not c1h:
-            continue
-        t0 = c1h[0]["open_time"]
-        t1 = c1h[-1]["open_time"]
-        if min_ts is None or t0 > min_ts:
-            min_ts = t0  # берём ПЕРВУЮ общую свечу
-        if max_ts is None or t1 < max_ts:
-            max_ts = t1
-
-    if min_ts is None or max_ts is None:
-        print("Нет общих свечей.")
-        return
-
-    span_ms = max_ts - min_ts
-    span_days = span_ms / (24 * 3600 * 1000)
-    win_ms = span_ms // n_windows
+            trades = run_one(sym, max_h)
+            rep(sym, trades)
+            st = stats(trades)
+            summary.append((sym, st))
+        except Exception as ex:
+            print("[BT] " + sym + " FAILED: " + str(ex))
+            summary.append((sym, {
+                "n": 0, "tp": 0, "sl": 0, "be": 0,
+                "to": 0, "ph": 0, "wr": 0.0,
+                "total": 0.0, "avg": 0.0, "mdd": 0.0,
+                "be_pos": 0, "be_zero": 0, "be_neg": 0}))
 
     print("")
-    print(f">>> Span: {span_days:.1f} days")
-    print(f">>> Window size: {win_ms / (24 * 3600 * 1000):.1f} days")
-    print("")
+    print("=" * 82)
+    print("СВОДКА v9.30-fix [" + mode + "]")
+    print("=" * 82)
+    print("Символ      MS   N   TP  SL  BE  TO   WR      Avg     Total     MDD")
+    print("-" * 82)
 
-    # Прогоняем каждое окно
-    window_results = []
+    t_n = t_tp = t_sl = t_be = t_to = 0
+    t_total = 0.0
 
-    for w in range(n_windows):
-        w_start = min_ts + w * win_ms
-        w_end = min_ts + (w + 1) * win_ms - 1
+    for sym, st in summary:
+        ms = get_ms(sym)
+        line = sym.ljust(11)
+        line += str(ms).ljust(4)
+        line += str(st["n"]).ljust(4)
+        line += str(st["tp"]).ljust(4)
+        line += str(st["sl"]).ljust(4)
+        line += str(st["be"]).ljust(4)
+        line += str(st["to"]).ljust(4)
+        line += ("%.1f" % st["wr"]).ljust(8)
+        line += ("%+.3f" % st["avg"]).ljust(8)
+        line += ("%+.2f" % st["total"]).ljust(10)
+        line += "%.2f" % st["mdd"]
+        print(line)
 
-        # Warmup — данные до начала окна (для расчёта EMA, ATR, свингов)
-        warmup_start = w_start - tf_hours_to_ms(WF_WARMUP_HOURS)
+        t_n += st["n"]
+        t_tp += st["tp"]
+        t_sl += st["sl"]
+        t_be += st["be"]
+        t_to += st["to"]
+        t_total += st["total"]
 
-        print("=" * 78)
-        print(f"### WINDOW {w + 1}/{n_windows} "
-              f"({(w_start - min [],
-_               ts) / (24 * 3600 * 1000):. c1f1} "
-              f"→ {(w_end - min_ts) / (24 * 3600 * 1000):.1df} days)")
-        print("=" * 78_w)
+    print("-" * 82)
+    r = t_tp + t_sl
+    twr = (t_tp / r * 100.0) if r > 0 else 0.0
+    tavg = (t_total / t_n) if t_n else 0.0
+    line = "ИТОГО".ljust(15)
+    line += str(t_n).ljust(4)
+    line += str(t_tp).ljust(4)
+    line += str(t_sl).ljust(4)
+    line += str(t_be).ljust(4)
+    line += str(t_to).ljust(4)
+    line += ("%.1f" % twr).ljust(8)
+    line += ("%+.3f" % tavg).ljust(8)
+    line += ("%+.2f" % t_total)
+    print(line)
+    print("=" * 82)
 
-        w_trades = []
-        for sym in SYMS:
-            if sym not in all_data:
-                continue
-            c1d, c1h, c15, c5 = all_data[sym]
 
-            # Обрезаем массивы: всё что раньше w_end
-            c1h_w = [c for c in c1h if c["open_time"] <= w_end]
-            c15_w = [c for c in c15 if c["open_time"] <= w_end]
-            c5_w = [c for c in c5 if c["open_time"] <= w_end]
-            c1d_w = [c for c in c1d if c["open_time"] <= w_end]
-
-            tr = run_window(
-                sym, c1h_w, c15_w, c5_w,, w_start, w_end, warmup_start)
-            w_trades.extend(tr)
-
-        st = compute_stats(w_trades)
-        window_results.append(st)
-
-        print(f"  Trades: {st['n']:3d} | "
-              f"TP: {st['tp']:2d} | "
-              f"SL: {st['sl']:2d} | "
-              f"BE+: {st['be_pos']:2d} | "
-              f"WR: {st['wr']:5.1f}% | "
-              f"Avg: {st['avg']:+.2f}% | "
-              f"Total: {st['total']:+.2f}% | "
-              f"MDD: {st['mdd']:.2f}%")
-        print("")
-
-    # ============================================================
-    # ИТОГИ
-    # ============================================================
-
-    print("=" * 78)
-    print("### WALK-FORWARD SUMMARY")
-    print("=" * 78)
-    print("")
-    print(f"{'Win':<5} {'N':<5} {'TP':<4} {'SL':<4} "
-          f"{'BE+':<4} {'WR%':<7} {'Avg%':<9} "
-          f"{'Total%':<10} {'MDD%':<7}")
-    print("-" * 78)
-
-    for i, st in enumerate(window_results):
-        print(f"{i + 1:<5} {st['n']:<5} {st['tp']:<4} "
-              f"{st['sl']:<4} {st['be_pos']:<4} "
-              f"{st['wr']:<7.1f} {st['avg']:<+9.2f} "
-              f"{st['total']:<+10.2f} {st['mdd']:<7.2f}")
-
-    print("-" * 78)
-
-    # Агрегаты
-    wrs = [st["wr"] for st in window_results if st["n"] > 0]
-    totals = [st["total"] for st in window_results]
-    avgs = [st["avg"] for st in window_results if st["n"] > 0]
-
-    if wrs:
-        wr_mean = mean(wrs)
-        wr_std = stdev(wrs) if len(wrs) > 1 else 0.0
-    else:
-        wr_mean = wr_std = 0.0
-
-    total_sum = sum(totals)
-    avg_mean = mean(avgs) if avgs else 0.0
-
-    n_total = sum(st["n"] for st in window_results)
-    tp_total = sum(st["tp"] for st in window_results)
-    sl_total = sum(st["sl"] for st in window_results)
-    be_total = sum(st["be"] for st in window_results)
-
-    print("")
-    print(f"Total trades: {n_total}")
-    print(f"Total TP: {tp_total}, SL: {sl_total}, BE: {be_total}")
-    print(f"WR mean: {wr_mean:.1f}%  (std: {wr_std:.1f})")
-    print(f"Avg per window: {avg_mean:+.2f}%")
-    print(f"Total sum: {total_sum:+.2f}%")
-    print("")
-
-    # ============================================================
-    # ВЕРДИКТ
-    # ============================================================
-
-    print("=" * 78)
-    print("### VERDICT")
-    print("=" * 78)
-    print("")
-
-    if n_total < 15:
-        print("⚠️  Мало сделок (<15) — выводы ненадёжны.")
-        print("    Прогони на большем периоде (--days=90).")
-    else:
-        if wr_mean >= 45 and wr_std <= 12:
-            print("✅ STRATEGY IS ROBUST")
-            print(f"   WR стабильно высокий ({wr_mean:.1f}%), "
-                  f"разброс небольшой ({wr_std:.1f}).")
-            print("   Можно торговать в реале.")
-
-        elif wr_mean >= 45 and wr_std > 12:
-            print("⚠️  STRATEGY IS VOLATILE")
-            print(f"   WR высокий ({wr_mean:.1f}%), но разброс "
-                  f"большой ({wr_std:.1f}).")
-            print("   Возможно, некоторые окна дают WR 20-30%.")
-            print("   Рекомендуется: снизить риск, добавить фильтр по режиму.")
-
-        elif wr_mean >= 35:
-            print("⚠️  STRATEGY IS MARGINAL")
-            print(f"   WR средний ({wr_mean:.1f}%). "
-                  f"Не факт, что edge положительный.")
-            print("   Рекомендуется: пересмотреть параметры, "
-                  "попробовать walk-forward оптимизацию.")
-
-        else:
-            print("❌ STRATEGY IS OVERFIT")
-            print(f"   WR низкий ({wr_mean:.1f}%). "
-                  f"Стратегия НЕ работает на новых данных.")
-            print("   Рекомендуется: полностью пересмотреть логику.")
-
-        # Проверка на «минусовые окна»
-        neg_windows = sum(1 for t in totals if t < 0)
-        if neg_windows >= n_windows // 2:
-            print("")
-            print(f"❌ {neg_windows} из {n_windows} окон "
-                  f"убыточные — стратегия нестабильна.")
-
-    print("")
+def main(max_hours=24, research=False, syms=None):
+    global RESEARCH_MODE
+    RESEARCH_MODE = bool(research)
+    if syms is None:
+        syms = list(ALL_SYMS)
+    run_multi(max_hours, syms)
 
 
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    _mh = 24
+    _rs = False
+    for _a in _sys.argv[1:]:
+        if _a.startswith("--max-hours="):
+            try:
+                _mh = int(_a.split("=", 1)[1])
+            except Exception:
+                pass
+        elif _a == "--research":
+            _rs = True
+    main(_mh, _rs)
