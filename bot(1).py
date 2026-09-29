@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind bot v9.30.1-FIX2.
+TradeMind bot v9.30.2-FIX3.
 - Монитор запускается ЯВНО в _run_polling_forever (гарантированно)
 - _ensure_monitor_started защищает от двойного запуска
+- close_trade: корректная классификация SL/BE/positive-exit
+- Добавлена команда /wf (walk-forward backtest)
 - Debug-логи монитора
 - Совместим со strategy v9.30.1 (+71.48R)
 """
@@ -86,7 +88,7 @@ SCORE_STRONG = 95
 CFG_STRONG = (1.0, 1.8, 1.2, 30, 30)
 CFG_DEF = (0.9, 1.6, 1.1, 40, 25)
 CFG_WEAK = (0.5, 1.1, 0.8, 50, 25)
-WEAK_SYMS = {"SUIUSDT", "APTUSDT", "BCHUSDT"}
+WEAK_SYMS = set()
 
 BLOCK_CONFLICTING_TRADES = True
 
@@ -103,7 +105,6 @@ PULLBACK_NOTIF_DEDUP_HOURS = 1
 COINS = {
     "XRP": "XRPUSDT",
     "BCH": "BCHUSDT",
-    "APT": "APTUSDT",
     "SUI": "SUIUSDT",
     "INJ": "INJUSDT",
 }
@@ -114,7 +115,7 @@ MIN_SCORE_MAP = {
     "default": 90,
     "INJUSDT": 88,
     "BCHUSDT": 92,
-    "APTUSDT": 93,
+    "SUIUSDT": 90,
 }
 
 MIN_SCORE_READY = 90
@@ -653,7 +654,7 @@ def dashboard_message(results, chat_id=None):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     lines = [
-        "🧠 <b>TRADEMIND v9.30.1</b>",
+        "🧠 <b>TRADEMIND v9.30.2</b>",
         f"<code>v{escape(str(STRATEGY_VERSION))}</code>",
         f"<code>mode: {mode_label}</code>",
         "",
@@ -704,7 +705,7 @@ def dashboard_message(results, chat_id=None):
         "",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🧭 <b>СТРАТЕГИЯ 9.30.1</b>",
+        "🧭 <b>СТРАТЕГИЯ 9.30.2</b>",
         "",
         "Entry = ILM trigger",
         "SL = structural + ATR",
@@ -1117,6 +1118,7 @@ def activate_trade(setup, chat_id):
 
 
 def close_trade(trade, exit_price, rtype):
+    """v9.30.2: корректная классификация SL/BE/positive-exit."""
     with _storage_lock:
         active = load_active_trades()
         target = None
@@ -1127,21 +1129,29 @@ def close_trade(trade, exit_price, rtype):
         if target is None:
             return None
 
-        target["status"] = rtype
-        target["result"] = rtype
+        entry = target.get("entry")
+        direction = target.get("direction")
+        pnl = calc_pnl(entry, exit_price, direction)
+
+        real_rtype = rtype
+        if rtype == "SL" and pnl is not None and pnl > 0.1:
+            real_rtype = "BE"
+            print(
+                f"[CLOSE] {target.get('coin')} SL→BE "
+                f"(pnl={pnl:+.2f}%)", flush=True)
+
+        target["status"] = real_rtype
+        target["result"] = real_rtype
         target["exit_price"] = float(exit_price)
         target["closed_at"] = now_iso()
         target["closed_at_ms"] = now_ms()
-        target["pnl_percent"] = calc_pnl(
-            target.get("entry"),
-            exit_price,
-            target.get("direction"))
+        target["pnl_percent"] = pnl
 
         save_active_trades(active)
 
         journal = load_journal()
         je = dict(target)
-        je["result"] = rtype
+        je["result"] = real_rtype
         journal.append(je)
         save_journal(journal)
     return target
@@ -1367,6 +1377,9 @@ def trade_close_message(trade):
     if rt == "TP":
         icon = "✅"
         title = "TP"
+    elif rt == "BE":
+        icon = "🛡"
+        title = "BE (positive exit)"
     elif rt == "SL":
         icon = "❌"
         title = "SL"
@@ -1724,6 +1737,7 @@ def journal_message(chat_id):
     total = len(journal)
     tp = 0
     sl = 0
+    be = 0
     amb = 0
     for x in journal:
         r = x.get("result")
@@ -1731,6 +1745,8 @@ def journal_message(chat_id):
             tp += 1
         elif r == "SL":
             sl += 1
+        elif r == "BE":
+            be += 1
         elif r == "AMBIGUOUS":
             amb += 1
 
@@ -1752,8 +1768,9 @@ def journal_message(chat_id):
         f"📊 Сделок: <b>{total}</b>",
         f"✅ TP: <b>{tp}</b>",
         f"❌ SL: <b>{sl}</b>",
+        f"🛡 BE: <b>{be}</b>",
         f"⚪ Amb: <b>{amb}</b>",
-        f"🎯 WR: <b>{wr:.1f}%</b>",
+        f"🎯 WR: <b>{wr:.1f}%</b> (TP/(TP+SL))",
         f"📈 PnL: <b>{total_pnl:+.2f}%</b>",
         "",
         "<b>Последние:</b>", "",
@@ -1762,6 +1779,7 @@ def journal_message(chat_id):
     for t in reversed(journal[-10:]):
         rt = t.get("result", "?")
         ic = {"TP": "✅", "SL": "❌",
+              "BE": "🛡",
               "AMBIGUOUS": "⚪"}.get(rt, "❔")
         p = t.get("pnl_percent")
         if p is not None:
@@ -1992,7 +2010,7 @@ async def backtest_cmd(update, context):
 
     await update.message.reply_text(
         f"⏳ <b>ЗАПУСК БЭКТЕСТА</b>\n\n"
-        f"💠 Пары: XRP, BCH, APT, SUI, INJ\n\n"
+        f"💠 Пары: XRP, BCH, SUI, INJ\n\n"
         f"Ход прогона — в логах BotHost.\n"
         f"Отчёт придёт <b>.txt-файлом</b>.",
         parse_mode="HTML")
@@ -2075,7 +2093,7 @@ async def backtest_cmd(update, context):
 
     header = (
         "✅ <b>БЭКТЕСТ ЗАВЕРШЁН</b>\n"
-        "💠 Пары: XRP, BCH, APT, SUI, INJ\n"
+        "💠 Пары: XRP, BCH, SUI, INJ\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
     )
 
@@ -2099,6 +2117,106 @@ async def backtest_cmd(update, context):
                 parse_mode="HTML")
         except Exception as e2:
             print("BACKTEST SEND TEXT ERR:", e2, flush=True)
+
+
+async def wf_cmd(update, context):
+    """v9.30.2: Walk-forward тест."""
+    if context.application.bot_data.get("wf_running"):
+        await update.message.reply_text(
+            "⏳ Walk-forward уже выполняется.")
+        return
+
+    context.application.bot_data["wf_running"] = True
+
+    await update.message.reply_text(
+        f"⏳ <b>WALK-FORWARD ТЕСТ</b>\n\n"
+        f"💠 Пары: XRP, BCH, SUI, INJ\n"
+        f"⏱ Период: 60 дней / 6 окон\n\n"
+        f"Ход прогона — в логах BotHost.\n"
+        f"Отчёт придёт <b>.txt-файлом</b>.",
+        parse_mode="HTML")
+
+    def _run_sync():
+        class Tee:
+            def __init__(self, *streams):
+                self.streams = streams
+
+            def write(self, s):
+                for st in self.streams:
+                    try:
+                        st.write(s)
+                        st.flush()
+                    except Exception:
+                        pass
+
+            def flush(self):
+                for st in self.streams:
+                    try:
+                        st.flush()
+                    except Exception:
+                        pass
+
+        buf = io.StringIO()
+        try:
+            real_stdout = sys.__stdout__
+        except Exception:
+            real_stdout = sys.stdout
+        tee = Tee(real_stdout, buf)
+
+        try:
+            import backtest_wf as wf_module
+            import importlib
+            try:
+                importlib.reload(wf_module)
+            except Exception:
+                pass
+            with contextlib.redirect_stdout(tee):
+                wf_module.main()
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                tee.write(
+                    f"\n\n❌ ОШИБКА WF: {e}\n{tb}\n")
+            except Exception:
+                pass
+        return buf.getvalue()
+
+    try:
+        report = await asyncio.to_thread(_run_sync)
+    finally:
+        context.application.bot_data["wf_running"] = False
+
+    if not report:
+        report = "(пусто)"
+
+    try:
+        with open("wf_report.txt", "w",
+                  encoding="utf-8") as f:
+            f.write(report)
+    except Exception:
+        pass
+
+    header = (
+        "✅ <b>WALK-FORWARD ЗАВЕРШЁН</b>\n"
+        "💠 Пары: XRP, BCH, SUI, INJ\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    try:
+        fbytes = io.BytesIO(report.encode("utf-8"))
+        fbytes.seek(0)
+        await update.message.reply_document(
+            document=InputFile(
+                fbytes, filename="wf_report.txt"),
+            caption=header,
+            parse_mode="HTML")
+    except Exception as e:
+        print("WF SEND ERR:", e, flush=True)
+        preview = report[:3500]
+        await update.message.reply_text(
+            header + f"<pre>{escape(preview)}</pre>",
+            parse_mode="HTML")
 
 
 def png_chunk(ctype, data):
@@ -2487,7 +2605,7 @@ async def status_cmd(update, context):
     mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
 
     text = (
-        f"⚙️ <b>TRADEMIND STATUS</b>\n\n"
+        f"⚙️ <b>TRADEMIND STATUS v9.30.2</b>\n\n"
         f"Version: "
         f"<b>{escape(str(STRATEGY_VERSION))}</b>\n"
         f"Mode: <b>{mode_label}</b>\n"
@@ -2496,7 +2614,7 @@ async def status_cmd(update, context):
         f"Active: <b>{n_active}</b>\n"
         f"Journal: <b>{len(journal)}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 <b>MODEL 9.30.1</b>\n\n"
+        f"🎯 <b>MODEL 9.30.2</b>\n\n"
         f"💰 P1: <b>{PARTIAL_TP_TRIGGER_R}R</b>"
         f" ({PARTIAL_TP_PERCENT}%)\n"
         f"💰 P2: "
@@ -2511,7 +2629,8 @@ async def status_cmd(update, context):
         f"💰 Partial: <b>{pt}</b>\n"
         f"❄️ Cooldown: <b>{cd}</b>\n"
         f"📈 SHORT: <b>{sh}</b>\n\n"
-        f"🧪 Бэктест: /backtest\n\n"
+        f"🧪 Бэктест: /backtest\n"
+        f"📊 Walk-forward: /wf\n\n"
         f"🕐 Работаем 24/7"
     )
     await update.message.reply_text(
@@ -2520,9 +2639,7 @@ async def status_cmd(update, context):
 
 
 def _ensure_monitor_started(app, source="unknown"):
-    """v9.30.1-FIX2: единая точка запуска монитора.
-    Безопасно вызывать из post_init И из _run_polling_forever —
-    второй вызов видит флаг monitor_started и выходит."""
+    """v9.30.1-FIX2: единая точка запуска монитора."""
     if app.bot_data.get("monitor_started"):
         print(
             f"[MONITOR] already started "
@@ -3001,7 +3118,7 @@ async def callbacks(update, context):
             cd = "OFF"
         mode_label = "WEBHOOK" if USE_WEBHOOK else "POLLING"
         text = (
-            f"⚙️ <b>STATUS</b>\n\n"
+            f"⚙️ <b>STATUS v9.30.2</b>\n\n"
             f"v{escape(str(STRATEGY_VERSION))}\n"
             f"Mode: <b>{mode_label}</b>\n"
             f"Coins: <b>{len(COINS)}</b>\n"
@@ -3018,7 +3135,8 @@ async def callbacks(update, context):
             f"Partial: <b>{pt}</b>\n"
             f"Cooldown: <b>{cd}</b>\n"
             f"SHORT: <b>{sh}</b>\n\n"
-            f"🧪 Бэктест: /backtest"
+            f"🧪 Бэктест: /backtest\n"
+            f"📊 Walk-forward: /wf"
         )
         await edit_query(query, text,
                          dashboard_keyboard())
@@ -3052,6 +3170,7 @@ async def post_init(application):
         ("journal", "Журнал"),
         ("status", "Статус"),
         ("backtest", "Запустить бэктест"),
+        ("wf", "Walk-forward тест"),
         ("subscribe", "Вкл увед"),
         ("unsubscribe", "Выкл увед"),
     ]
@@ -3110,7 +3229,6 @@ async def _run_polling_forever(app):
         print(f"[POLLING] updater patch warn: {e}",
               flush=True)
 
-    # v9.30.1-FIX2: явный запуск монитора в рабочем loop
     print("[POLLING] starting monitor task explicitly",
           flush=True)
     _ensure_monitor_started(app, "_run_polling_forever")
@@ -3212,6 +3330,7 @@ def main():
         ("journal", journal_cmd),
         ("status", status_cmd),
         ("backtest", backtest_cmd),
+        ("wf", wf_cmd),
         ("subscribe", sub_cmd),
         ("unsubscribe", unsub_cmd),
     ]
