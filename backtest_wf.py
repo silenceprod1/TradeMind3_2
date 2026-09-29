@@ -1,18 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind walk-forward backtest v1.0.
-
-Идея: разбить историю на N окон по W дней,
-прогнать стратегию на каждом окне отдельно,
-показать стабильность метрик.
-
-Использование:
-    python backtest_wf.py
-    python backtest_wf.py --days=60 --windows=6
+TradeMind walk-forward backtest v1.1
+Fix: убраны проблемные f-строки для копипаста.
 """
 
 import sys
-import time
 from statistics import mean, stdev
 
 from market import (
@@ -24,42 +16,25 @@ from strategy import analyze, get_1h_direction
 
 from backtest import (
     sim, get_cfg, get_ms, c_until,
-    CFG_STRONG, CFG_DEF, CFG_WEAK,
-    FEE_PCT, SLIP_PCT, WEAK_SYMS,
-    MIN_SCORES,
+    FEE_PCT, SLIP_PCT,
 )
 
 
-# ============================================================
-# КОНФИГ WF
-# ============================================================
-
-WF_DAYS = 60           # сколько дней истории всего тянем
-WF_WINDOWS = 6         # на сколько окон делим
-WF_WARMUP_HOURS = 200  # сколько 1H-свечей нужно для прогрева
-WF_MAX_HOURS = 24      # макс. время удержания сделки
+WF_DAYS = 60
+WF_WINDOWS = 6
+WF_WARMUP_HOURS = 200
+WF_MAX_HOURS = 24
 
 SYMS = [
     "XRPUSDT", "BCHUSDT", "SUIUSDT", "INJUSDT",
-    # "APTUSDT",  # убран — убыточный
 ]
 
-
-# ============================================================
-# ХЕЛПЕРЫ
-# ============================================================
 
 def tf_hours_to_ms(h):
     return int(h * 3600 * 1000)
 
 
-def get_window_slice(candles, start_ms, end_ms):
-    return [c for c in candles
-            if start_ms <= c["open_time"] <= end_ms]
-
-
 def compute_stats(trades):
-    """Считает WR, Total R, Avg R, MDD, BE+."""
     if not trades:
         return {
             "n": 0, "tp": 0, "sl": 0, "be": 0,
@@ -68,7 +43,11 @@ def compute_stats(trades):
             "mdd": 0.0,
         }
 
-    tp = sl = be = be_pos = to = 0
+    tp = 0
+    sl = 0
+    be = 0
+    be_pos = 0
+    to = 0
     for t in trades:
         rt = t["result"]
         pnl = t.get("pnl", 0.0)
@@ -84,36 +63,38 @@ def compute_stats(trades):
             to += 1
 
     r = tp + sl
-    wr = (tp / r * 100.0) if r > 0 else 0.0
-    total = sum(t["pnl"] for t in trades)
+    if r > 0:
+        wr = tp / r * 100.0
+    else:
+        wr = 0.0
 
-    eq = peak = mdd = 0.0
+    total = sum(t["pnl"] for t in trades)
+    eq = 0.0
+    peak = 0.0
+    mdd = 0.0
     for t in trades:
         eq += t["pnl"]
-        peak = max(peak, eq)
-        mdd = max(mdd, peak - eq)
+        if eq > peak:
+            peak = eq
+        dd = peak - eq
+        if dd > mdd:
+            mdd = dd
 
-    avg = total / len(trades) if trades else 0.0
+    avg = 0.0
+    if trades:
+        avg = total / len(trades)
 
     return {
         "n": len(trades),
-        "tp": tp, "sl": sl, "be": be, "be_pos": be_pos,
-        "to": to, "wr": wr, "total": total,
+        "tp": tp, "sl": sl, "be": be,
+        "be_pos": be_pos, "to": to,
+        "wr": wr, "total": total,
         "avg": avg, "mdd": mdd,
     }
 
 
-# ============================================================
-# ПРОГОН ОДНОГО ОКНА
-# ============================================================
-
 def run_window(sym, c1h, c15, c5, c1m, c1d,
-               win_start_ms, win_end_ms,
-               warmup_ms):
-    """
-    Прогоняет стратегию на конкретном окне [win_start, win_end].
-    Для прогрева берёт данные ДО win_start (warmup_ms).
-    """
+               win_start_ms, win_end_ms):
     sym_n = _normalize_symbol(sym)
     ms = get_ms(sym_n)
 
@@ -123,18 +104,14 @@ def run_window(sym, c1h, c15, c5, c1m, c1d,
     for i in range(len(c1h)):
         ts = c1h[i]["open_time"]
 
-        # Начало окна — пропускаем
         if ts < win_start_ms:
             continue
-        # Конец окна — стоп
         if ts > win_end_ms:
             break
 
-        # Cooldown
         if ts < cooldown_until_ms:
             continue
 
-        # Собираем контекст
         cc1h = c1h[:i]
         cc15 = c_until(c15, ts)
         cc5 = c_until(c5, ts)
@@ -144,16 +121,17 @@ def run_window(sym, c1h, c15, c5, c1m, c1d,
         if len(cc15) < 60 or len(cc5) < 60:
             continue
 
-        price = cc1[-1]["close"] if cc1 else cc1h[-1]["close"]
+        if cc1:
+            price = cc1[-1]["close"]
+        else:
+            price = cc1h[-1]["close"]
 
-        # Ликвидность
         try:
             lv = find_major_liquidity(
                 cc1h, price, 12, cc15, cc5, cc1)
         except Exception:
             continue
 
-        # Анализ
         try:
             d = get_1h_direction(cc1h)
             sw = None
@@ -214,22 +192,20 @@ def run_window(sym, c1h, c15, c5, c1m, c1d,
         })
         trades.append(trade)
 
-        # Cooldown после SL: 3ч, после 2 SL подряд — 6ч
         if rtype == "SL":
             cooldown_until_ms = xts + 3 * 3600 * 1000
 
     return trades
 
 
-# ============================================================
-# MAIN
-# ============================================================
+def days_between(ts1, ts2):
+    return (ts2 - ts1) / (24 * 3600 * 1000)
+
 
 def main():
     total_days = WF_DAYS
     n_windows = WF_WINDOWS
 
-    # Парсим аргументы
     for a in sys.argv[1:]:
         if a.startswith("--days="):
             try:
@@ -243,13 +219,13 @@ def main():
                 pass
 
     print("")
-    print("#" * 78)
-    print(f"### WALK-FORWARD BACKTEST v1.0")
-    print(f"### History: {total_days} days | Windows: {n_windows}")
-    print(f"### Symbols: {SYMS}")
-    print("#" * 78)
+    print("=" * 78)
+    print("### WALK-FORWARD BACKTEST v1.1")
+    print("### History days: " + str(total_days))
+    print("### Windows: " + str(n_windows))
+    print("### Symbols: " + str(SYMS))
+    print("=" * 78)
 
-    # Тянем историю
     need_1h = int(total_days * 24) + WF_WARMUP_HOURS + 50
     need_15m = int(total_days * 96) + 200
     need_5m = int(total_days * 288) + 500
@@ -266,24 +242,26 @@ def main():
             c15 = get_klines_history("15m", need_15m, sym)
             c5 = get_klines_history("5m", need_5m, sym)
             all_data[sym] = (c1d, c1h, c15, c5)
-            print(f"  {sym}: 1H={len(c1h)} 15M={len(c15)} 5M={len(c5)}")
+            print("  " + sym + ": 1H=" + str(len(c1h))
+                  + " 15M=" + str(len(c15))
+                  + " 5M=" + str(len(c5)))
         except Exception as e:
-            print(f"  {sym}: ERROR {e}")
+            print("  " + sym + ": ERROR " + str(e))
 
     if not all_data:
         print("Нет данных.")
         return
 
-    # Определяем общий диапазон
     min_ts = None
     max_ts = None
-    for sym, (_, c1h, _, _) in all_data.items():
+    for sym in all_data:
+        c1d, c1h, c15, c5 = all_data[sym]
         if not c1h:
             continue
         t0 = c1h[0]["open_time"]
         t1 = c1h[-1]["open_time"]
         if min_ts is None or t0 > min_ts:
-            min_ts = t0  # берём ПЕРВУЮ общую свечу
+            min_ts = t0
         if max_ts is None or t1 < max_ts:
             max_ts = t1
 
@@ -292,30 +270,27 @@ def main():
         return
 
     span_ms = max_ts - min_ts
-    span_days = span_ms / (24 * 3600 * 1000)
+    span_days = days_between(min_ts, max_ts)
     win_ms = span_ms // n_windows
 
     print("")
-    print(f">>> Span: {span_days:.1f} days")
-    print(f">>> Window size: {win_ms / (24 * 3600 * 1000):.1f} days")
+    print(">>> Span days: " + str(round(span_days, 1)))
+    print(">>> Window size days: " + str(round(days_between(0, win_ms), 1)))
     print("")
 
-    # Прогоняем каждое окно
     window_results = []
 
     for w in range(n_windows):
         w_start = min_ts + w * win_ms
         w_end = min_ts + (w + 1) * win_ms - 1
 
-        # Warmup — данные до начала окна (для расчёта EMA, ATR, свингов)
-        warmup_start = w_start - tf_hours_to_ms(WF_WARMUP_HOURS)
-
         print("=" * 78)
-        print(f"### WINDOW {w + 1}/{n_windows} "
-              f"({(w_start - min [],
-_               ts) / (24 * 3600 * 1000):. c1f1} "
-              f"→ {(w_end - min_ts) / (24 * 3600 * 1000):.1df} days)")
-        print("=" * 78_w)
+        wd1 = days_between(min_ts, w_start)
+        wd2 = days_between(min_ts, w_end)
+        print("### WINDOW " + str(w + 1) + "/" + str(n_windows))
+        print("### From day " + str(round(wd1, 1))
+              + " to day " + str(round(wd2, 1)))
+        print("=" * 78)
 
         w_trades = []
         for sym in SYMS:
@@ -323,80 +298,99 @@ _               ts) / (24 * 3600 * 1000):. c1f1} "
                 continue
             c1d, c1h, c15, c5 = all_data[sym]
 
-            # Обрезаем массивы: всё что раньше w_end
             c1h_w = [c for c in c1h if c["open_time"] <= w_end]
             c15_w = [c for c in c15 if c["open_time"] <= w_end]
             c5_w = [c for c in c5 if c["open_time"] <= w_end]
             c1d_w = [c for c in c1d if c["open_time"] <= w_end]
 
             tr = run_window(
-                sym, c1h_w, c15_w, c5_w,, w_start, w_end, warmup_start)
+                sym, c1h_w, c15_w, c5_w, [],
+                c1d_w, w_start, w_end)
             w_trades.extend(tr)
 
         st = compute_stats(w_trades)
         window_results.append(st)
 
-        print(f"  Trades: {st['n']:3d} | "
-              f"TP: {st['tp']:2d} | "
-              f"SL: {st['sl']:2d} | "
-              f"BE+: {st['be_pos']:2d} | "
-              f"WR: {st['wr']:5.1f}% | "
-              f"Avg: {st['avg']:+.2f}% | "
-              f"Total: {st['total']:+.2f}% | "
-              f"MDD: {st['mdd']:.2f}%")
+        line = "  N=" + str(st["n"])
+        line += " TP=" + str(st["tp"])
+        line += " SL=" + str(st["sl"])
+        line += " BE+=" + str(st["be_pos"])
+        line += " WR=" + str(round(st["wr"], 1)) + "%"
+        line += " Avg=" + str(round(st["avg"], 2)) + "%"
+        line += " Total=" + str(round(st["total"], 2)) + "%"
+        line += " MDD=" + str(round(st["mdd"], 2)) + "%"
+        print(line)
         print("")
-
-    # ============================================================
-    # ИТОГИ
-    # ============================================================
 
     print("=" * 78)
     print("### WALK-FORWARD SUMMARY")
     print("=" * 78)
     print("")
-    print(f"{'Win':<5} {'N':<5} {'TP':<4} {'SL':<4} "
-          f"{'BE+':<4} {'WR%':<7} {'Avg%':<9} "
-          f"{'Total%':<10} {'MDD%':<7}")
+
+    header = "Win  N   TP  SL  BE+ WR%    Avg%    Total%   MDD%"
+    print(header)
     print("-" * 78)
 
-    for i, st in enumerate(window_results):
-        print(f"{i + 1:<5} {st['n']:<5} {st['tp']:<4} "
-              f"{st['sl']:<4} {st['be_pos']:<4} "
-              f"{st['wr']:<7.1f} {st['avg']:<+9.2f} "
-              f"{st['total']:<+10.2f} {st['mdd']:<7.2f}")
+    for i in range(len(window_results)):
+        st = window_results[i]
+        line = str(i + 1).ljust(4)
+        line += str(st["n"]).ljust(4)
+        line += str(st["tp"]).ljust(4)
+        line += str(st["sl"]).ljust(4)
+        line += str(st["be_pos"]).ljust(4)
+        line += str(round(st["wr"], 1)).ljust(7)
+        line += str(round(st["avg"], 2)).ljust(8)
+        line += str(round(st["total"], 2)).ljust(9)
+        line += str(round(st["mdd"], 2))
+        print(line)
 
     print("-" * 78)
 
-    # Агрегаты
-    wrs = [st["wr"] for st in window_results if st["n"] > 0]
-    totals = [st["total"] for st in window_results]
-    avgs = [st["avg"] for st in window_results if st["n"] > 0]
+    wrs = []
+    totals = []
+    avgs = []
+    for st in window_results:
+        if st["n"] > 0:
+            wrs.append(st["wr"])
+            avgs.append(st["avg"])
+        totals.append(st["total"])
 
     if wrs:
         wr_mean = mean(wrs)
-        wr_std = stdev(wrs) if len(wrs) > 1 else 0.0
+        if len(wrs) > 1:
+            wr_std = stdev(wrs)
+        else:
+            wr_std = 0.0
     else:
-        wr_mean = wr_std = 0.0
+        wr_mean = 0.0
+        wr_std = 0.0
 
     total_sum = sum(totals)
-    avg_mean = mean(avgs) if avgs else 0.0
+    if avgs:
+        avg_mean = mean(avgs)
+    else:
+        avg_mean = 0.0
 
-    n_total = sum(st["n"] for st in window_results)
-    tp_total = sum(st["tp"] for st in window_results)
-    sl_total = sum(st["sl"] for st in window_results)
-    be_total = sum(st["be"] for st in window_results)
+    n_total = 0
+    tp_total = 0
+    sl_total = 0
+    be_total = 0
+    for st in window_results:
+        n_total += st["n"]
+        tp_total += st["tp"]
+        sl_total += st["sl"]
+        be_total += st["be"]
 
     print("")
-    print(f"Total trades: {n_total}")
-    print(f"Total TP: {tp_total}, SL: {sl_total}, BE: {be_total}")
-    print(f"WR mean: {wr_mean:.1f}%  (std: {wr_std:.1f})")
-    print(f"Avg per window: {avg_mean:+.2f}%")
-    print(f"Total sum: {total_sum:+.2f}%")
+    print("Total trades: " + str(n_total))
+    print("Total TP: " + str(tp_total))
+    print("Total SL: " + str(sl_total))
+    print("Total BE: " + str(be_total))
+    print("WR mean: " + str(round(wr_mean, 1))
+          + "%  (std: " + str(round(wr_std, 1)) + ")")
+    print("Avg per window: " + str(round(avg_mean, 2)) + "%")
+    print("Total sum: " + str(round(total_sum, 2)) + "%")
     print("")
-
-    # ============================================================
-    # ВЕРДИКТ
-    # ============================================================
 
     print("=" * 78)
     print("### VERDICT")
@@ -404,41 +398,36 @@ _               ts) / (24 * 3600 * 1000):. c1f1} "
     print("")
 
     if n_total < 15:
-        print("⚠️  Мало сделок (<15) — выводы ненадёжны.")
-        print("    Прогони на большем периоде (--days=90).")
+        print("Мало сделок (<15). Выводы ненадёжны.")
+        print("Прогони на большем периоде: --days=90")
     else:
         if wr_mean >= 45 and wr_std <= 12:
-            print("✅ STRATEGY IS ROBUST")
-            print(f"   WR стабильно высокий ({wr_mean:.1f}%), "
-                  f"разброс небольшой ({wr_std:.1f}).")
-            print("   Можно торговать в реале.")
-
+            print("OK - STRATEGY IS ROBUST")
+            print("WR mean " + str(round(wr_mean, 1))
+                  + "% std " + str(round(wr_std, 1)))
+            print("Можно торговать в реале.")
         elif wr_mean >= 45 and wr_std > 12:
-            print("⚠️  STRATEGY IS VOLATILE")
-            print(f"   WR высокий ({wr_mean:.1f}%), но разброс "
-                  f"большой ({wr_std:.1f}).")
-            print("   Возможно, некоторые окна дают WR 20-30%.")
-            print("   Рекомендуется: снизить риск, добавить фильтр по режиму.")
-
+            print("WARN - STRATEGY IS VOLATILE")
+            print("WR mean " + str(round(wr_mean, 1))
+                  + "% std " + str(round(wr_std, 1)))
+            print("Снизить риск, добавить фильтр режима.")
         elif wr_mean >= 35:
-            print("⚠️  STRATEGY IS MARGINAL")
-            print(f"   WR средний ({wr_mean:.1f}%). "
-                  f"Не факт, что edge положительный.")
-            print("   Рекомендуется: пересмотреть параметры, "
-                  "попробовать walk-forward оптимизацию.")
-
+            print("WARN - STRATEGY IS MARGINAL")
+            print("WR mean " + str(round(wr_mean, 1)) + "%")
+            print("Edge слабый. Пересмотреть параметры.")
         else:
-            print("❌ STRATEGY IS OVERFIT")
-            print(f"   WR низкий ({wr_mean:.1f}%). "
-                  f"Стратегия НЕ работает на новых данных.")
-            print("   Рекомендуется: полностью пересмотреть логику.")
+            print("FAIL - STRATEGY IS OVERFIT")
+            print("WR mean " + str(round(wr_mean, 1)) + "%")
+            print("Стратегия не работает на новых данных.")
 
-        # Проверка на «минусовые окна»
-        neg_windows = sum(1 for t in totals if t < 0)
-        if neg_windows >= n_windows // 2:
+        neg = 0
+        for t in totals:
+            if t < 0:
+                neg += 1
+        if neg >= n_windows // 2:
             print("")
-            print(f"❌ {neg_windows} из {n_windows} окон "
-                  f"убыточные — стратегия нестабильна.")
+            print("FAIL: " + str(neg) + " из "
+                  + str(n_windows) + " окон убыточные.")
 
     print("")
 
