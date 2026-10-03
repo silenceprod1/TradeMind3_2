@@ -64,7 +64,14 @@ MAX_15M_CONFIRM_CANDLES = 24
 MAX_ILM_AGE_CANDLES_5M = 48
 
 MIN_5M_RECOVERY_RATIO = 0.15
-MIN_5M_ILM_SWEEP_DISTANCE_PCT = 5.0
+# Было 5.0 (~6 USDT на SOL) — фильтр «ILM рядом со sweep» фактически не работал.
+# 0.5% — стартовое значение, подбирается бэктестом (0.3–0.5).
+MIN_5M_ILM_SWEEP_DISTANCE_PCT = 0.5
+
+# Длительность свечи в мс: нужна, чтобы отсчитывать этапы цепочки
+# sweep(1H) -> подтверждение(15M) -> ILM(5M) от ЗАКРЫТИЯ предыдущей свечи.
+INTERVAL_MS_1H = 3_600_000
+INTERVAL_MS_15M = 900_000
 
 MIN_TREND_ACTIVITY_READY = 0.45
 COUNTER_TREND_MIN_SCORE = 88
@@ -222,6 +229,30 @@ def _dist_pct(a, b):
 # -------------------------------------------------------------------------
 # ИНДИКАТОРЫ И ТЕХНИЧЕСКИЕ РАСЧЕТЫ
 # -------------------------------------------------------------------------
+
+def _closed_only(candles, now_ms=None):
+    """Убирает с конца списка ещё не закрытые (формирующиеся) свечи.
+
+    Идемпотентна: в бэктесте, где в списке уже только закрытые свечи,
+    ничего не удаляется. Свечи без close_time остаются как есть.
+    В live Binance отдаёт формирующуюся свечу последней — её close_time
+    ещё в будущем. Небольшой сдвиг часов безопасен: в худшем случае
+    свеча считается закрытой на пару секунд позже.
+    """
+    if not candles:
+        return candles
+    if now_ms is None:
+        now_ms = time.time() * 1000.0
+    out = list(candles)
+    while out:
+        last = out[-1]
+        ct = _f(last.get("close_time")) if isinstance(last, dict) else None
+        if ct is not None and ct > now_ms:
+            out.pop()
+        else:
+            break
+    return out
+
 
 def calculate_atr(candles, period=14):
     if not candles or len(candles) < period + 1:
@@ -725,7 +756,10 @@ def confirmation_15m(candles_15m, sweep, direction):
         return False, None, None, False
 
     sweep_t = _f(sweep.get("open_time"))
-    candidates = [c for c in candles_15m if sweep_t is None or (_t(c) is not None and _t(c) > sweep_t)]
+    # open_time sweep-свечи 1H -> подтверждение ищем только в 15M-свечах,
+    # открывшихся ПОСЛЕ её закрытия (раньше брались свечи внутри самой sweep-свечи).
+    confirm_from = sweep_t + INTERVAL_MS_1H if sweep_t is not None else None
+    candidates = [c for c in candles_15m if confirm_from is None or (_t(c) is not None and _t(c) >= confirm_from)]
     candidates = candidates[-MAX_15M_CONFIRM_CANDLES:]
     if len(candidates) < 3:
         return False, None, None, False
@@ -894,8 +928,15 @@ def detect_5m_ilm(candles_5m, sweep, direction, conf_time=None):
     if not sweep or direction not in ("LONG", "SHORT"):
         return False, None
 
-    start = _f(conf_time) or _f(sweep.get("open_time"))
-    candles = [c for c in (candles_5m or []) if start is None or (_t(c) is not None and _t(c) > start)]
+    # conf_time — open_time подтверждающей 15M-свечи; ILM ищем только в 5M-свечах,
+    # открывшихся после её закрытия (раньше — внутри самой подтверждающей свечи).
+    conf_t = _f(conf_time)
+    if conf_t is not None:
+        start = conf_t + INTERVAL_MS_15M
+    else:
+        sw_t = _f(sweep.get("open_time"))
+        start = sw_t + INTERVAL_MS_1H if sw_t is not None else None
+    candles = [c for c in (candles_5m or []) if start is None or (_t(c) is not None and _t(c) >= start)]
     candles = candles[-MAX_5M_ILM_CANDLES:]
     if len(candles) < 5:
         return False, None
@@ -1416,6 +1457,13 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction, ctx_dir, d1_contex
 
 def analyze(candles_1h, candles_15m, candles_5m, current_price, major_levels=None, sweep=None, order_flow=None, candles_1m=None, d1_context=None, fvgs=None, symbol=None):
     price = _f(current_price)
+
+    # Анализ только по закрытым свечам: live и бэктест должны видеть одно и то же.
+    # D1 не трогаем — get_d1_trend_ema сам отбрасывает последнюю свечу.
+    candles_1h = _closed_only(candles_1h)
+    candles_15m = _closed_only(candles_15m)
+    candles_5m = _closed_only(candles_5m)
+
     ctx_dir = get_1h_direction(candles_1h)
 
     base = {
