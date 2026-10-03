@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import time
 
 
-STRATEGY_VERSION = "9.30.2"
+STRATEGY_VERSION = "9.30.3"
 
 ALLOW_SHORT = True
 
