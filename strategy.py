@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.30.2 (SMC Multi-Timeframe Strategy)
-- 1H: Поиск снятия ликвидности (SSL/BSL Sweeps) и определение глобального контекста.
-- 15M: Подтверждение структуры (BOS/Engulfing), фильтры волатильности, ATR и Anti-FOMO.
-- 5M: Поиск локальной манипуляции V/L-ILM и подтверждение объемом.
-- Доработки: Динамический TP (Space Filter), защита от микро-стопов, учет комиссий.
+TradeMind strategy v9.30.3
+- ATR-regime FILTER OFF (перекручен, резал все сигналы)
+- MIN_TREND_ACTIVITY_READY = 0.35 (было 0.45)
+- Space filter OFF (дублировал ATR)
+Остальное: D1-фильтр ON, volume ON, anti-FOMO ON, session ON.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,7 +20,7 @@ MAX_ILM_AGE_FOR_ENTRY = 6
 ATR_SL_MULT_SOFT = 0.8
 SL_BUFFER_PCT = 0.20
 ATR_SL_MAX_MULT = 3.0
-MIN_SL_ATR_RATIO = 0.5  # Защита от слишком узких стопов (< 0.5 ATR)
+MIN_SL_ATR_RATIO = 0.5
 
 ENABLE_SESSION_FILTER = True
 SESSION_BLOCK_START_HOUR = 2
@@ -34,7 +34,7 @@ REQUIRE_BOS_FOR_READY = True
 STRUCTURAL_SL_LOOKBACK_15M = 50
 ENTRY_TOLERANCE_PCT = 1.0
 FIXED_RR = 2.0
-FEE_SLIPPAGE_PCT = 0.12  # 0.12% поправка на комиссии и проскальзывание
+FEE_SLIPPAGE_PCT = 0.12
 
 MIN_SWEEP_DEPTH_PCT = 0.12
 MAX_SWEEP_AGE_1H = 24
@@ -54,7 +54,7 @@ MIN_BODY_RATIO_TRIGGER_5M = 0.40
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = True
 
-VOLUME_CONFIRMATION_ENABLED = True  # Включена обязательная проверка объемов
+VOLUME_CONFIRMATION_ENABLED = True
 VOLUME_CONFIRMATION_MULT = 1.2
 VOLUME_CONFIRMATION_LOOKBACK = 20
 
@@ -64,16 +64,12 @@ MAX_15M_CONFIRM_CANDLES = 24
 MAX_ILM_AGE_CANDLES_5M = 48
 
 MIN_5M_RECOVERY_RATIO = 0.15
-# Было 5.0 (~6 USDT на SOL) — фильтр «ILM рядом со sweep» фактически не работал.
-# 0.5% — стартовое значение, подбирается бэктестом (0.3–0.5).
 MIN_5M_ILM_SWEEP_DISTANCE_PCT = 0.5
 
-# Длительность свечи в мс: нужна, чтобы отсчитывать этапы цепочки
-# sweep(1H) -> подтверждение(15M) -> ILM(5M) от ЗАКРЫТИЯ предыдущей свечи.
 INTERVAL_MS_1H = 3_600_000
 INTERVAL_MS_15M = 900_000
 
-MIN_TREND_ACTIVITY_READY = 0.45
+MIN_TREND_ACTIVITY_READY = 0.35
 COUNTER_TREND_MIN_SCORE = 88
 
 FVG_TOLERANCE_PCT = 0.10
@@ -116,10 +112,10 @@ ENABLE_D1_TREND_FILTER = True
 D1_EMA_PERIOD = 50
 D1_TREND_BAND_PCT = 0.5
 
-ENABLE_ATR_REGIME_FILTER = True
+ENABLE_ATR_REGIME_FILTER = False
 ATR_REGIME_MIN = 1.08
 
-ENABLE_SPACE_FILTER = True  # Включен фильтр пространства до уровней
+ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.2
 
 
@@ -231,14 +227,6 @@ def _dist_pct(a, b):
 # -------------------------------------------------------------------------
 
 def _closed_only(candles, now_ms=None):
-    """Убирает с конца списка ещё не закрытые (формирующиеся) свечи.
-
-    Идемпотентна: в бэктесте, где в списке уже только закрытые свечи,
-    ничего не удаляется. Свечи без close_time остаются как есть.
-    В live Binance отдаёт формирующуюся свечу последней — её close_time
-    ещё в будущем. Небольшой сдвиг часов безопасен: в худшем случае
-    свеча считается закрытой на пару секунд позже.
-    """
     if not candles:
         return candles
     if now_ms is None:
@@ -457,7 +445,7 @@ def get_higher_tf_direction(c1h, c1d=None, c1w=None):
 
 
 # -------------------------------------------------------------------------
-# АНАЛИЗ УРОВНЕЙ И FVG (FAIR VALUE GAP)
+# АНАЛИЗ УРОВНЕЙ И FVG
 # -------------------------------------------------------------------------
 
 def _level_price(l):
@@ -756,8 +744,6 @@ def confirmation_15m(candles_15m, sweep, direction):
         return False, None, None, False
 
     sweep_t = _f(sweep.get("open_time"))
-    # open_time sweep-свечи 1H -> подтверждение ищем только в 15M-свечах,
-    # открывшихся ПОСЛЕ её закрытия (раньше брались свечи внутри самой sweep-свечи).
     confirm_from = sweep_t + INTERVAL_MS_1H if sweep_t is not None else None
     candidates = [c for c in candles_15m if confirm_from is None or (_t(c) is not None and _t(c) >= confirm_from)]
     candidates = candidates[-MAX_15M_CONFIRM_CANDLES:]
@@ -842,7 +828,6 @@ def _ilm_long(candles, i, sweep_lvl, sweep_ext):
         trig = candles[j]
         tc = _c(trig)
         if tc is not None and _bull(trig) and _body_ratio(trig) >= MIN_BODY_RATIO_TRIGGER_5M and tc > mh:
-            # Объемное подтверждение триггера
             if VOLUME_CONFIRMATION_ENABLED and not _has_vol_conf(candles, j):
                 continue
             trig_idx = j
@@ -928,8 +913,6 @@ def detect_5m_ilm(candles_5m, sweep, direction, conf_time=None):
     if not sweep or direction not in ("LONG", "SHORT"):
         return False, None
 
-    # conf_time — open_time подтверждающей 15M-свечи; ILM ищем только в 5M-свечах,
-    # открывшихся после её закрытия (раньше — внутри самой подтверждающей свечи).
     conf_t = _f(conf_time)
     if conf_t is not None:
         start = conf_t + INTERVAL_MS_15M
@@ -1032,7 +1015,7 @@ def calculate_stop(entry, struct_level, direction, atr=None):
         sl = level * (1 - SL_BUFFER_PCT / 100)
         dist = entry - sl
         if dist < min_noise_d:
-            return None  # Отбраковка слишком близких стопов
+            return None
         if dist < min_d:
             sl = entry - min_d
         if (entry - sl) > max_d:
@@ -1042,7 +1025,7 @@ def calculate_stop(entry, struct_level, direction, atr=None):
         sl = level * (1 + SL_BUFFER_PCT / 100)
         dist = sl - entry
         if dist < min_noise_d:
-            return None  # Отбраковка слишком близких стопов
+            return None
         if dist < min_d:
             sl = entry + min_d
         if (sl - entry) > max_d:
@@ -1064,7 +1047,7 @@ def calculate_tp_by_rr(entry, sl, direction, rr=FIXED_RR, levels=None):
         space_ok, space_r, space_target = check_space_to_target(entry, sl, direction, levels)
         if space_target is not None:
             if direction == "LONG" and space_target < standard_tp:
-                return space_target * 0.998  # Ставим TP за 0.2% до уровня
+                return space_target * 0.998
             elif direction == "SHORT" and space_target > standard_tp:
                 return space_target * 1.002
 
@@ -1079,8 +1062,6 @@ def calculate_rr(entry, sl, tp):
     reward = abs(tp - entry)
     if risk <= 0:
         return None
-
-    # Поправка на комиссию и спред
     net_risk = risk + (entry * FEE_SLIPPAGE_PCT / 100.0)
     net_reward = max(0.0, reward - (entry * FEE_SLIPPAGE_PCT / 100.0))
     return net_reward / net_risk if net_risk > 0 else 0.0
@@ -1187,7 +1168,7 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm, rr, maj_str, fvg_bonus
         else:
             score += 7
 
-    if rr is not None and rr >= FIXED_RR - 1e-6:  # допуск на float: 2R может дать 1.9999999
+    if rr is not None and rr >= FIXED_RR - 1e-6:
         score += 15
 
     score += min(10, maj_str / 10.0)
@@ -1210,7 +1191,7 @@ def _apply_ready_promote(result):
         if score < sc_min or trend < tr_min or (need_bos and not bos):
             continue
         result["stage"] = "READY"
-        result["reason"] = f"v9.30.2 promote: score={score} trend={trend:.2f} bos={bos}"
+        result["reason"] = f"v9.30.3 promote: score={score} trend={trend:.2f} bos={bos}"
         result["_v910_promoted"] = True
         return result
     return result
@@ -1254,6 +1235,7 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction, ctx_dir, d1_contex
                 except Exception:
                     pass
 
+    # v9.30.3: ATR-regime filter OFF (резал все сигналы при низкой волатильности)
     if ENABLE_ATR_REGIME_FILTER:
         atr_fast, atr_slow = calculate_atr(c1h, 14), calculate_atr(c1h, 50)
         if atr_fast is not None and atr_slow is not None and atr_slow > 0:
@@ -1399,11 +1381,6 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction, ctx_dir, d1_contex
         "tp_reason": f"Dynamic TP / Space Filter (Target {round(tp, 4)})",
     })
 
-    # Для скоринга берём RR ДО комиссий. result["rr"] — net-значение
-    # (calculate_rr), и при TP ровно на FIXED_RR оно математически < FIXED_RR
-    # (1.2–1.9 в зависимости от стопа), поэтому +15 баллов за RR никогда не
-    # начислялись: максимум 85 при порогах 88–93 -> ни одной сделки в бэктесте.
-    # Если Space Filter сократил TP, gross-RR < FIXED_RR и баллы не даются.
     _risk_g = abs(entry - sl)
     rr = (abs(tp - entry) / _risk_g) if _risk_g > 0 else None
 
@@ -1464,8 +1441,6 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction, ctx_dir, d1_contex
 def analyze(candles_1h, candles_15m, candles_5m, current_price, major_levels=None, sweep=None, order_flow=None, candles_1m=None, d1_context=None, fvgs=None, symbol=None):
     price = _f(current_price)
 
-    # Анализ только по закрытым свечам: live и бэктест должны видеть одно и то же.
-    # D1 не трогаем — get_d1_trend_ema сам отбрасывает последнюю свечу.
     candles_1h = _closed_only(candles_1h)
     candles_15m = _closed_only(candles_15m)
     candles_5m = _closed_only(candles_5m)
