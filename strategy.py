@@ -1187,7 +1187,7 @@ def _score(direction, ctx_dir, sweep, conf_str, bos, ilm, rr, maj_str, fvg_bonus
         else:
             score += 7
 
-    if rr is not None and rr >= FIXED_RR:
+    if rr is not None and rr >= FIXED_RR - 1e-6:  # допуск на float: 2R может дать 1.9999999
         score += 15
 
     score += min(10, maj_str / 10.0)
@@ -1399,7 +1399,13 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction, ctx_dir, d1_contex
         "tp_reason": f"Dynamic TP / Space Filter (Target {round(tp, 4)})",
     })
 
-    rr = _f(result.get("rr"))
+    # Для скоринга берём RR ДО комиссий. result["rr"] — net-значение
+    # (calculate_rr), и при TP ровно на FIXED_RR оно математически < FIXED_RR
+    # (1.2–1.9 в зависимости от стопа), поэтому +15 баллов за RR никогда не
+    # начислялись: максимум 85 при порогах 88–93 -> ни одной сделки в бэктесте.
+    # Если Space Filter сократил TP, gross-RR < FIXED_RR и баллы не даются.
+    _risk_g = abs(entry - sl)
+    rr = (abs(tp - entry) / _risk_g) if _risk_g > 0 else None
 
     try:
         sdp = abs(entry - sl) / entry * 100
