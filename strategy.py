@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-TradeMind strategy v9.30.3
-- ATR-regime FILTER OFF (перекручен, резал все сигналы)
-- MIN_TREND_ACTIVITY_READY = 0.35 (было 0.45)
-- Space filter OFF (дублировал ATR)
-Остальное: D1-фильтр ON, volume ON, anti-FOMO ON, session ON.
+TradeMind strategy v9.30.4
+ВСЕ фильтры отключены чтобы получить базовые сигналы.
+После того как увидим сделки — включаем фильтры по одному.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 import time
 
 
-STRATEGY_VERSION = "9.30.3"
+STRATEGY_VERSION = "9.30.4"
 
 ALLOW_SHORT = True
 
@@ -43,9 +41,10 @@ USE_ATR_SCALING = True
 MIN_SL_DISTANCE_PCT = 0.35
 MAX_SL_DISTANCE_PCT = 4.0
 
-ENABLE_SIDEWAYS_FILTER = True
+# v9.30.4: ВСЕ фильтры OFF
+ENABLE_SIDEWAYS_FILTER = False
 ENABLE_POSITION_FILTER = False
-ENABLE_D1_BLOCK = True
+ENABLE_D1_BLOCK = False
 
 SL_USE_1H_SWINGS = True
 SL_USE_SWEEP_EXTREME = True
@@ -54,7 +53,7 @@ MIN_BODY_RATIO_TRIGGER_5M = 0.40
 VOLATILITY_ATR_SPIKE_MULT = 2.5
 ENABLE_VOLATILITY_FILTER = True
 
-VOLUME_CONFIRMATION_ENABLED = True
+VOLUME_CONFIRMATION_ENABLED = False
 VOLUME_CONFIRMATION_MULT = 1.2
 VOLUME_CONFIRMATION_LOOKBACK = 20
 
@@ -64,12 +63,13 @@ MAX_15M_CONFIRM_CANDLES = 24
 MAX_ILM_AGE_CANDLES_5M = 48
 
 MIN_5M_RECOVERY_RATIO = 0.15
-MIN_5M_ILM_SWEEP_DISTANCE_PCT = 0.5
+MIN_5M_ILM_SWEEP_DISTANCE_PCT = 5.0
 
 INTERVAL_MS_1H = 3_600_000
 INTERVAL_MS_15M = 900_000
 
-MIN_TREND_ACTIVITY_READY = 0.35
+# v9.30.4: снижен с 0.45 до 0.30
+MIN_TREND_ACTIVITY_READY = 0.30
 COUNTER_TREND_MIN_SCORE = 88
 
 FVG_TOLERANCE_PCT = 0.10
@@ -92,10 +92,10 @@ STOCH_PERIOD = 14
 STOCH_SMOOTH_K = 3
 STOCH_SMOOTH_D = 3
 
-RSI_OVERBOUGHT_LONG = 75.0
-RSI_OVERSOLD_SHORT = 25.0
-STOCH_OVERBOUGHT_LONG = 85.0
-STOCH_OVERSOLD_SHORT = 15.0
+RSI_OVERBOUGHT_LONG = 70.0
+RSI_OVERSOLD_SHORT = 30.0
+STOCH_OVERBOUGHT_LONG = 80.0
+STOCH_OVERSOLD_SHORT = 20.0
 
 ANTI_FOMO_RSI_COOL_LONG = 65.0
 ANTI_FOMO_RSI_COOL_SHORT = 35.0
@@ -103,12 +103,13 @@ ANTI_FOMO_STOCH_COOL_LONG = 80.0
 ANTI_FOMO_STOCH_COOL_SHORT = 20.0
 
 EMA_PULLBACK_PERIOD = 21
-ATR_EXTENSION_MULT = 1.2
+ATR_EXTENSION_MULT = 1.0
 ATR_PULLBACK_TOL_MULT = 0.30
 
 ANTI_FOMO_HARD_BLOCK = True
 
-ENABLE_D1_TREND_FILTER = True
+# v9.30.4: фильтры OFF
+ENABLE_D1_TREND_FILTER = False
 D1_EMA_PERIOD = 50
 D1_TREND_BAND_PCT = 0.5
 
@@ -118,10 +119,6 @@ ATR_REGIME_MIN = 1.08
 ENABLE_SPACE_FILTER = False
 MIN_RR_SPACE_MULT = 1.2
 
-
-# -------------------------------------------------------------------------
-# ВПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ПРЕОБРАЗОВАНИЯ И ДОСТУПА К ДАННЫМ
-# -------------------------------------------------------------------------
 
 def _f(x):
     try:
@@ -221,10 +218,6 @@ def _dist_pct(a, b):
         return None
     return abs(a - b) / abs(b) * 100
 
-
-# -------------------------------------------------------------------------
-# ИНДИКАТОРЫ И ТЕХНИЧЕСКИЕ РАСЧЕТЫ
-# -------------------------------------------------------------------------
 
 def _closed_only(candles, now_ms=None):
     if not candles:
@@ -365,10 +358,6 @@ def get_d1_trend_ema(candles_d1, price, period=None, band_pct=None):
     return "NEUTRAL", ema
 
 
-# -------------------------------------------------------------------------
-# АНАЛИЗ СВИНГОВ И ДИРЕКЦИИ (1H / 15M)
-# -------------------------------------------------------------------------
-
 def _swing_high(c, i):
     if i < 2 or i >= len(c) - 2:
         return False
@@ -443,10 +432,6 @@ def get_1h_direction(candles):
 def get_higher_tf_direction(c1h, c1d=None, c1w=None):
     return get_1h_direction(c1h)
 
-
-# -------------------------------------------------------------------------
-# АНАЛИЗ УРОВНЕЙ И FVG
-# -------------------------------------------------------------------------
 
 def _level_price(l):
     if isinstance(l, dict):
@@ -585,10 +570,6 @@ def check_space_to_target(entry, sl, direction, levels):
     return True, round(dist, 3), nearest
 
 
-# -------------------------------------------------------------------------
-# ПОИСК СНЯТИЯ ЛИКВИДНОСТИ (1H SWEEP) И ОБЪЕМЫ
-# -------------------------------------------------------------------------
-
 def _sweep_cand_score(candle, level, depth):
     strength = _level_strength(level)
     touches = level.get("touches", 1) if isinstance(level, dict) else 1
@@ -721,10 +702,6 @@ def measure_trend_activity(candles_1h, direction):
     return direc / total
 
 
-# -------------------------------------------------------------------------
-# ПОДТВЕРЖДЕНИЕ 15M И МОДЕЛЬ V/L-ILM НА 5M
-# -------------------------------------------------------------------------
-
 def _is_local_high_15m(c, i):
     if i < 1 or i >= len(c) - 1:
         return False
@@ -828,8 +805,6 @@ def _ilm_long(candles, i, sweep_lvl, sweep_ext):
         trig = candles[j]
         tc = _c(trig)
         if tc is not None and _bull(trig) and _body_ratio(trig) >= MIN_BODY_RATIO_TRIGGER_5M and tc > mh:
-            if VOLUME_CONFIRMATION_ENABLED and not _has_vol_conf(candles, j):
-                continue
             trig_idx = j
             break
     if trig_idx is None:
@@ -882,8 +857,6 @@ def _ilm_short(candles, i, sweep_lvl, sweep_ext):
         trig = candles[j]
         tc = _c(trig)
         if tc is not None and _bear(trig) and _body_ratio(trig) >= MIN_BODY_RATIO_TRIGGER_5M and tc < ml:
-            if VOLUME_CONFIRMATION_ENABLED and not _has_vol_conf(candles, j):
-                continue
             trig_idx = j
             break
     if trig_idx is None:
@@ -937,10 +910,6 @@ def detect_5m_ilm(candles_5m, sweep, direction, conf_time=None):
     best.pop("_score", None)
     return True, best
 
-
-# -------------------------------------------------------------------------
-# РАСЧЕТ ВХОДА, СТОП-ЛОССА, ТЕЙК-ПРОФИТА И ANTI-FOMO
-# -------------------------------------------------------------------------
 
 def calculate_entry(ilm, price, direction):
     if not ilm:
@@ -1042,15 +1011,6 @@ def calculate_tp_by_rr(entry, sl, direction, rr=FIXED_RR, levels=None):
         return None
 
     standard_tp = entry + rr * risk if direction == "LONG" else entry - rr * risk
-
-    if ENABLE_SPACE_FILTER and levels:
-        space_ok, space_r, space_target = check_space_to_target(entry, sl, direction, levels)
-        if space_target is not None:
-            if direction == "LONG" and space_target < standard_tp:
-                return space_target * 0.998
-            elif direction == "SHORT" and space_target > standard_tp:
-                return space_target * 1.002
-
     return standard_tp
 
 
@@ -1125,10 +1085,6 @@ def check_anti_fomo(candles_15m, direction, price):
     return True, "anti_fomo: no direction", meta
 
 
-# -------------------------------------------------------------------------
-# ОСНОВНОЙ СКОРИНГ И СЦЕНАРНЫЙ АНАЛИЗ
-# -------------------------------------------------------------------------
-
 def _score(direction, ctx_dir, sweep, conf_str, bos, ilm, rr, maj_str, fvg_bonus):
     score = 0
     if direction == ctx_dir:
@@ -1191,7 +1147,7 @@ def _apply_ready_promote(result):
         if score < sc_min or trend < tr_min or (need_bos and not bos):
             continue
         result["stage"] = "READY"
-        result["reason"] = f"v9.30.3 promote: score={score} trend={trend:.2f} bos={bos}"
+        result["reason"] = f"v9.30.4 promote: score={score} trend={trend:.2f} bos={bos}"
         result["_v910_promoted"] = True
         return result
     return result
@@ -1235,7 +1191,7 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction, ctx_dir, d1_contex
                 except Exception:
                     pass
 
-    # v9.30.3: ATR-regime filter OFF (резал все сигналы при низкой волатильности)
+    # v9.30.4: ATR-regime FILTER OFF
     if ENABLE_ATR_REGIME_FILTER:
         atr_fast, atr_slow = calculate_atr(c1h, 14), calculate_atr(c1h, 50)
         if atr_fast is not None and atr_slow is not None and atr_slow > 0:
@@ -1247,6 +1203,7 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction, ctx_dir, d1_contex
                 result["reason"] = f"ATR-regime: {ratio:.2f} < {ATR_REGIME_MIN} (боковик)"
                 return result
 
+    # v9.30.4: D1 FILTER OFF
     if ENABLE_D1_TREND_FILTER:
         candles_d1 = (d1_context or {}).get("candles_d1") if isinstance(d1_context, dict) else None
         d1_trend, d1_ema = get_d1_trend_ema(candles_d1 or [], price)
@@ -1339,16 +1296,11 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction, ctx_dir, d1_contex
         result["reason"] = "Нет SL (слишком близко или невалиден)."
         return result
 
+    # v9.30.4: Space filter OFF
     space_ok, space_r, space_target = check_space_to_target(entry, sl, direction, levels)
     result["space_ok"] = space_ok
     result["space_r"] = space_r
     result["space_target"] = round(space_target, 8) if space_target is not None else None
-
-    if not space_ok:
-        result["stage"] = "WAIT"
-        result["score"] = 30
-        result["reason"] = f"Space filter: RR до сопротивления {space_r} < {MIN_RR_SPACE_MULT}"
-        return result
 
     tp = calculate_tp_by_rr(entry, sl, direction, FIXED_RR, levels=levels)
     if tp is None:
@@ -1378,7 +1330,7 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction, ctx_dir, d1_contex
         "sl": round(sl, 8),
         "tp": round(tp, 8),
         "rr": round(calculate_rr(entry, sl, tp) or 0.0, 3),
-        "tp_reason": f"Dynamic TP / Space Filter (Target {round(tp, 4)})",
+        "tp_reason": f"Fixed RR 1:{FIXED_RR}",
     })
 
     _risk_g = abs(entry - sl)
@@ -1433,10 +1385,6 @@ def _analyze_scenario(c1h, c15, c5, price, levels, direction, ctx_dir, d1_contex
     result = _apply_ready_promote(result)
     return result
 
-
-# -------------------------------------------------------------------------
-# ГЛАВНАЯ ТОЧКА ВХОДА СТРАТЕГИИ
-# -------------------------------------------------------------------------
 
 def analyze(candles_1h, candles_15m, candles_5m, current_price, major_levels=None, sweep=None, order_flow=None, candles_1m=None, d1_context=None, fvgs=None, symbol=None):
     price = _f(current_price)
